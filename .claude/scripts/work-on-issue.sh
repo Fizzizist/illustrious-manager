@@ -3,7 +3,7 @@ set -euo pipefail
 
 ISSUE_NUMBER="${1:?Usage: work-on-issue.sh <issue-number>}"
 BASE_BRANCH="${MOE_BRANCH:-trunk}"
-LOCK_DIR="/tmp/moe-code-review.lock"
+LOCK_DIR="/tmp/illustrious-manager-code-review.lock"
 LOG_FILE="/tmp/work-on-issue-${ISSUE_NUMBER}.log"
 
 # Generate a deterministic session ID upfront so we don't need to parse it from output
@@ -183,7 +183,7 @@ phase_implement() {
   git pull
 
   # Create worktree outside the repo to avoid polluting the working tree
-  WORKTREE_PATH="${HOME}/.config/moe/worktrees/issue-${ISSUE_NUMBER}"
+  WORKTREE_PATH="${HOME}/.config/illustrious-manager/worktrees/issue-${ISSUE_NUMBER}"
   mkdir -p "$(dirname "$WORKTREE_PATH")"
   echo "Creating worktree at ${WORKTREE_PATH} on branch ${branch_name}..."
   git worktree add -b "$branch_name" "$WORKTREE_PATH" "$BASE_BRANCH"
