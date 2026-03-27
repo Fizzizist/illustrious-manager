@@ -180,6 +180,7 @@ Config file values are loaded first. CLI flags override any config file value.
 - No args → REPL
 - `PROMPT` arg → REPL, with prompt sent as the first message
 - `--single-shot "prompt"` → stdout streaming, exit on completion
+- `--single-shot` without `PROMPT` → error with usage hint
 
 ## Dependencies
 
