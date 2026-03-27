@@ -13,7 +13,7 @@ pub enum Role {
 }
 
 /// A message in the conversation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -52,8 +52,10 @@ mod tests {
         let user_role = Role::User;
         let assistant_role = Role::Assistant;
 
-        let user_json = serde_json::to_string(&user_role).unwrap();
-        let assistant_json = serde_json::to_string(&assistant_role).unwrap();
+        let user_json =
+            serde_json::to_string(&user_role).expect("Role::User should serialize to JSON");
+        let assistant_json = serde_json::to_string(&assistant_role)
+            .expect("Role::Assistant should serialize to JSON");
 
         assert_eq!(user_json, r#""user""#);
         assert_eq!(assistant_json, r#""assistant""#);
@@ -64,77 +66,28 @@ mod tests {
         let user_json = r#""user""#;
         let assistant_json = r#""assistant""#;
 
-        let user_role: Role = serde_json::from_str(user_json).unwrap();
-        let assistant_role: Role = serde_json::from_str(assistant_json).unwrap();
+        let user_role: Role =
+            serde_json::from_str(user_json).expect("'user' should deserialize to Role::User");
+        let assistant_role: Role = serde_json::from_str(assistant_json)
+            .expect("'assistant' should deserialize to Role::Assistant");
 
-        assert!(matches!(user_role, Role::User));
-        assert!(matches!(assistant_role, Role::Assistant));
+        assert_eq!(user_role, Role::User);
+        assert_eq!(assistant_role, Role::Assistant);
     }
 
     #[test]
-    fn message_can_be_created() {
-        let msg = Message {
+    fn message_roundtrips_through_serde() {
+        let original = Message {
             role: Role::User,
-            content: "Hello".to_string(),
+            content: "Hello, world!".to_string(),
         };
 
-        assert_eq!(msg.content, "Hello");
-        assert!(matches!(msg.role, Role::User));
-    }
+        let json = serde_json::to_string(&original).expect("Message should serialize to JSON");
+        let deserialized: Message =
+            serde_json::from_str(&json).expect("JSON should deserialize back to Message");
 
-    #[test]
-    fn stream_event_has_text_delta_variant() {
-        let event = StreamEvent::TextDelta("test".to_string());
-
-        match event {
-            StreamEvent::TextDelta(text) => assert_eq!(text, "test"),
-            _ => panic!("Expected TextDelta variant"),
-        }
-    }
-
-    #[test]
-    fn stream_event_has_done_variant() {
-        let event = StreamEvent::Done;
-
-        assert!(matches!(event, StreamEvent::Done));
-    }
-
-    #[test]
-    fn agent_event_has_token_received_variant() {
-        let event = AgentEvent::TokenReceived("test".to_string());
-
-        match event {
-            AgentEvent::TokenReceived(text) => assert_eq!(text, "test"),
-            _ => panic!("Expected TokenReceived variant"),
-        }
-    }
-
-    #[test]
-    fn agent_event_has_response_complete_variant() {
-        let event = AgentEvent::ResponseComplete("final text".to_string());
-
-        match event {
-            AgentEvent::ResponseComplete(text) => assert_eq!(text, "final text"),
-            _ => panic!("Expected ResponseComplete variant"),
-        }
-    }
-
-    #[test]
-    fn agent_event_has_error_variant() {
-        let event = AgentEvent::Error("test error".to_string());
-
-        match event {
-            AgentEvent::Error(msg) => assert_eq!(msg, "test error"),
-            _ => panic!("Expected Error variant"),
-        }
-    }
-
-    #[test]
-    fn request_config_can_be_created() {
-        let config = RequestConfig {
-            model: "claude-sonnet-4-20250514".to_string(),
-        };
-
-        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(deserialized, original);
+        assert_eq!(deserialized.content, "Hello, world!");
+        assert_eq!(deserialized.role, Role::User);
     }
 }
