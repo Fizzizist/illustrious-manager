@@ -91,11 +91,17 @@ pub fn apply_overrides(
 }
 
 /// Validate that the config has all required fields.
-pub fn validate(config: &AppConfig) -> Result<()> {
+///
+/// `config_path`: The path that was actually used to load the config, for accurate error messages.
+/// Pass `None` if the default path was used.
+pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
     if config.vertex.project.is_empty() {
-        let path = default_config_path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "~/.config/illustrious-manager/config.toml".to_string());
+        let path = match config_path {
+            Some(p) => p.display().to_string(),
+            None => default_config_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "~/.config/illustrious-manager/config.toml".to_string()),
+        };
         bail!(
             "GCP project ID is required. Set it in your config file at:\n  {}\n\nOr pass --project <PROJECT> on the command line.",
             path
