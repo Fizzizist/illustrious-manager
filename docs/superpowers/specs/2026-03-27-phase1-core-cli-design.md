@@ -8,32 +8,14 @@ Build a CLI tool (`illustrious-manager`) that connects to Claude on Vertex AI, s
 
 Three decoupled layers:
 
-```
-┌─────────────────────────────────────────────┐
-│                  CLI (clap)                  │
-│          parse args, load config             │
-│       decide: REPL vs single-shot            │
-└──────────┬──────────────────┬───────────────┘
-           │                  │
-    ┌──────▼──────┐   ┌──────▼──────┐
-    │  Stdout     │   │  Ratatui    │
-    │  Frontend   │   │  Frontend   │
-    └──────┬──────┘   └──────┬──────┘
-           │                  │
-           └────────┬─────────┘
-                    │ AgentEvent stream
-                    │ + input channel
-            ┌───────▼────────┐
-            │   Agent Core   │
-            │  (conversation │
-            │   state, msg   │
-            │   history)     │
-            └───────┬────────┘
-                    │ LlmBackend trait
-            ┌───────▼────────┐
-            │  Vertex AI +   │
-            │  Claude impl   │
-            └────────────────┘
+```mermaid
+graph TD
+    CLI["CLI (clap)<br/>parse args, load config<br/>decide: REPL vs single-shot"]
+    CLI --> Stdout["Stdout Frontend"]
+    CLI --> Ratatui["Ratatui Frontend"]
+    Stdout -->|"AgentEvent stream<br/>+ input channel"| Agent["Agent Core<br/>(conversation state,<br/>message history)"]
+    Ratatui -->|"AgentEvent stream<br/>+ input channel"| Agent
+    Agent -->|"LlmBackend trait"| Vertex["Vertex AI +<br/>Claude impl"]
 ```
 
 ### Layer 1: LLM Backend
