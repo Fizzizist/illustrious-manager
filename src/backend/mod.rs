@@ -5,10 +5,6 @@ use async_trait::async_trait;
 
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-/// Trait for LLM provider backends.
-///
-/// Implementations handle authentication, request formatting, and
-/// response streaming for a specific LLM provider.
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn send_message(
@@ -75,6 +71,11 @@ mod tests {
         assert!(
             matches!(second, StreamEvent::Done),
             "expected Done, got {second:?}"
+        );
+
+        assert!(
+            stream.next().await.is_none(),
+            "stream should be exhausted after Done"
         );
     }
 }
