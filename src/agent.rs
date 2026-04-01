@@ -1,12 +1,15 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use futures::StreamExt;
+use futures::channel::mpsc;
 
 use crate::backend::LlmBackend;
-use crate::types::*;
+use crate::types::{AgentEvent, BoxStream, Message, RequestConfig, Role, StreamEvent};
 
 pub struct Agent {
     backend: Box<dyn LlmBackend>,
-    history: Vec<Message>,
+    history: Arc<Mutex<Vec<Message>>>,
     config: RequestConfig,
 }
 
@@ -14,50 +17,71 @@ impl Agent {
     pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig) -> Self {
         Self {
             backend,
-            history: Vec::new(),
+            history: Arc::new(Mutex::new(Vec::new())),
             config,
         }
     }
 
-    pub fn history(&self) -> &[Message] {
-        &self.history
+    pub fn history(&self) -> Vec<Message> {
+        self.history.lock().expect("history mutex poisoned").clone()
     }
 
     pub async fn send(&mut self, input: String) -> Result<BoxStream<AgentEvent>> {
-        self.history.push(Message {
-            role: Role::User,
-            content: input,
-        });
+        self.history
+            .lock()
+            .expect("history mutex poisoned")
+            .push(Message {
+                role: Role::User,
+                content: input,
+            });
 
-        let mut backend_stream = self
+        let history_snapshot = self.history.lock().expect("history mutex poisoned").clone();
+
+        let backend_stream = match self
             .backend
-            .send_message(&self.history, &self.config)
-            .await?;
+            .send_message(&history_snapshot, &self.config)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                self.history.lock().expect("history mutex poisoned").pop();
+                return Err(e);
+            }
+        };
 
-        let mut events = Vec::new();
-        let mut accumulated = String::new();
+        let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
+        let history_arc = Arc::clone(&self.history);
 
-        while let Some(result) = backend_stream.next().await {
-            match result {
-                Ok(StreamEvent::TextDelta(text)) => {
-                    accumulated.push_str(&text);
-                    events.push(AgentEvent::TokenReceived(text));
-                }
-                Ok(StreamEvent::Done) => {
-                    self.history.push(Message {
-                        role: Role::Assistant,
-                        content: accumulated.clone(),
-                    });
-                    events.push(AgentEvent::ResponseComplete(accumulated));
-                    break;
-                }
-                Err(e) => {
-                    events.push(AgentEvent::Error(e.to_string()));
-                    break;
+        tokio::spawn(async move {
+            let mut accumulated = String::new();
+            let mut backend_stream = backend_stream;
+
+            while let Some(result) = backend_stream.next().await {
+                match result {
+                    Ok(StreamEvent::TextDelta(text)) => {
+                        accumulated.push_str(&text);
+                        let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
+                    }
+                    Ok(StreamEvent::Done) => {
+                        history_arc
+                            .lock()
+                            .expect("history mutex poisoned")
+                            .push(Message {
+                                role: Role::Assistant,
+                                content: accumulated.clone(),
+                            });
+                        let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(accumulated));
+                        break;
+                    }
+                    Err(e) => {
+                        history_arc.lock().expect("history mutex poisoned").pop();
+                        let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
+                        break;
+                    }
                 }
             }
-        }
+        });
 
-        Ok(Box::pin(futures::stream::iter(events)))
+        Ok(Box::pin(event_rx))
     }
 }
