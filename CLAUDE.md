@@ -17,6 +17,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 - In a case where something needs to be unwrapped and it is _logically impossible_ for a panic to occur, the use of `.expect()` with an informative message is permitted.
 - Always run `cargo fmt` before committing code.
 - Always run `cargo clippy` before committing code.
+- Keep code comments to a minimum. Only comment in cases where something is unable to be gleaned from the code itself.
 
 ### Testing
 
