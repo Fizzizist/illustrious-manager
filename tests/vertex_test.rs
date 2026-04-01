@@ -42,3 +42,10 @@ fn test_parse_sse_ping_ignored() {
     let event = illustrious_manager::backend::vertex::parse_sse_data(data).unwrap();
     assert!(event.is_none(), "ping should be ignored");
 }
+
+#[test]
+fn test_parse_sse_malformed_json_returns_err() {
+    let data = "this is not json";
+    let result = illustrious_manager::backend::vertex::parse_sse_data(data);
+    assert!(result.is_err(), "malformed JSON should return Err");
+}
