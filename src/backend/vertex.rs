@@ -90,7 +90,10 @@ impl LlmBackend for VertexBackend {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read response body>"));
             anyhow::bail!("Vertex AI returned {}: {}", status, body);
         }
 
@@ -156,6 +159,32 @@ fn extract_sse_data(event_text: &str) -> Option<&str> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_sse_data_returns_json_after_data_prefix() {
+        let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}";
+        assert_eq!(
+            extract_sse_data(event),
+            Some("{\"type\":\"content_block_delta\"}")
+        );
+    }
+
+    #[test]
+    fn extract_sse_data_returns_none_when_no_data_line() {
+        let event = "event: content_block_delta\n";
+        assert!(extract_sse_data(event).is_none());
+    }
+
+    #[test]
+    fn extract_sse_data_returns_first_data_line_when_multiple_present() {
+        let event = "data: first\ndata: second";
+        assert_eq!(extract_sse_data(event), Some("first"));
+    }
 }
 
 /// Parse an SSE data payload JSON into a StreamEvent.
