@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
 use crate::types::AgentEvent;
@@ -22,8 +23,32 @@ pub enum AppState {
     Streaming,
 }
 
+pub enum ConversationRole {
+    User,
+    Assistant,
+    Error,
+}
+
+impl ConversationRole {
+    fn display_label(&self) -> &'static str {
+        match self {
+            ConversationRole::User => "You",
+            ConversationRole::Assistant => "Assistant",
+            ConversationRole::Error => "Error",
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            ConversationRole::User => Color::Green,
+            ConversationRole::Assistant => Color::Blue,
+            ConversationRole::Error => Color::Red,
+        }
+    }
+}
+
 pub struct ConversationEntry {
-    pub role: String,
+    pub role: ConversationRole,
     pub content: String,
 }
 
@@ -47,14 +72,9 @@ impl App {
     fn conversation_lines(&self) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         for entry in &self.conversation {
-            let role_color = if entry.role == "You" {
-                Color::Green
-            } else {
-                Color::Blue
-            };
             lines.push(Line::from(Span::styled(
-                format!("{}:", entry.role),
-                Style::default().fg(role_color),
+                format!("{}:", entry.role.display_label()),
+                Style::default().fg(entry.role.color()),
             )));
             for line in entry.content.lines() {
                 lines.push(Line::from(format!("  {line}")));
@@ -82,7 +102,7 @@ impl Default for App {
     }
 }
 
-/// Render the app to a frame. Extracted for snapshot testing.
+/// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -90,9 +110,14 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .split(frame.area());
 
     let conv_lines = app.conversation_lines();
+    let total_lines = conv_lines.len() as u16;
+    let visible_height = chunks[0].height.saturating_sub(2);
+    let scroll = total_lines.saturating_sub(visible_height);
+
     let conversation = Paragraph::new(conv_lines)
         .block(Block::default().borders(Borders::ALL).title("Conversation"))
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(conversation, chunks[0]);
 
     let input_title = match app.state {
@@ -102,6 +127,11 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
     let input = Paragraph::new(app.input.as_str())
         .block(Block::default().borders(Borders::ALL).title(input_title));
     frame.render_widget(input, chunks[1]);
+
+    if matches!(app.state, AppState::Input) {
+        let cursor_x = chunks[1].x + u16::try_from(app.input.len()).unwrap_or(u16::MAX) + 1;
+        frame.set_cursor_position((cursor_x, chunks[1].y + 1));
+    }
 }
 
 /// Run the TUI REPL. If `initial_prompt` is provided, it's sent immediately.
@@ -127,47 +157,16 @@ async fn run_app(
     initial_prompt: Option<String>,
 ) -> Result<()> {
     let mut app = App::new();
-
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let mut stream_task: Option<JoinHandle<()>> = None;
 
     if let Some(prompt) = initial_prompt {
         app.input = prompt;
-        submit_message(&mut app, agent, &event_tx).await?;
+        stream_task = Some(submit_message(&mut app, agent, &event_tx).await?);
     }
 
     loop {
-        terminal.draw(|frame| {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(3)])
-                .split(frame.area());
-
-            let conv_lines = app.conversation_lines();
-            let total_lines = conv_lines.len() as u16;
-            let visible_height = chunks[0].height.saturating_sub(2);
-            let scroll = total_lines.saturating_sub(visible_height);
-
-            let conversation = Paragraph::new(conv_lines)
-                .block(Block::default().borders(Borders::ALL).title("Conversation"))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0));
-            frame.render_widget(conversation, chunks[0]);
-
-            let input_title = match app.state {
-                AppState::Input => "Input (Enter to send, Ctrl+C to quit)",
-                AppState::Streaming => "Streaming...",
-            };
-            let input = Paragraph::new(app.input.as_str())
-                .block(Block::default().borders(Borders::ALL).title(input_title));
-            frame.render_widget(input, chunks[1]);
-
-            if matches!(app.state, AppState::Input) {
-                frame.set_cursor_position((
-                    chunks[1].x + app.input.len() as u16 + 1,
-                    chunks[1].y + 1,
-                ));
-            }
-        })?;
+        terminal.draw(|frame| render_app(&app, frame))?;
 
         match app.state {
             AppState::Input => {
@@ -175,33 +174,37 @@ async fn run_app(
                     && let Event::Key(key) = event::read()?
                 {
                     match key {
-                            KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } => break,
-                            KeyEvent {
-                                code: KeyCode::Enter,
-                                ..
-                            } => {
-                                if !app.input.trim().is_empty() {
-                                    submit_message(&mut app, agent, &event_tx).await?;
-                                }
-                            }
-                            KeyEvent {
-                                code: KeyCode::Char(c),
-                                ..
-                            } => {
-                                app.input.push(c);
-                            }
-                            KeyEvent {
-                                code: KeyCode::Backspace,
-                                ..
-                            } => {
-                                app.input.pop();
-                            }
-                            _ => {}
+                        KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
                         }
+                        | KeyEvent {
+                            code: KeyCode::Esc, ..
+                        } => break,
+                        KeyEvent {
+                            code: KeyCode::Enter,
+                            ..
+                        } => {
+                            if !app.input.trim().is_empty() {
+                                stream_task =
+                                    Some(submit_message(&mut app, agent, &event_tx).await?);
+                            }
+                        }
+                        KeyEvent {
+                            code: KeyCode::Char(c),
+                            ..
+                        } => {
+                            app.input.push(c);
+                        }
+                        KeyEvent {
+                            code: KeyCode::Backspace,
+                            ..
+                        } => {
+                            app.input.pop();
+                        }
+                        _ => {}
+                    }
                 }
             }
             AppState::Streaming => {
@@ -213,7 +216,7 @@ async fn run_app(
                             }
                             AgentEvent::ResponseComplete(full) => {
                                 app.conversation.push(ConversationEntry {
-                                    role: "Assistant".to_string(),
+                                    role: ConversationRole::Assistant,
                                     content: full,
                                 });
                                 app.current_response.clear();
@@ -221,7 +224,7 @@ async fn run_app(
                             }
                             AgentEvent::Error(msg) => {
                                 app.conversation.push(ConversationEntry {
-                                    role: "Error".to_string(),
+                                    role: ConversationRole::Error,
                                     content: msg,
                                 });
                                 app.current_response.clear();
@@ -245,6 +248,10 @@ async fn run_app(
         }
     }
 
+    if let Some(handle) = stream_task {
+        handle.abort();
+    }
+
     Ok(())
 }
 
@@ -252,11 +259,11 @@ async fn submit_message(
     app: &mut App,
     agent: &mut Agent,
     event_tx: &mpsc::Sender<AgentEvent>,
-) -> Result<()> {
+) -> Result<JoinHandle<()>> {
     let input = app.input.drain(..).collect::<String>();
 
     app.conversation.push(ConversationEntry {
-        role: "You".to_string(),
+        role: ConversationRole::User,
         content: input.clone(),
     });
 
@@ -265,7 +272,7 @@ async fn submit_message(
     let mut stream = agent.send(input).await?;
     let tx = event_tx.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         while let Some(event) = stream.next().await {
             if tx.send(event).await.is_err() {
                 break;
@@ -273,5 +280,5 @@ async fn submit_message(
         }
     });
 
-    Ok(())
+    Ok(handle)
 }
