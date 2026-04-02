@@ -23,6 +23,7 @@ pub struct Message {
 #[derive(Debug, Clone)]
 pub struct RequestConfig {
     pub model: String,
+    pub max_tokens: u32,
 }
 
 /// Events emitted by the LLM backend during streaming
