@@ -147,7 +147,6 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> serde_jso
 
     serde_json::json!({
         "anthropic_version": ANTHROPIC_VERSION,
-        "model": config.model,
         "max_tokens": config.max_tokens,
         "stream": true,
         "messages": messages_json,
@@ -176,8 +175,20 @@ mod tests {
         };
         let body = build_request_body(&[], &config);
         assert_eq!(body["max_tokens"], 32768);
-        assert_eq!(body["model"], "claude-test");
         assert_eq!(body["anthropic_version"], ANTHROPIC_VERSION);
+    }
+
+    #[test]
+    fn build_request_body_omits_model_field_for_vertex_ai() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+        };
+        let body = build_request_body(&[], &config);
+        assert!(
+            body.get("model").is_none() || body["model"].is_null(),
+            "model must not be in the request body; Vertex AI embeds it in the URL"
+        );
     }
 
     #[test]
