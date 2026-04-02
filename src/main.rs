@@ -12,6 +12,8 @@ use agent::Agent;
 use backend::vertex::VertexBackend;
 use types::RequestConfig;
 
+const DEFAULT_MAX_TOKENS: u32 = 8192;
+
 #[derive(Parser)]
 #[command(name = "illustrious-manager")]
 #[command(about = "A TUI agent application for Claude on Vertex AI")]
@@ -40,22 +42,31 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-fn validate_cli(cli: &Cli) -> Result<()> {
-    if cli.single_shot && cli.prompt.is_none() {
-        anyhow::bail!(
-            "--single-shot requires a prompt argument.\n\nUsage: illustrious-manager --single-shot \"your prompt here\""
-        );
+#[derive(Debug)]
+enum Mode {
+    Repl { initial_prompt: Option<String> },
+    SingleShot { prompt: String },
+}
+
+fn determine_mode(cli: Cli) -> Result<Mode> {
+    if cli.single_shot {
+        let prompt = cli.prompt.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--single-shot requires a prompt argument.\n\nUsage: illustrious-manager --single-shot \"your prompt here\""
+            )
+        })?;
+        Ok(Mode::SingleShot { prompt })
+    } else {
+        Ok(Mode::Repl {
+            initial_prompt: cli.prompt,
+        })
     }
-    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    validate_cli(&cli)?;
-
-    // Load and merge config
     let mut app_config = config::load_config(cli.config.as_deref())?;
     config::apply_overrides(
         &mut app_config,
@@ -65,7 +76,6 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    // Initialize backend
     let vertex_backend = VertexBackend::new(
         app_config.vertex.project.clone(),
         app_config.vertex.region.clone(),
@@ -74,19 +84,19 @@ async fn main() -> Result<()> {
 
     let request_config = RequestConfig {
         model: app_config.vertex.model.clone(),
-        max_tokens: 8192,
+        max_tokens: DEFAULT_MAX_TOKENS,
     };
 
     let mut agent = Agent::new(Box::new(vertex_backend), request_config);
 
-    if cli.single_shot {
-        // Single-shot mode: send prompt, stream to stdout, exit
-        let prompt = cli.prompt.expect("prompt is required in single-shot mode");
-        let stream = agent.send(prompt).await?;
-        frontend::stdout::run(stream).await?;
-    } else {
-        // REPL mode
-        frontend::tui::run(&mut agent, cli.prompt).await?;
+    match determine_mode(cli)? {
+        Mode::SingleShot { prompt } => {
+            let stream = agent.send(prompt).await?;
+            frontend::stdout::run(stream).await?;
+        }
+        Mode::Repl { initial_prompt } => {
+            frontend::tui::run(&mut agent, initial_prompt).await?;
+        }
     }
 
     Ok(())
@@ -97,9 +107,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn single_shot_without_prompt_fails_validation() {
+    fn single_shot_without_prompt_errors() {
         let cli = Cli::try_parse_from(["illustrious-manager", "--single-shot"]).unwrap();
-        let err = validate_cli(&cli).unwrap_err().to_string();
+        let err = determine_mode(cli).unwrap_err().to_string();
         assert!(
             err.contains("--single-shot"),
             "Error should mention --single-shot"
@@ -107,20 +117,31 @@ mod tests {
     }
 
     #[test]
-    fn single_shot_with_prompt_passes_validation() {
+    fn single_shot_with_prompt_gives_single_shot_mode() {
         let cli = Cli::try_parse_from(["illustrious-manager", "--single-shot", "hello"]).unwrap();
-        assert!(validate_cli(&cli).is_ok());
+        match determine_mode(cli).unwrap() {
+            Mode::SingleShot { prompt } => assert_eq!(prompt, "hello"),
+            Mode::Repl { .. } => panic!("Expected SingleShot mode"),
+        }
     }
 
     #[test]
-    fn no_args_passes_validation() {
+    fn no_args_gives_repl_mode_with_no_initial_prompt() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
-        assert!(validate_cli(&cli).is_ok());
+        match determine_mode(cli).unwrap() {
+            Mode::Repl { initial_prompt } => assert!(initial_prompt.is_none()),
+            Mode::SingleShot { .. } => panic!("Expected Repl mode"),
+        }
     }
 
     #[test]
-    fn prompt_without_single_shot_passes_validation() {
+    fn prompt_without_single_shot_gives_repl_mode_with_initial_prompt() {
         let cli = Cli::try_parse_from(["illustrious-manager", "hello world"]).unwrap();
-        assert!(validate_cli(&cli).is_ok());
+        match determine_mode(cli).unwrap() {
+            Mode::Repl { initial_prompt } => {
+                assert_eq!(initial_prompt.as_deref(), Some("hello world"))
+            }
+            Mode::SingleShot { .. } => panic!("Expected Repl mode"),
+        }
     }
 }
