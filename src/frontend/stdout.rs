@@ -49,9 +49,14 @@ mod tests {
         let s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let mut buf = Vec::new();
 
-        run_with_writer(s, &mut buf).await.unwrap();
+        run_with_writer(s, &mut buf)
+            .await
+            .expect("stdout run should succeed");
 
-        assert_eq!(String::from_utf8(buf).unwrap(), "hello world\n");
+        assert_eq!(
+            String::from_utf8(buf).expect("buffer should contain valid UTF-8"),
+            "hello world\n"
+        );
     }
 
     #[tokio::test]
@@ -63,9 +68,14 @@ mod tests {
         let s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let mut buf = Vec::new();
 
-        run_with_writer(s, &mut buf).await.unwrap();
+        run_with_writer(s, &mut buf)
+            .await
+            .expect("stdout run should succeed");
 
-        assert_eq!(String::from_utf8(buf).unwrap(), "\n");
+        assert_eq!(
+            String::from_utf8(buf).expect("buffer should contain valid UTF-8"),
+            "\n"
+        );
     }
 
     #[tokio::test]
@@ -79,7 +89,7 @@ mod tests {
         assert!(result.is_err());
         assert!(
             result
-                .unwrap_err()
+                .expect_err("run should return an error on AgentEvent::Error")
                 .to_string()
                 .contains("something went wrong")
         );
