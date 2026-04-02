@@ -18,26 +18,20 @@ const DEFAULT_MAX_TOKENS: u32 = 8192;
 #[command(name = "illustrious-manager")]
 #[command(about = "A TUI agent application for Claude on Vertex AI")]
 struct Cli {
-    /// Prompt to send (starts REPL with this message, or use with --single-shot)
     prompt: Option<String>,
 
-    /// GCP project ID
     #[arg(long)]
     project: Option<String>,
 
-    /// Vertex AI region
     #[arg(long)]
     region: Option<String>,
 
-    /// Model identifier
     #[arg(long)]
     model: Option<String>,
 
-    /// Run in single-shot mode (print response to stdout and exit)
     #[arg(long)]
     single_shot: bool,
 
-    /// Custom config file path
     #[arg(long)]
     config: Option<PathBuf>,
 }
