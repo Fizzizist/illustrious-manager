@@ -13,6 +13,10 @@ pub struct Agent {
     config: RequestConfig,
 }
 
+fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Agent {
     pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig) -> Self {
         Self {
@@ -23,19 +27,16 @@ impl Agent {
     }
 
     pub fn history(&self) -> Vec<Message> {
-        self.history.lock().expect("history mutex poisoned").clone()
+        lock(&self.history).clone()
     }
 
     pub async fn send(&mut self, input: String) -> Result<BoxStream<AgentEvent>> {
-        self.history
-            .lock()
-            .expect("history mutex poisoned")
-            .push(Message {
-                role: Role::User,
-                content: input,
-            });
+        lock(&self.history).push(Message {
+            role: Role::User,
+            content: input,
+        });
 
-        let history_snapshot = self.history.lock().expect("history mutex poisoned").clone();
+        let history_snapshot = lock(&self.history).clone();
 
         let backend_stream = match self
             .backend
@@ -44,7 +45,7 @@ impl Agent {
         {
             Ok(s) => s,
             Err(e) => {
-                self.history.lock().expect("history mutex poisoned").pop();
+                lock(&self.history).pop();
                 return Err(e);
             }
         };
@@ -63,18 +64,15 @@ impl Agent {
                         let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                     }
                     Ok(StreamEvent::Done) => {
-                        history_arc
-                            .lock()
-                            .expect("history mutex poisoned")
-                            .push(Message {
-                                role: Role::Assistant,
-                                content: accumulated.clone(),
-                            });
+                        lock(&history_arc).push(Message {
+                            role: Role::Assistant,
+                            content: accumulated.clone(),
+                        });
                         let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(accumulated));
                         break;
                     }
                     Err(e) => {
-                        history_arc.lock().expect("history mutex poisoned").pop();
+                        lock(&history_arc).pop();
                         let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
                         break;
                     }
