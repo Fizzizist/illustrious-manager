@@ -6,7 +6,7 @@ use super::LlmBackend;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-const ENDPOINT: &str = "https://api.z.ai/v1/chat/completions";
+const ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 
 #[derive(Debug)]
 pub struct ZaiBackend {
