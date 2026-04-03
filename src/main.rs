@@ -75,45 +75,46 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let backend: Box<dyn LlmBackend> = match app_config.backend.as_str() {
+    struct BackendSelection {
+        backend: Box<dyn LlmBackend>,
+        model: String,
+    }
+
+    let selection = match app_config.backend.as_str() {
         "vertex" => {
             let vertex_backend = VertexBackend::new(
                 app_config.vertex.project.clone(),
                 app_config.vertex.region.clone(),
             )
             .await?;
-            Box::new(vertex_backend)
+            BackendSelection {
+                backend: Box::new(vertex_backend),
+                model: app_config.vertex.model.clone(),
+            }
         }
         "zai" => {
-            let zai_config = app_config
-                .zai
-                .as_ref()
-                .expect("zai config should be validated");
+            let zai_config = app_config.zai.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "zai backend configuration is missing. Add a [zai] section to your config file."
+                )
+            })?;
             let zai_backend = ZaiBackend::new(zai_config.api_key.clone())?;
-            Box::new(zai_backend)
+            BackendSelection {
+                backend: Box::new(zai_backend),
+                model: zai_config.model.clone(),
+            }
         }
         _ => {
             anyhow::bail!("Invalid backend '{}'", app_config.backend);
         }
     };
 
-    let model = match app_config.backend.as_str() {
-        "vertex" => app_config.vertex.model.clone(),
-        "zai" => app_config
-            .zai
-            .as_ref()
-            .expect("zai config should be validated")
-            .model
-            .clone(),
-        _ => anyhow::bail!("Invalid backend '{}'", app_config.backend),
-    };
-
     let request_config = RequestConfig {
-        model,
+        model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
     };
 
-    let mut agent = Agent::new(backend, request_config);
+    let mut agent = Agent::new(selection.backend, request_config);
 
     match mode {
         Mode::SingleShot { prompt } => {

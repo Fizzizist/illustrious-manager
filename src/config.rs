@@ -21,7 +21,7 @@ model = "claude-sonnet-4-20250514"
 # Required: your z.ai API key
 api_key = ""
 # Model to use
-model = "glm-5-turbo"
+model = "glm-5.1"
 "#;
 
 #[derive(Debug, serde::Deserialize)]
@@ -54,7 +54,7 @@ fn default_backend() -> String {
 }
 
 fn default_zai_model() -> String {
-    "glm-5-turbo".to_string()
+    "glm-5.1".to_string()
 }
 
 fn default_region() -> String {
@@ -108,14 +108,26 @@ pub fn apply_overrides(
     region: Option<&str>,
     model: Option<&str>,
 ) {
-    if let Some(p) = project {
-        config.vertex.project = p.to_string();
-    }
-    if let Some(r) = region {
-        config.vertex.region = r.to_string();
-    }
-    if let Some(m) = model {
-        config.vertex.model = m.to_string();
+    match config.backend.as_str() {
+        "vertex" => {
+            if let Some(p) = project {
+                config.vertex.project = p.to_string();
+            }
+            if let Some(r) = region {
+                config.vertex.region = r.to_string();
+            }
+            if let Some(m) = model {
+                config.vertex.model = m.to_string();
+            }
+        }
+        "zai" => {
+            if let Some(m) = model
+                && let Some(ref mut zai) = config.zai
+            {
+                zai.model = m.to_string();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -235,7 +247,7 @@ mod tests {
             },
             zai: Some(ZaiConfig {
                 api_key: "".to_string(),
-                model: "glm-5-turbo".to_string(),
+                model: "glm-5.1".to_string(),
             }),
         };
         let result = validate(&config, None);
@@ -254,7 +266,7 @@ mod tests {
             },
             zai: Some(ZaiConfig {
                 api_key: "test-key".to_string(),
-                model: "glm-5-turbo".to_string(),
+                model: "glm-5.1".to_string(),
             }),
         };
         let result = validate(&config, None);
