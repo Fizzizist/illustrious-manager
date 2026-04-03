@@ -58,7 +58,7 @@ fn test_tui_streaming_state() {
 }
 
 #[tokio::test]
-async fn regression_test_issue_21_user_message_appears_immediately() {
+async fn user_message_appears_immediately() {
     // This test verifies that submit_message completes quickly without
     // waiting for the backend response.
     //
