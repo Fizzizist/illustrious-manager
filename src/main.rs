@@ -9,7 +9,6 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use agent::Agent;
-use backend::vertex::VertexBackend;
 use types::RequestConfig;
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -73,18 +72,14 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let vertex_backend = VertexBackend::new(
-        app_config.vertex.project.clone(),
-        app_config.vertex.region.clone(),
-    )
-    .await?;
+    let selection = backend::from_config(&app_config).await?;
 
     let request_config = RequestConfig {
-        model: app_config.vertex.model.clone(),
+        model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
     };
 
-    let mut agent = Agent::new(Box::new(vertex_backend), request_config);
+    let mut agent = Agent::new(selection.backend, request_config);
 
     match mode {
         Mode::SingleShot { prompt } => {

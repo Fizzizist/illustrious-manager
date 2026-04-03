@@ -1,9 +1,12 @@
-pub mod vertex;
-
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
+
+pub mod sse;
+pub mod vertex;
+pub mod zai;
 
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
@@ -12,6 +15,42 @@ pub trait LlmBackend: Send + Sync {
         messages: &[Message],
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>>;
+}
+
+pub struct BackendSelection {
+    pub backend: Box<dyn LlmBackend>,
+    pub model: String,
+}
+
+pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
+    match config.backend.as_str() {
+        "vertex" => {
+            let backend = vertex::VertexBackend::new(
+                config.vertex.project.clone(),
+                config.vertex.region.clone(),
+            )
+            .await?;
+            Ok(BackendSelection {
+                backend: Box::new(backend),
+                model: config.vertex.model.clone(),
+            })
+        }
+        "zai" => {
+            let zai_config = config.zai.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "zai backend configuration is missing. Add a [zai] section to your config file."
+                )
+            })?;
+            let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
+            Ok(BackendSelection {
+                backend: Box::new(backend),
+                model: zai_config.model.clone(),
+            })
+        }
+        _ => {
+            anyhow::bail!("Invalid backend '{}'", config.backend);
+        }
+    }
 }
 
 #[cfg(test)]
