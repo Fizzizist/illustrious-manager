@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
         max_tokens: DEFAULT_MAX_TOKENS,
     };
 
-    let mut agent = Agent::new(Box::new(vertex_backend), request_config);
+    let agent = Agent::new(Box::new(vertex_backend), request_config);
 
     match mode {
         Mode::SingleShot { prompt } => {
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
             frontend::stdout::run(stream).await?;
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(&mut agent, initial_prompt).await?;
+            frontend::tui::run(agent, initial_prompt).await?;
         }
     }
 

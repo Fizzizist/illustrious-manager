@@ -12,17 +12,20 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::io;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
 use crate::types::AgentEvent;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppState {
     Input,
     Streaming,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConversationRole {
     User,
     Assistant,
@@ -135,13 +138,14 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
 }
 
 /// Run the TUI REPL. If `initial_prompt` is provided, it's sent immediately.
-pub async fn run(agent: &mut Agent, initial_prompt: Option<String>) -> Result<()> {
+pub async fn run(agent: Agent, initial_prompt: Option<String>) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let agent = Arc::new(agent);
     let result = run_app(&mut terminal, agent, initial_prompt).await;
 
     disable_raw_mode()?;
@@ -153,7 +157,7 @@ pub async fn run(agent: &mut Agent, initial_prompt: Option<String>) -> Result<()
 
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    agent: &mut Agent,
+    agent: Arc<Agent>,
     initial_prompt: Option<String>,
 ) -> Result<()> {
     let mut app = App::new();
@@ -162,7 +166,7 @@ async fn run_app(
 
     if let Some(prompt) = initial_prompt {
         app.input = prompt;
-        stream_task = Some(submit_message(&mut app, agent, &event_tx).await?);
+        stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx));
     }
 
     loop {
@@ -188,7 +192,7 @@ async fn run_app(
                         } => {
                             if !app.input.trim().is_empty() {
                                 stream_task =
-                                    Some(submit_message(&mut app, agent, &event_tx).await?);
+                                    Some(submit_message(&mut app, agent.clone(), &event_tx));
                             }
                         }
                         KeyEvent {
@@ -255,11 +259,11 @@ async fn run_app(
     Ok(())
 }
 
-async fn submit_message(
+fn submit_message(
     app: &mut App,
-    agent: &mut Agent,
+    agent: Arc<Agent>,
     event_tx: &mpsc::Sender<AgentEvent>,
-) -> Result<JoinHandle<()>> {
+) -> JoinHandle<()> {
     let input = app.input.drain(..).collect::<String>();
 
     app.conversation.push(ConversationEntry {
@@ -269,16 +273,20 @@ async fn submit_message(
 
     app.state = AppState::Streaming;
 
-    let mut stream = agent.send(input).await?;
     let tx = event_tx.clone();
 
-    let handle = tokio::spawn(async move {
-        while let Some(event) = stream.next().await {
-            if tx.send(event).await.is_err() {
-                break;
+    tokio::spawn(async move {
+        match agent.send(input).await {
+            Ok(mut stream) => {
+                while let Some(event) = stream.next().await {
+                    if tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(AgentEvent::Error(e.to_string())).await;
             }
         }
-    });
-
-    Ok(handle)
+    })
 }

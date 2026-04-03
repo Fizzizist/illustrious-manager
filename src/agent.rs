@@ -30,7 +30,7 @@ impl Agent {
         lock(&self.history).clone()
     }
 
-    pub async fn send(&mut self, input: String) -> Result<BoxStream<AgentEvent>> {
+    pub async fn send(&self, input: String) -> Result<BoxStream<AgentEvent>> {
         lock(&self.history).push(Message {
             role: Role::User,
             content: input,
