@@ -68,7 +68,6 @@ async fn regression_test_issue_21_user_message_appears_immediately() {
 
     use anyhow::Result;
     use async_trait::async_trait;
-    use futures::stream;
     use illustrious_manager::agent::Agent;
     use illustrious_manager::backend::LlmBackend;
     use illustrious_manager::types::*;
