@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 
 use super::LlmBackend;
+use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-/// Z.ai backend for LLM models.
+const ENDPOINT: &str = "https://api.z.ai/v1/chat/completions";
+
 #[derive(Debug)]
 pub struct ZaiBackend {
     client: Client,
@@ -14,7 +15,6 @@ pub struct ZaiBackend {
 }
 
 impl ZaiBackend {
-    /// Create a new ZaiBackend using an API key.
     pub fn new(api_key: String) -> Result<Self> {
         if api_key.is_empty() {
             anyhow::bail!("API key cannot be empty");
@@ -23,10 +23,6 @@ impl ZaiBackend {
             client: Client::new(),
             api_key,
         })
-    }
-
-    fn endpoint(&self) -> String {
-        "https://api.z.ai/v1/chat/completions".to_string()
     }
 
     fn build_request_body(
@@ -60,12 +56,11 @@ impl LlmBackend for ZaiBackend {
         messages: &[Message],
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
-        let url = self.endpoint();
         let body = self.build_request_body(messages, config);
 
         let response = self
             .client
-            .post(&url)
+            .post(ENDPOINT)
             .bearer_auth(&self.api_key)
             .header("Content-Type", "application/json")
             .json(&body)
@@ -83,71 +78,11 @@ impl LlmBackend for ZaiBackend {
         }
 
         let byte_stream = response.bytes_stream();
-
-        let event_stream = futures::stream::unfold(
-            (byte_stream, String::new()),
-            |(mut byte_stream, mut buffer)| async move {
-                loop {
-                    if let Some(pos) = buffer.find("\n\n") {
-                        let event_text = buffer[..pos].to_string();
-                        buffer = buffer[pos + 2..].to_string();
-
-                        if let Some(data) = extract_sse_data(&event_text) {
-                            match parse_sse_data(data) {
-                                Ok(Some(event)) => return Some((Ok(event), (byte_stream, buffer))),
-                                Ok(None) => continue,
-                                Err(e) => return Some((Err(e), (byte_stream, buffer))),
-                            }
-                        }
-                        continue;
-                    }
-
-                    match byte_stream.next().await {
-                        Some(Ok(bytes)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        }
-                        Some(Err(e)) => {
-                            return Some((
-                                Err(anyhow::anyhow!("Stream read error: {}", e)),
-                                (byte_stream, buffer),
-                            ));
-                        }
-                        None => {
-                            if !buffer.trim().is_empty()
-                                && let Some(data) = extract_sse_data(&buffer).map(str::to_owned)
-                            {
-                                buffer.clear();
-                                match parse_sse_data(&data) {
-                                    Ok(Some(event)) => {
-                                        return Some((Ok(event), (byte_stream, buffer)));
-                                    }
-                                    Ok(None) => return None,
-                                    Err(e) => return Some((Err(e), (byte_stream, buffer))),
-                                }
-                            }
-                            return None;
-                        }
-                    }
-                }
-            },
-        );
-
-        Ok(Box::pin(event_stream))
+        let event_stream = create_sse_event_stream(byte_stream, parse_sse_data);
+        Ok(event_stream)
     }
 }
 
-/// Extract the data payload from an SSE event block.
-fn extract_sse_data(event_text: &str) -> Option<&str> {
-    for line in event_text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            return Some(data);
-        }
-    }
-    None
-}
-
-/// Parse an SSE data payload JSON into a StreamEvent.
-/// Returns None for event types we intentionally ignore.
 pub fn parse_sse_data(data: &str) -> Result<Option<StreamEvent>> {
     if data == "[DONE]" {
         return Ok(Some(StreamEvent::Done));
@@ -186,12 +121,6 @@ mod tests {
         assert!(result.is_ok(), "Should accept valid API key");
         let backend = result.unwrap();
         assert_eq!(backend.api_key, "test-key");
-    }
-
-    #[test]
-    fn endpoint_returns_correct_url() {
-        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
-        assert_eq!(backend.endpoint(), "https://api.z.ai/v1/chat/completions");
     }
 
     #[test]
@@ -271,5 +200,13 @@ mod tests {
         let data = "not valid json";
         let result = parse_sse_data(data);
         assert!(result.is_err(), "Should return error for invalid JSON");
+    }
+
+    #[test]
+    fn parse_sse_data_returns_none_for_empty_delta() {
+        let data = r#"{"choices":[{"delta":{}}]}"#;
+        let result = parse_sse_data(data);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }
