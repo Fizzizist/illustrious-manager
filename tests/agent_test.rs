@@ -49,7 +49,7 @@ async fn test_agent_single_message() {
         model: "test-model".to_string(),
         max_tokens: 1024,
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config);
 
     let mut stream = agent.send("Hi".to_string()).await.unwrap();
 
@@ -91,7 +91,7 @@ async fn test_agent_history_accumulates() {
         model: "test-model".to_string(),
         max_tokens: 1024,
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config);
 
     // First message
     let stream = agent.send("Hello".to_string()).await.unwrap();
@@ -129,7 +129,7 @@ async fn test_agent_backend_error_emits_error_event() {
         model: "test-model".to_string(),
         max_tokens: 1024,
     };
-    let mut agent = Agent::new(Box::new(ErrorBackend), config);
+    let agent = Agent::new(Box::new(ErrorBackend), config);
 
     let mut stream = agent.send("Hi".to_string()).await.unwrap();
 

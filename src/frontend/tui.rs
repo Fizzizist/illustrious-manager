@@ -259,7 +259,7 @@ async fn run_app(
     Ok(())
 }
 
-fn submit_message(
+pub fn submit_message(
     app: &mut App,
     agent: Arc<Agent>,
     event_tx: &mpsc::Sender<AgentEvent>,

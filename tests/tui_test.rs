@@ -1,12 +1,13 @@
 use insta::assert_snapshot;
 use ratatui::{Terminal, backend::TestBackend};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
 use illustrious_manager::frontend::tui::{
-    App, AppState, ConversationEntry, ConversationRole, render_app,
+    App, AppState, ConversationEntry, ConversationRole, render_app, submit_message,
 };
 use illustrious_manager::types::*;
 
@@ -104,23 +105,23 @@ async fn regression_test_issue_21_user_message_appears_immediately() {
         model: "test-model".to_string(),
         max_tokens: 1024,
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Arc::new(Agent::new(Box::new(backend), config));
 
-    // Create an app and submit a message
+    // Create an app and event channel
     let mut app = App::new();
-    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+    let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
 
-    // Submit the message (this should NOT block the UI)
-    let input = "Test message".to_string();
+    // Set the input message
+    app.input = "Test message".to_string();
 
-    // Simulate what submit_message does: add user message immediately
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: input.clone(),
-    });
-    app.state = AppState::Streaming;
+    // Call submit_message - this should:
+    // 1. Immediately add the user message to the conversation
+    // 2. Change state to Streaming
+    // 3. Spawn a background task for the backend call
+    // 4. Return immediately (NOT wait for the backend)
+    let _task = submit_message(&mut app, agent.clone(), &event_tx);
 
-    // At this point, BEFORE the backend responds:
+    // IMMEDIATELY after calling submit_message (before backend responds):
     // 1. The user's message should be in the conversation
     // 2. The state should be Streaming (shows "thinking...")
     // 3. The UI should reflect this immediately
@@ -139,8 +140,8 @@ async fn regression_test_issue_21_user_message_appears_immediately() {
     );
 
     // Render the UI to verify it shows the user's message and "Streaming..." indicator
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    let test_backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(test_backend).expect("terminal creation must succeed");
 
     terminal
         .draw(|frame| render_app(&app, frame))
