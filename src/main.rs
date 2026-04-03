@@ -9,9 +9,6 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use agent::Agent;
-use backend::LlmBackend;
-use backend::vertex::VertexBackend;
-use backend::zai::ZaiBackend;
 use types::RequestConfig;
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -75,39 +72,7 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    struct BackendSelection {
-        backend: Box<dyn LlmBackend>,
-        model: String,
-    }
-
-    let selection = match app_config.backend.as_str() {
-        "vertex" => {
-            let vertex_backend = VertexBackend::new(
-                app_config.vertex.project.clone(),
-                app_config.vertex.region.clone(),
-            )
-            .await?;
-            BackendSelection {
-                backend: Box::new(vertex_backend),
-                model: app_config.vertex.model.clone(),
-            }
-        }
-        "zai" => {
-            let zai_config = app_config.zai.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "zai backend configuration is missing. Add a [zai] section to your config file."
-                )
-            })?;
-            let zai_backend = ZaiBackend::new(zai_config.api_key.clone())?;
-            BackendSelection {
-                backend: Box::new(zai_backend),
-                model: zai_config.model.clone(),
-            }
-        }
-        _ => {
-            anyhow::bail!("Invalid backend '{}'", app_config.backend);
-        }
-    };
+    let selection = backend::from_config(&app_config).await?;
 
     let request_config = RequestConfig {
         model: selection.model,
