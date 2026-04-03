@@ -9,7 +9,9 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use agent::Agent;
+use backend::LlmBackend;
 use backend::vertex::VertexBackend;
+use backend::zai::ZaiBackend;
 use types::RequestConfig;
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -73,18 +75,45 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let vertex_backend = VertexBackend::new(
-        app_config.vertex.project.clone(),
-        app_config.vertex.region.clone(),
-    )
-    .await?;
+    let backend: Box<dyn LlmBackend> = match app_config.backend.as_str() {
+        "vertex" => {
+            let vertex_backend = VertexBackend::new(
+                app_config.vertex.project.clone(),
+                app_config.vertex.region.clone(),
+            )
+            .await?;
+            Box::new(vertex_backend)
+        }
+        "zai" => {
+            let zai_config = app_config
+                .zai
+                .as_ref()
+                .expect("zai config should be validated");
+            let zai_backend = ZaiBackend::new(zai_config.api_key.clone())?;
+            Box::new(zai_backend)
+        }
+        _ => {
+            anyhow::bail!("Invalid backend '{}'", app_config.backend);
+        }
+    };
+
+    let model = match app_config.backend.as_str() {
+        "vertex" => app_config.vertex.model.clone(),
+        "zai" => app_config
+            .zai
+            .as_ref()
+            .expect("zai config should be validated")
+            .model
+            .clone(),
+        _ => anyhow::bail!("Invalid backend '{}'", app_config.backend),
+    };
 
     let request_config = RequestConfig {
-        model: app_config.vertex.model.clone(),
+        model,
         max_tokens: DEFAULT_MAX_TOKENS,
     };
 
-    let mut agent = Agent::new(Box::new(vertex_backend), request_config);
+    let mut agent = Agent::new(backend, request_config);
 
     match mode {
         Mode::SingleShot { prompt } => {
