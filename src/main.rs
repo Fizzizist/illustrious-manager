@@ -7,6 +7,7 @@ pub mod types;
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use agent::Agent;
 use types::RequestConfig;
@@ -79,7 +80,7 @@ async fn main() -> Result<()> {
         max_tokens: DEFAULT_MAX_TOKENS,
     };
 
-    let mut agent = Agent::new(selection.backend, request_config);
+    let agent = Arc::new(Agent::new(selection.backend, request_config));
 
     match mode {
         Mode::SingleShot { prompt } => {
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
             frontend::stdout::run(stream).await?;
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(&mut agent, initial_prompt).await?;
+            frontend::tui::run(agent.clone(), initial_prompt).await?;
         }
     }
 
