@@ -1,6 +1,7 @@
 // Tool trait and registry for extensible tool system
 
 pub mod bash;
+pub mod edit_file;
 pub mod sandbox;
 
 use crate::types::ContentBlock;
