@@ -13,7 +13,7 @@ pub enum Role {
 }
 
 /// A content block within a message
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text(String),
     ToolUse {
@@ -202,7 +202,7 @@ pub enum AgentEvent {
     },
     ToolResult {
         name: String,
-        result: String,
+        content: String,
         is_error: bool,
     },
     ToolConfirmationRequired {
@@ -314,7 +314,7 @@ mod tests {
         {
             assert_eq!(tool_use_id, "tool-123");
             assert_eq!(content, "output");
-            assert_eq!(is_error, false);
+            assert!(!is_error);
         }
     }
 
@@ -448,22 +448,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_event_tool_result_variant_contains_name_result_and_error_flag() {
+    fn agent_event_tool_result_variant_contains_name_content_and_error_flag() {
         let event = AgentEvent::ToolResult {
             name: "bash".to_string(),
-            result: "file1.txt".to_string(),
+            content: "file1.txt".to_string(),
             is_error: false,
         };
         assert!(matches!(event, AgentEvent::ToolResult { .. }));
         if let AgentEvent::ToolResult {
             name,
-            result,
+            content,
             is_error,
         } = event
         {
             assert_eq!(name, "bash");
-            assert_eq!(result, "file1.txt");
-            assert_eq!(is_error, false);
+            assert_eq!(content, "file1.txt");
+            assert!(!is_error);
         }
     }
 

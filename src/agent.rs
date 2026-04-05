@@ -71,7 +71,15 @@ impl Agent {
                         let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
                         break;
                     }
-                    _ => {}
+                    Ok(
+                        StreamEvent::ToolUseStart { .. }
+                        | StreamEvent::ToolUseDelta(_)
+                        | StreamEvent::ToolUseDone,
+                    ) => {
+                        eprintln!(
+                            "Warning: Received tool-use event from backend, but tool loop not yet implemented"
+                        );
+                    }
                 }
             }
         });
