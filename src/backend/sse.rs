@@ -13,18 +13,19 @@ pub fn extract_sse_data(event_text: &str) -> Option<&str> {
     None
 }
 
-pub fn create_sse_event_stream<S, B, E>(
+pub fn create_sse_event_stream<S, B, E, P>(
     byte_stream: S,
-    parser: fn(&str) -> Result<Option<StreamEvent>>,
+    parser: P,
 ) -> BoxStream<Result<StreamEvent>>
 where
     S: Stream<Item = Result<B, E>> + Unpin + Send + 'static,
     B: AsRef<[u8]>,
     E: std::fmt::Display + 'static,
+    P: FnMut(&str) -> Result<Option<StreamEvent>> + Send + 'static,
 {
     let event_stream = unfold(
-        (byte_stream, String::new()),
-        move |(mut byte_stream, mut buffer)| async move {
+        (byte_stream, String::new(), parser),
+        move |(mut byte_stream, mut buffer, mut parser)| async move {
             loop {
                 if let Some(pos) = buffer.find("\n\n") {
                     let event_text = buffer[..pos].to_string();
@@ -33,10 +34,10 @@ where
                     if let Some(data) = extract_sse_data(&event_text) {
                         match parser(data) {
                             Ok(Some(event)) => {
-                                return Some((Ok(event), (byte_stream, buffer)));
+                                return Some((Ok(event), (byte_stream, buffer, parser)));
                             }
                             Ok(None) => continue,
-                            Err(e) => return Some((Err(e), (byte_stream, buffer))),
+                            Err(e) => return Some((Err(e), (byte_stream, buffer, parser))),
                         }
                     }
                     continue;
@@ -49,7 +50,7 @@ where
                     Some(Err(e)) => {
                         return Some((
                             Err(anyhow::anyhow!("Stream read error: {}", e)),
-                            (byte_stream, buffer),
+                            (byte_stream, buffer, parser),
                         ));
                     }
                     None => {
@@ -59,10 +60,10 @@ where
                             buffer.clear();
                             match parser(&data) {
                                 Ok(Some(event)) => {
-                                    return Some((Ok(event), (byte_stream, buffer)));
+                                    return Some((Ok(event), (byte_stream, buffer, parser)));
                                 }
                                 Ok(None) => return None,
-                                Err(e) => return Some((Err(e), (byte_stream, buffer))),
+                                Err(e) => return Some((Err(e), (byte_stream, buffer, parser))),
                             }
                         }
                         return None;

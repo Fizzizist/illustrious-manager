@@ -56,6 +56,10 @@ impl LlmBackend for ZaiBackend {
         messages: &[Message],
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
+        if !config.tools.is_empty() {
+            anyhow::bail!("z.ai backend does not support tool use");
+        }
+
         let body = self.build_request_body(messages, config);
 
         let response = self
@@ -129,6 +133,7 @@ mod tests {
         let config = RequestConfig {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
+            tools: vec![],
         };
         let messages = vec![Message {
             role: Role::User,
@@ -148,6 +153,7 @@ mod tests {
         let config = RequestConfig {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
+            tools: vec![],
         };
         let messages = vec![
             Message {
@@ -211,5 +217,27 @@ mod tests {
         let result = parse_sse_data(data);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn send_message_returns_error_when_tools_are_present() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: "Run bash".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        };
+        match backend.send_message(&[], &config).await {
+            Err(e) => assert!(
+                e.to_string().contains("tool"),
+                "error message should mention tools, got: {}",
+                e
+            ),
+            Ok(_) => panic!("should reject requests with tools"),
+        }
     }
 }

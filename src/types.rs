@@ -4,6 +4,14 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
+/// Definition of a tool for discovery/registration
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
 /// Role in a conversation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -179,6 +187,7 @@ impl Message {
 pub struct RequestConfig {
     pub model: String,
     pub max_tokens: u32,
+    pub tools: Vec<ToolDefinition>,
 }
 
 /// Events emitted by the LLM backend during streaming
