@@ -3,6 +3,7 @@
 pub mod bash;
 pub mod edit_file;
 pub mod sandbox;
+pub mod write_file;
 
 use crate::types::ContentBlock;
 use serde::{Deserialize, Serialize};
