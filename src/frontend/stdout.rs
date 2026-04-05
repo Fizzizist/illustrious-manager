@@ -28,6 +28,11 @@ async fn run_with_writer<W: Write>(
                 eprintln!("\nError: {}", msg);
                 anyhow::bail!("LLM error: {}", msg);
             }
+            AgentEvent::ToolUseReceived { .. }
+            | AgentEvent::ToolResult { .. }
+            | AgentEvent::ToolConfirmationRequired { .. } => {
+                writeln!(writer, "[Tool use not yet supported in this mode]")?;
+            }
         }
     }
 

@@ -31,10 +31,7 @@ impl Agent {
     }
 
     pub async fn send(&self, input: String) -> Result<BoxStream<AgentEvent>> {
-        lock(&self.history).push(Message {
-            role: Role::User,
-            content: input,
-        });
+        lock(&self.history).push(Message::text(Role::User, input));
 
         let history_snapshot = lock(&self.history).clone();
 
@@ -64,10 +61,8 @@ impl Agent {
                         let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                     }
                     Ok(StreamEvent::Done) => {
-                        lock(&history_arc).push(Message {
-                            role: Role::Assistant,
-                            content: accumulated.clone(),
-                        });
+                        lock(&history_arc)
+                            .push(Message::text(Role::Assistant, accumulated.clone()));
                         let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(accumulated));
                         break;
                     }
@@ -75,6 +70,15 @@ impl Agent {
                         lock(&history_arc).pop();
                         let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
                         break;
+                    }
+                    Ok(
+                        StreamEvent::ToolUseStart { .. }
+                        | StreamEvent::ToolUseDelta(_)
+                        | StreamEvent::ToolUseDone,
+                    ) => {
+                        eprintln!(
+                            "Warning: Received tool-use event from backend, but tool loop not yet implemented"
+                        );
                     }
                 }
             }
