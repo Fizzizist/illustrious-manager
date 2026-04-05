@@ -4,7 +4,7 @@ use crate::config::ConfirmationMode;
 use crate::types::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Error type for tool operations
@@ -588,9 +588,22 @@ mod sandbox_tests {
     }
 }
 
+/// Executes shell commands in the sandbox directory.
+///
+/// # Confirmation behavior
+/// - Allowlisted commands execute without confirmation regardless of `ConfirmationMode`.
+/// - Denylisted commands are always rejected.
+/// - All other commands follow `ConfirmationMode`. Because bash commands cannot be reliably
+///   classified as read-only or write operations, `WriteOnly` is treated identically to `Always`.
+///
+/// # Denylist limitations
+/// Segment detection splits on common shell operators (`|`, `&`, `;`, newline, `(`, backtick)
+/// to catch obvious bypass patterns. It is best-effort: complex quoting, heredocs, variable
+/// indirection, and other shell features can still evade detection. Confirmation policy is
+/// the primary security gate; the denylist is a convenience filter.
 pub struct BashTool {
-    allowlist: Vec<String>,
-    denylist: Vec<String>,
+    allowlist: HashSet<String>,
+    denylist: HashSet<String>,
     sandbox_root: PathBuf,
     confirmation: ConfirmationMode,
     confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
@@ -616,8 +629,8 @@ impl BashTool {
             "required": ["command"]
         });
         Self {
-            allowlist,
-            denylist,
+            allowlist: allowlist.into_iter().collect(),
+            denylist: denylist.into_iter().collect(),
             sandbox_root,
             confirmation,
             confirm_fn,
@@ -625,9 +638,13 @@ impl BashTool {
         }
     }
 
-    fn first_tokens_of_pipe_segments(command: &str) -> Vec<&str> {
+    /// Extracts the first token (command name) from each shell segment.
+    ///
+    /// Splits on `|`, `&`, `;`, newline, `(`, and backtick to catch common shell operator
+    /// bypass patterns. Best-effort only — see struct-level docs.
+    fn shell_command_tokens(command: &str) -> Vec<&str> {
         command
-            .split('|')
+            .split(['|', '&', ';', '\n', '(', '`'])
             .filter_map(|segment| segment.split_whitespace().next())
             .collect()
     }
@@ -654,10 +671,10 @@ impl Tool for BashTool {
                 message: "missing required field 'command'".to_string(),
             })?;
 
-        let tokens = Self::first_tokens_of_pipe_segments(command);
+        let tokens = Self::shell_command_tokens(command);
 
         for token in &tokens {
-            if self.denylist.iter().any(|d| d == token) {
+            if self.denylist.contains(*token) {
                 return Ok(ToolResult {
                     content: vec![ContentBlock::Text(format!(
                         "Command rejected: '{}' is not allowed",
@@ -668,9 +685,7 @@ impl Tool for BashTool {
             }
         }
 
-        let all_allowlisted = tokens
-            .iter()
-            .all(|token| self.allowlist.iter().any(|a| a == token));
+        let all_allowlisted = tokens.iter().all(|token| self.allowlist.contains(*token));
 
         if !all_allowlisted {
             let needs_confirmation = matches!(
@@ -704,8 +719,9 @@ impl Tool for BashTool {
 
         let content = match (stdout.is_empty(), stderr.is_empty()) {
             (false, false) => format!("{}\n{}", stdout, stderr),
-            (true, _) => stderr.into_owned(),
-            (_, true) => stdout.into_owned(),
+            (true, false) => stderr.into_owned(),
+            (false, true) => stdout.into_owned(),
+            (true, true) => "(no output)".to_string(),
         };
 
         Ok(ToolResult {
@@ -911,5 +927,111 @@ mod bash_tests {
         );
         let result = tool.execute(serde_json::json!({"not_command": "echo hello"}));
         assert!(matches!(result, Err(ToolError::InvalidInput { .. })));
+    }
+
+    #[test]
+    fn and_operator_denylist_bypass_is_blocked() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello && rm -rf /"}))
+            .expect("execute must not err");
+        assert!(
+            result.is_error,
+            "&&-separated denylist command must be blocked"
+        );
+    }
+
+    #[test]
+    fn semicolon_denylist_bypass_is_blocked() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello; rm -rf /"}))
+            .expect("execute must not err");
+        assert!(
+            result.is_error,
+            "semicolon-separated denylist command must be blocked"
+        );
+    }
+
+    #[test]
+    fn newline_denylist_bypass_is_blocked() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello\nrm -rf /"}))
+            .expect("execute must not err");
+        assert!(
+            result.is_error,
+            "newline-separated denylist command must be blocked"
+        );
+    }
+
+    #[test]
+    fn subshell_denylist_bypass_is_blocked() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo $(rm -rf /)"}))
+            .expect("execute must not err");
+        assert!(
+            result.is_error,
+            "$() subshell denylist command must be blocked"
+        );
+    }
+
+    #[test]
+    fn backtick_denylist_bypass_is_blocked() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo `rm -rf /`"}))
+            .expect("execute must not err");
+        assert!(
+            result.is_error,
+            "backtick subshell denylist command must be blocked"
+        );
+    }
+
+    #[test]
+    fn silent_command_produces_no_output_sentinel() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "true"}))
+            .expect("should succeed");
+        assert!(!result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(
+                !text.is_empty(),
+                "silent command should produce sentinel, not empty string"
+            ),
+            _ => panic!("expected Text"),
+        }
     }
 }
