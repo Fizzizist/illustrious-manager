@@ -2,6 +2,84 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+#[derive(Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ConfirmationMode {
+    Always,
+    #[default]
+    WriteOnly,
+    Never,
+}
+
+fn default_confirmation() -> ConfirmationMode {
+    ConfirmationMode::default()
+}
+
+fn default_sandbox_root() -> String {
+    ".".to_string()
+}
+
+fn default_max_tool_iterations() -> u32 {
+    25
+}
+
+fn default_bash_allowlist() -> Vec<String> {
+    ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn default_bash_denylist() -> Vec<String> {
+    ["rm", "wget", "sudo", "chmod", "chown"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default = "default_confirmation")]
+    pub confirmation: ConfirmationMode,
+    #[serde(default = "default_sandbox_root")]
+    pub sandbox_root: String,
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: u32,
+    #[serde(default = "default_bash_allowlist")]
+    pub bash_allowlist: Vec<String>,
+    #[serde(default = "default_bash_denylist")]
+    pub bash_denylist: Vec<String>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        ToolsConfig {
+            confirmation: default_confirmation(),
+            sandbox_root: default_sandbox_root(),
+            max_tool_iterations: default_max_tool_iterations(),
+            bash_allowlist: default_bash_allowlist(),
+            bash_denylist: default_bash_denylist(),
+        }
+    }
+}
+
+pub fn resolve_sandbox_root(path: &str) -> Result<PathBuf> {
+    let p = PathBuf::from(path);
+    let base = if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir()
+            .context("Failed to get current directory")?
+            .join(p)
+    };
+    base.canonicalize().with_context(|| {
+        format!(
+            "sandbox_root '{}' does not exist or is not accessible",
+            path
+        )
+    })
+}
+
 const DEFAULT_REGION: &str = "us-east5";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_BACKEND: &str = "vertex";
@@ -22,6 +100,18 @@ model = "claude-sonnet-4-20250514"
 api_key = ""
 # Model to use
 model = "glm-5.1"
+
+# [tools]
+# When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
+# confirmation = "WriteOnly"
+# Directory tools are allowed to read/write (resolved to absolute path at startup)
+# sandbox_root = "."
+# Maximum number of tool-use iterations per agent turn
+# max_tool_iterations = 25
+# Shell commands that may be executed without a denylist match
+# bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
+# Shell commands that are always blocked
+# bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 "#;
 
 #[derive(Debug, serde::Deserialize)]
@@ -31,6 +121,8 @@ pub struct AppConfig {
     pub vertex: VertexConfig,
     #[serde(default)]
     pub zai: Option<ZaiConfig>,
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -75,8 +167,11 @@ pub fn default_config_path() -> Result<PathBuf> {
 pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let config: AppConfig = toml::from_str(&content)
+    let mut config: AppConfig = toml::from_str(&content)
         .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
+    config.tools.sandbox_root = resolve_sandbox_root(&config.tools.sandbox_root)?
+        .to_string_lossy()
+        .into_owned();
     Ok(config)
 }
 
@@ -190,6 +285,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_tools_config_has_correct_defaults() {
+        let config = ToolsConfig::default();
+        assert_eq!(config.confirmation, ConfirmationMode::WriteOnly);
+        assert_eq!(config.sandbox_root, ".");
+        assert_eq!(config.max_tool_iterations, 25);
+        assert_eq!(
+            config.bash_allowlist,
+            vec!["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
+        );
+        assert_eq!(
+            config.bash_denylist,
+            vec!["rm", "wget", "sudo", "chmod", "chown"]
+        );
+    }
+
+    #[test]
+    fn custom_tools_config_overrides_all_fields() {
+        let toml_str = r#"
+            confirmation = "Always"
+            sandbox_root = "/tmp/sandbox"
+            max_tool_iterations = 10
+            bash_allowlist = ["echo"]
+            bash_denylist = ["curl"]
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.confirmation, ConfirmationMode::Always);
+        assert_eq!(config.sandbox_root, "/tmp/sandbox");
+        assert_eq!(config.max_tool_iterations, 10);
+        assert_eq!(config.bash_allowlist, vec!["echo"]);
+        assert_eq!(config.bash_denylist, vec!["curl"]);
+    }
+
+    #[test]
+    fn missing_tools_section_uses_all_defaults() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.tools.confirmation, ConfirmationMode::WriteOnly);
+        assert_eq!(config.tools.max_tool_iterations, 25);
+        assert_eq!(config.tools.sandbox_root, ".");
+    }
+
+    #[test]
+    fn sandbox_root_resolved_to_absolute_path() {
+        let resolved = resolve_sandbox_root(".").expect("should resolve");
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
     fn validate_vertex_backend_with_empty_project_errors() {
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -199,6 +346,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -215,6 +363,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -230,6 +379,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -249,6 +399,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "glm-5.1".to_string(),
             }),
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -268,6 +419,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "glm-5.1".to_string(),
             }),
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -283,6 +435,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            tools: ToolsConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
