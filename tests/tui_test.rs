@@ -100,6 +100,7 @@ async fn user_message_appears_immediately() {
     let config = RequestConfig {
         model: "test-model".to_string(),
         max_tokens: 1024,
+        tools: vec![],
     };
 
     // Create a backend that will delay for 5 seconds

@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     let request_config = RequestConfig {
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
+        tools: vec![],
     };
 
     let agent = Arc::new(Agent::new(selection.backend, request_config));

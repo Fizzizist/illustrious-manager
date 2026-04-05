@@ -86,6 +86,7 @@ mod tests {
         let config = RequestConfig {
             model: "test-model".to_string(),
             max_tokens: 1024,
+            tools: vec![],
         };
 
         let mut stream = backend
