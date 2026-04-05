@@ -4,7 +4,7 @@ use reqwest::Client;
 
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
-use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
+use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, StreamEvent};
 
 const ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 
@@ -33,10 +33,17 @@ impl ZaiBackend {
         let messages_json: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
-                serde_json::json!({
-                    "role": m.role,
-                    "content": m.content,
-                })
+                let content: Vec<serde_json::Value> = m
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        ContentBlock::Text(text) => {
+                            serde_json::json!({"type": "text", "text": text})
+                        }
+                        other => serde_json::to_value(other).unwrap_or(serde_json::Value::Null),
+                    })
+                    .collect();
+                serde_json::json!({"role": m.role, "content": content})
             })
             .collect();
 
@@ -170,12 +177,37 @@ mod tests {
 
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
         assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], serde_json::json!(["Hello"]));
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([{"type": "text", "text": "Hello"}])
+        );
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(
             body["messages"][1]["content"],
-            serde_json::json!(["Hi there!"])
+            serde_json::json!([{"type": "text", "text": "Hi there!"}])
         );
+    }
+
+    #[test]
+    fn build_request_body_formats_text_blocks_as_typed_objects() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![crate::types::ContentBlock::Text(
+                "read the test.txt file".to_string(),
+            )],
+        }];
+
+        let body = backend.build_request_body(&messages, &config);
+
+        let content0 = &body["messages"][0]["content"][0];
+        assert_eq!(content0["type"], "text", "text block must have type='text'");
+        assert_eq!(content0["text"], "read the test.txt file");
     }
 
     #[test]
