@@ -628,7 +628,7 @@ impl BashTool {
     fn first_tokens_of_pipe_segments(command: &str) -> Vec<&str> {
         command
             .split('|')
-            .filter_map(|segment| segment.trim().split_whitespace().next())
+            .filter_map(|segment| segment.split_whitespace().next())
             .collect()
     }
 }
