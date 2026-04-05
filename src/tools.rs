@@ -384,15 +384,12 @@ impl SandboxPolicy {
     /// Only validates existing paths. Non-existent paths are rejected to prevent
     /// symlink-based sandbox escapes via parent directory symlinks.
     pub fn validate_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
-        // Resolve the path to its absolute form
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.root.join(path)
         };
 
-        // Reject non-existent paths for security reasons
-        // Manual normalization can't detect symlink-based escapes in parent directories
         if !absolute.try_exists().map_err(|_| {
             SandboxError::InvalidPath(format!("Cannot check path existence: {:?}", path))
         })? {
@@ -402,17 +399,14 @@ impl SandboxPolicy {
             )));
         }
 
-        // Get the canonicalized sandbox root for comparison
         let sandbox_canonical = self.root.canonicalize().map_err(|_| {
             SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
         })?;
 
-        // Canonicalize to resolve any symlinks in the path
         let canonical = absolute.canonicalize().map_err(|_| {
             SandboxError::InvalidPath(format!("Cannot canonicalize path: {:?}", path))
         })?;
 
-        // On Windows, ensure case-insensitive comparison
         #[cfg(windows)]
         let is_within = {
             use std::path::Component;
@@ -458,8 +452,6 @@ impl SandboxPolicy {
 
 impl Default for SandboxPolicy {
     fn default() -> Self {
-        // Use current directory if available, otherwise use "/"
-        // This avoids panic while still providing a usable default
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         Self::new(&root)
     }
@@ -498,7 +490,6 @@ mod sandbox_tests {
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let test_file = temp_dir.path().join("test.txt");
 
-        // Create the file
         fs::write(&test_file, "test content").expect("Failed to create test file");
 
         let result = sandbox.validate_path(&test_file);
@@ -517,14 +508,11 @@ mod sandbox_tests {
             .expect("Temp dir should have parent")
             .join("outside.txt");
 
-        // Create the file outside sandbox
         fs::write(&outside_path, "test content").expect("Failed to create outside file");
 
         let result = sandbox.validate_path(&outside_path);
         match result {
-            Err(SandboxError::OutsideSandbox { .. }) => {
-                // Expected error
-            }
+            Err(SandboxError::OutsideSandbox { .. }) => {}
             Ok(_) => panic!("Path outside sandbox should be rejected"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -535,14 +523,11 @@ mod sandbox_tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
 
-        // Create a symlink inside sandbox that points outside
         let symlink_path = temp_dir.path().join("escape_link");
         let outside_path = temp_dir.path().parent().unwrap().join("target.txt");
 
-        // Create actual file outside sandbox
         fs::write(&outside_path, "test content").expect("Failed to write file");
 
-        // Create symlink pointing outside
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&outside_path, &symlink_path)
@@ -557,9 +542,7 @@ mod sandbox_tests {
 
         let result = sandbox.validate_path(&symlink_path);
         match result {
-            Err(SandboxError::OutsideSandbox { .. }) => {
-                // Expected error - symlink should be rejected
-            }
+            Err(SandboxError::OutsideSandbox { .. }) => {}
             Ok(_) => panic!("Symlink escaping sandbox should be rejected"),
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
@@ -570,15 +553,12 @@ mod sandbox_tests {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
 
-        // Create a subdirectory
         let subdir = temp_dir.path().join("subdir");
         fs::create_dir(&subdir).expect("Failed to create subdir");
 
-        // Create a file in the subdirectory
         let test_file = subdir.join("test.txt");
         fs::write(&test_file, "test content").expect("Failed to create test file");
 
-        // Test relative path from sandbox root
         let relative_path = Path::new("subdir/test.txt");
         let result = sandbox.validate_path(relative_path);
 
@@ -605,7 +585,6 @@ mod sandbox_tests {
     fn default_sandbox_uses_current_directory() {
         let sandbox = SandboxPolicy::default();
 
-        // Test that current directory is within sandbox
         let result = sandbox.validate_path(Path::new("."));
         assert!(
             result.is_ok(),
