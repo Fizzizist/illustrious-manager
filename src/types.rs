@@ -226,6 +226,13 @@ pub enum AgentEvent {
 /// A pinned, boxed stream type alias for convenience
 pub type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
+/// Response from frontend to agent when confirmation is required
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmationResponse {
+    Approved,
+    Rejected,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
