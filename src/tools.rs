@@ -43,13 +43,7 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
-/// Definition of a tool for discovery/registration
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolDefinition {
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
-}
+pub use crate::types::ToolDefinition;
 
 /// Trait that all tools must implement
 pub trait Tool: Send + Sync {
