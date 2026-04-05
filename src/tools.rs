@@ -352,6 +352,34 @@ mod tests {
     }
 }
 
+fn path_is_within(path: &Path, sandbox: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let path_components: Vec<_> = path.components().collect();
+        let sandbox_components: Vec<_> = sandbox.components().collect();
+        if path_components.len() < sandbox_components.len() {
+            return false;
+        }
+        path_components
+            .iter()
+            .zip(sandbox_components.iter())
+            .all(|(p, s)| match (p, s) {
+                (Component::Prefix(a), Component::Prefix(b)) => {
+                    a.to_string().to_lowercase() == b.to_string().to_lowercase()
+                }
+                (Component::Normal(a), Component::Normal(b)) => {
+                    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+                }
+                _ => p == s,
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(sandbox)
+    }
+}
+
 /// Sandbox policy for validating file paths
 ///
 /// Ensures all file operations stay within the configured sandbox root directory.
@@ -401,34 +429,7 @@ impl SandboxPolicy {
             SandboxError::InvalidPath(format!("Cannot canonicalize path: {:?}", path))
         })?;
 
-        #[cfg(windows)]
-        let is_within = {
-            use std::path::Component;
-            let canonical_components: Vec<_> = canonical.components().collect();
-            let sandbox_components: Vec<_> = sandbox_canonical.components().collect();
-
-            if canonical_components.len() < sandbox_components.len() {
-                false
-            } else {
-                canonical_components
-                    .iter()
-                    .zip(sandbox_components.iter())
-                    .all(|(c, s)| match (c, s) {
-                        (Component::Prefix(a), Component::Prefix(b)) => {
-                            a.to_string().to_lowercase() == b.to_string().to_lowercase()
-                        }
-                        (Component::Normal(a), Component::Normal(b)) => {
-                            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-                        }
-                        _ => c == s,
-                    })
-            }
-        };
-
-        #[cfg(not(windows))]
-        let is_within = canonical.starts_with(&sandbox_canonical);
-
-        if !is_within {
+        if !path_is_within(&canonical, &sandbox_canonical) {
             return Err(SandboxError::OutsideSandbox {
                 path: canonical,
                 sandbox: sandbox_canonical,
@@ -438,14 +439,10 @@ impl SandboxPolicy {
         Ok(canonical)
     }
 
-    /// Validate a path for writing (file may not yet exist)
+    /// Validate a path for writing (file may not yet exist).
     ///
-    /// Walks up the path to find the nearest existing ancestor, canonicalizes it,
-    /// and verifies the intended write location stays within the sandbox.
-    ///
-    /// # Security
-    /// Rejects paths containing `..` components in the non-existing portion.
-    /// Symlinks in existing ancestors are resolved and checked against the sandbox.
+    /// Walks up to the nearest existing ancestor, canonicalizes it, and verifies
+    /// the intended write location stays within the sandbox.
     pub fn validate_write_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -502,7 +499,7 @@ impl SandboxPolicy {
             ))
         })?;
 
-        if !canonical_ancestor.starts_with(&sandbox_canonical) {
+        if !path_is_within(&canonical_ancestor, &sandbox_canonical) {
             return Err(SandboxError::OutsideSandbox {
                 path: canonical_ancestor,
                 sandbox: sandbox_canonical,
@@ -512,12 +509,6 @@ impl SandboxPolicy {
         let mut result = canonical_ancestor;
         for component in pending.iter().rev() {
             result = result.join(component);
-            if !result.starts_with(&sandbox_canonical) {
-                return Err(SandboxError::OutsideSandbox {
-                    path: result,
-                    sandbox: sandbox_canonical,
-                });
-            }
         }
 
         Ok(result)
@@ -682,7 +673,10 @@ mod sandbox_tests {
             result.is_ok(),
             "Non-existent path inside sandbox should be allowed for writing"
         );
-        assert_eq!(result.unwrap(), new_file);
+        assert_eq!(
+            result.expect("validate_write_path should succeed for path inside sandbox"),
+            new_file
+        );
     }
 
     #[test]
@@ -818,6 +812,16 @@ impl Tool for WriteFileTool {
             })?;
         }
 
+        // Re-validate after directory creation to mitigate TOCTOU: a symlink could
+        // have been inserted into the path between initial validation and create_dir_all.
+        let validated =
+            self.sandbox
+                .validate_write_path(path)
+                .map_err(|e| ToolError::Execution {
+                    tool_name: self.name().to_string(),
+                    message: e.to_string(),
+                })?;
+
         std::fs::write(&validated, content).map_err(|e| ToolError::Execution {
             tool_name: self.name().to_string(),
             message: format!("Failed to write file: {}", e),
@@ -848,7 +852,7 @@ mod write_file_tests {
 
         let file_path = temp_dir.path().join("hello.txt");
         let input = serde_json::json!({
-            "path": file_path.to_str().unwrap(),
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
             "content": "Hello, world!"
         });
 
@@ -869,7 +873,7 @@ mod write_file_tests {
         let tool = WriteFileTool::new(sandbox);
 
         let input = serde_json::json!({
-            "path": file_path.to_str().unwrap(),
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
             "content": "new content"
         });
 
@@ -892,7 +896,7 @@ mod write_file_tests {
             .join("c")
             .join("file.txt");
         let input = serde_json::json!({
-            "path": file_path.to_str().unwrap(),
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
             "content": "nested content"
         });
 
@@ -915,7 +919,7 @@ mod write_file_tests {
             .expect("Temp dir should have parent");
         let outside_path = parent.join("escape.txt");
         let input = serde_json::json!({
-            "path": outside_path.to_str().unwrap(),
+            "path": outside_path.to_str().expect("temp path should be valid UTF-8"),
             "content": "should not be written"
         });
 
@@ -949,7 +953,7 @@ mod write_file_tests {
         let tool = WriteFileTool::new(sandbox);
         let target = symlink_dir.join("escaped.txt");
         let input = serde_json::json!({
-            "path": target.to_str().unwrap(),
+            "path": target.to_str().expect("temp path should be valid UTF-8"),
             "content": "should not be written"
         });
 
@@ -970,7 +974,7 @@ mod write_file_tests {
         let file_path = temp_dir.path().join("count.txt");
         let content = "12345";
         let input = serde_json::json!({
-            "path": file_path.to_str().unwrap(),
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
             "content": content
         });
 
