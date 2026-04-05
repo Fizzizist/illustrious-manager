@@ -13,15 +13,14 @@ use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 
 /// Stateful SSE parser that tracks which block indices are tool_use blocks.
+#[derive(Default)]
 pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
 }
 
 impl VertexSseParser {
     pub fn new() -> Self {
-        Self {
-            tool_use_indices: HashSet::new(),
-        }
+        Self::default()
     }
 
     pub fn parse(&mut self, data: &str) -> Result<Option<StreamEvent>> {
