@@ -1,8 +1,8 @@
-use crate::types::ContentBlock;
-use crate::tools::{Tool, ToolError, ToolResult};
 use crate::tools::sandbox::SandboxPolicy;
+use crate::tools::{Tool, ToolError, ToolResult};
+use crate::types::ContentBlock;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// EditFile tool for performing exact string replacements in files
 ///
@@ -56,11 +56,13 @@ impl Tool for EditFile {
     fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         use std::fs;
 
-        let path_str = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                message: "Missing 'path' field".to_string(),
-            }
-        })?;
+        let path_str =
+            input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidInput {
+                    message: "Missing 'path' field".to_string(),
+                })?;
 
         let old_string = input
             .get("old_string")
@@ -91,11 +93,10 @@ impl Tool for EditFile {
                     message: format!("Path validation failed: {}", e),
                 })?;
 
-        let content =
-            fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
-                tool_name: self.name().to_string(),
-                message: format!("Failed to read file: {}", e),
-            })?;
+        let content = fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
+            tool_name: self.name().to_string(),
+            message: format!("Failed to read file: {}", e),
+        })?;
 
         if !content.contains(old_string) {
             return Err(ToolError::Execution {
@@ -108,10 +109,7 @@ impl Tool for EditFile {
         if matches > 1 {
             return Err(ToolError::Execution {
                 tool_name: self.name().to_string(),
-                message: format!(
-                    "'old_string' matches {} locations, must be unique",
-                    matches
-                ),
+                message: format!("'old_string' matches {} locations, must be unique", matches),
             });
         }
 
@@ -136,6 +134,7 @@ impl Tool for EditFile {
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn create_test_file(content: &str) -> (TempDir, PathBuf) {
