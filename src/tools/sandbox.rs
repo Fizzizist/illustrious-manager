@@ -1,5 +1,33 @@
 use std::path::{Path, PathBuf};
 
+pub(super) fn path_is_within(path: &Path, sandbox: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let path_components: Vec<_> = path.components().collect();
+        let sandbox_components: Vec<_> = sandbox.components().collect();
+        if path_components.len() < sandbox_components.len() {
+            return false;
+        }
+        path_components
+            .iter()
+            .zip(sandbox_components.iter())
+            .all(|(p, s)| match (p, s) {
+                (Component::Prefix(a), Component::Prefix(b)) => {
+                    a.to_string().to_lowercase() == b.to_string().to_lowercase()
+                }
+                (Component::Normal(a), Component::Normal(b)) => {
+                    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+                }
+                _ => p == s,
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        path.starts_with(sandbox)
+    }
+}
+
 /// Sandbox policy for validating file paths
 ///
 /// Ensures all file operations stay within the configured sandbox root directory.
@@ -49,34 +77,7 @@ impl SandboxPolicy {
             SandboxError::InvalidPath(format!("Cannot canonicalize path: {:?}", path))
         })?;
 
-        #[cfg(windows)]
-        let is_within = {
-            use std::path::Component;
-            let canonical_components: Vec<_> = canonical.components().collect();
-            let sandbox_components: Vec<_> = sandbox_canonical.components().collect();
-
-            if canonical_components.len() < sandbox_components.len() {
-                false
-            } else {
-                canonical_components
-                    .iter()
-                    .zip(sandbox_components.iter())
-                    .all(|(c, s)| match (c, s) {
-                        (Component::Prefix(a), Component::Prefix(b)) => {
-                            a.to_string().to_lowercase() == b.to_string().to_lowercase()
-                        }
-                        (Component::Normal(a), Component::Normal(b)) => {
-                            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-                        }
-                        _ => c == s,
-                    })
-            }
-        };
-
-        #[cfg(not(windows))]
-        let is_within = canonical.starts_with(&sandbox_canonical);
-
-        if !is_within {
+        if !path_is_within(&canonical, &sandbox_canonical) {
             return Err(SandboxError::OutsideSandbox {
                 path: canonical,
                 sandbox: sandbox_canonical,
@@ -84,6 +85,81 @@ impl SandboxPolicy {
         }
 
         Ok(canonical)
+    }
+
+    /// Validate a path for writing (file may not yet exist).
+    ///
+    /// Walks up to the nearest existing ancestor, canonicalizes it, and verifies
+    /// the intended write location stays within the sandbox.
+    pub fn validate_write_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+
+        let sandbox_canonical = self.root.canonicalize().map_err(|_| {
+            SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
+        })?;
+
+        let mut existing_ancestor = absolute.clone();
+        let mut pending: Vec<std::ffi::OsString> = vec![];
+
+        loop {
+            match existing_ancestor.try_exists() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(SandboxError::InvalidPath(format!(
+                        "Cannot check path existence: {:?}",
+                        existing_ancestor
+                    )));
+                }
+            }
+
+            let component = existing_ancestor
+                .file_name()
+                .ok_or_else(|| {
+                    SandboxError::InvalidPath(format!("Cannot resolve write path: {:?}", path))
+                })?
+                .to_os_string();
+
+            if component == ".." {
+                return Err(SandboxError::InvalidPath(
+                    "Path traversal via '..' is not allowed".to_string(),
+                ));
+            }
+
+            pending.push(component);
+
+            existing_ancestor = existing_ancestor
+                .parent()
+                .ok_or_else(|| {
+                    SandboxError::InvalidPath(format!("Cannot resolve write path: {:?}", path))
+                })?
+                .to_path_buf();
+        }
+
+        let canonical_ancestor = existing_ancestor.canonicalize().map_err(|_| {
+            SandboxError::InvalidPath(format!(
+                "Cannot canonicalize ancestor: {:?}",
+                existing_ancestor
+            ))
+        })?;
+
+        if !path_is_within(&canonical_ancestor, &sandbox_canonical) {
+            return Err(SandboxError::OutsideSandbox {
+                path: canonical_ancestor,
+                sandbox: sandbox_canonical,
+            });
+        }
+
+        let mut result = canonical_ancestor;
+        for component in pending.iter().rev() {
+            result = result.join(component);
+        }
+
+        Ok(result)
     }
 
     /// Get the sandbox root directory
@@ -232,5 +308,83 @@ mod tests {
             result.is_ok(),
             "Current directory should be in default sandbox"
         );
+    }
+
+    #[test]
+    fn validate_write_path_allows_nonexistent_file_inside_sandbox() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let new_file = temp_dir.path().join("new_file.txt");
+
+        let result = sandbox.validate_write_path(&new_file);
+        assert!(
+            result.is_ok(),
+            "Non-existent path inside sandbox should be allowed for writing"
+        );
+        assert_eq!(
+            result.expect("validate_write_path should succeed for path inside sandbox"),
+            new_file
+        );
+    }
+
+    #[test]
+    fn validate_write_path_rejects_nonexistent_file_outside_sandbox() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let parent = temp_dir
+            .path()
+            .parent()
+            .expect("Temp dir should have parent");
+        let outside_file = parent.join("outside_new.txt");
+
+        let result = sandbox.validate_write_path(&outside_file);
+        match result {
+            Err(SandboxError::OutsideSandbox { .. }) => {}
+            Ok(_) => panic!("Path outside sandbox should be rejected"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn validate_write_path_rejects_symlink_parent_escaping_sandbox() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let outside_dir = TempDir::new().expect("Failed to create outside dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+
+        let symlink_dir = temp_dir.path().join("escape_dir");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside_dir.path(), &symlink_dir)
+                .expect("Failed to create symlink");
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(outside_dir.path(), &symlink_dir)
+                .expect("Failed to create symlink");
+        }
+
+        let target = symlink_dir.join("file.txt");
+        let result = sandbox.validate_write_path(&target);
+        match result {
+            Err(SandboxError::OutsideSandbox { .. }) => {}
+            Ok(_) => panic!("Symlink escaping sandbox should be rejected"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn validate_write_path_rejects_dotdot_traversal() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+
+        let traversal = temp_dir
+            .path()
+            .join("subdir")
+            .join("..")
+            .join("..")
+            .join("escape.txt");
+        let result = sandbox.validate_write_path(&traversal);
+        assert!(result.is_err(), "Path traversal should be rejected");
     }
 }
