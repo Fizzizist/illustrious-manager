@@ -132,7 +132,7 @@ mod tests {
         };
         let messages = vec![Message {
             role: Role::User,
-            content: "Hello".to_string(),
+            content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -152,11 +152,11 @@ mod tests {
         let messages = vec![
             Message {
                 role: Role::User,
-                content: "Hello".to_string(),
+                content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
             },
             Message {
                 role: Role::Assistant,
-                content: "Hi there!".to_string(),
+                content: vec![crate::types::ContentBlock::Text("Hi there!".to_string())],
             },
         ];
 
@@ -164,9 +164,12 @@ mod tests {
 
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
         assert_eq!(body["messages"][0]["role"], "user");
-        assert_eq!(body["messages"][0]["content"], "Hello");
+        assert_eq!(body["messages"][0]["content"], serde_json::json!(["Hello"]));
         assert_eq!(body["messages"][1]["role"], "assistant");
-        assert_eq!(body["messages"][1]["content"], "Hi there!");
+        assert_eq!(
+            body["messages"][1]["content"],
+            serde_json::json!(["Hi there!"])
+        );
     }
 
     #[test]

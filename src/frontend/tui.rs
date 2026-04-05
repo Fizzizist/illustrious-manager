@@ -233,6 +233,9 @@ async fn run_app(
                                 app.current_response.clear();
                                 app.state = AppState::Input;
                             }
+                            AgentEvent::ToolUseReceived { .. } | AgentEvent::ToolResult { .. } | AgentEvent::ToolConfirmationRequired { .. } => {
+                                app.current_response.push_str("[Tool use not yet supported]");
+                            }
                         }
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
