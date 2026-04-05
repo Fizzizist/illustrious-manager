@@ -4,6 +4,7 @@ use crate::types::ContentBlock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Error type for tool operations
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -354,5 +355,248 @@ mod tests {
             tool_name: "my_tool".to_string(),
         };
         assert_eq!(format!("{}", err), "Tool 'my_tool' already registered");
+    }
+}
+
+/// Sandbox policy for validating file paths
+///
+/// Ensures all file operations stay within the configured sandbox root directory.
+/// Prevents directory traversal attacks and symlink-based sandbox escapes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SandboxPolicy {
+    root: PathBuf,
+}
+
+impl SandboxPolicy {
+    /// Create a new sandbox policy with the specified root directory
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// Validate that a path is within the sandbox
+    ///
+    /// Resolves symlinks and canonicalizes the path, then ensures it stays
+    /// within the sandbox root directory.
+    pub fn validate_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
+        // Resolve the path to its absolute form
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+
+        // Get the canonicalized sandbox root for comparison
+        let sandbox_canonical = self.root.canonicalize().map_err(|_| {
+            SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
+        })?;
+
+        // Try to canonicalize the path (if it exists)
+        // If it doesn't exist, we'll validate the absolute path
+        let validated = if absolute.exists() {
+            let canonical = absolute.canonicalize().map_err(|_| {
+                SandboxError::InvalidPath(format!("Cannot canonicalize path: {:?}", path))
+            })?;
+
+            // Check if the canonicalized path is within the sandbox
+            if !canonical.starts_with(&sandbox_canonical) {
+                return Err(SandboxError::OutsideSandbox {
+                    path: canonical,
+                    sandbox: sandbox_canonical,
+                });
+            }
+
+            canonical
+        } else {
+            // For non-existent paths, normalize the path by cleaning up . and ..
+            // Then check if it's within the sandbox
+            let normalized = self.normalize_path(&absolute)?;
+
+            // Check if the normalized path is within the sandbox
+            if !normalized.starts_with(&sandbox_canonical) {
+                return Err(SandboxError::OutsideSandbox {
+                    path: normalized,
+                    sandbox: sandbox_canonical,
+                });
+            }
+
+            normalized
+        };
+
+        Ok(validated)
+    }
+
+    /// Normalize a path by resolving . and .. components
+    fn normalize_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
+        let mut result = PathBuf::new();
+
+        for component in path.components() {
+            use std::path::Component;
+            match component {
+                Component::Prefix(_) | Component::RootDir => {
+                    result.push(component);
+                }
+                Component::Normal(_) => {
+                    result.push(component);
+                }
+                Component::CurDir => {
+                    // Skip . (current directory)
+                }
+                Component::ParentDir => {
+                    // Go up one directory if possible
+                    if !result.pop() {
+                        return Err(SandboxError::InvalidPath(
+                            "Path escapes root directory".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get the sandbox root directory
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Default for SandboxPolicy {
+    fn default() -> Self {
+        Self::new(&std::env::current_dir().expect("Failed to get current directory"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SandboxError {
+    OutsideSandbox { path: PathBuf, sandbox: PathBuf },
+    InvalidPath(String),
+}
+
+impl std::fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SandboxError::OutsideSandbox { path, sandbox } => {
+                write!(f, "Path {:?} is outside sandbox {:?}", path, sandbox)
+            }
+            SandboxError::InvalidPath(msg) => {
+                write!(f, "Invalid path: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SandboxError {}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn path_inside_sandbox_is_allowed() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let test_file = temp_dir.path().join("test.txt");
+
+        // Create the file
+        fs::write(&test_file, "test content").expect("Failed to create test file");
+
+        let result = sandbox.validate_path(&test_file);
+        assert!(result.is_ok(), "Path inside sandbox should be allowed");
+        assert_eq!(result.unwrap(), test_file.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn path_outside_sandbox_is_rejected() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let outside_path = temp_dir.path().parent().unwrap().join("outside.txt");
+
+        // Create the file outside sandbox
+        fs::write(&outside_path, "test content").expect("Failed to create outside file");
+
+        let result = sandbox.validate_path(&outside_path);
+        match result {
+            Err(SandboxError::OutsideSandbox { .. }) => {
+                // Expected error
+            }
+            Ok(_) => panic!("Path outside sandbox should be rejected"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn symlink_escaping_sandbox_is_rejected() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+
+        // Create a symlink inside sandbox that points outside
+        let symlink_path = temp_dir.path().join("escape_link");
+        let outside_path = temp_dir.path().parent().unwrap().join("target.txt");
+
+        // Create actual file outside sandbox
+        fs::write(&outside_path, "test content").expect("Failed to write file");
+
+        // Create symlink pointing outside
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside_path, &symlink_path)
+                .expect("Failed to create symlink");
+        }
+
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(&outside_path, &symlink_path)
+                .expect("Failed to create symlink");
+        }
+
+        let result = sandbox.validate_path(&symlink_path);
+        match result {
+            Err(SandboxError::OutsideSandbox { .. }) => {
+                // Expected error - symlink should be rejected
+            }
+            Ok(_) => panic!("Symlink escaping sandbox should be rejected"),
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn relative_paths_resolved_correctly() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+
+        // Create a subdirectory
+        let subdir = temp_dir.path().join("subdir");
+        fs::create_dir(&subdir).expect("Failed to create subdir");
+
+        // Create a file in the subdirectory
+        let test_file = subdir.join("test.txt");
+        fs::write(&test_file, "test content").expect("Failed to create test file");
+
+        // Test relative path from sandbox root
+        let relative_path = Path::new("subdir/test.txt");
+        let result = sandbox.validate_path(relative_path);
+
+        assert!(result.is_ok(), "Relative path should be resolved correctly");
+        let canonical = result.unwrap();
+        assert!(canonical.starts_with(temp_dir.path()));
+        assert!(canonical.ends_with("subdir/test.txt"));
+    }
+
+    #[test]
+    fn default_sandbox_uses_current_directory() {
+        let sandbox = SandboxPolicy::default();
+        let current_dir = std::env::current_dir().expect("Failed to get cwd");
+
+        // Test that current directory is within sandbox
+        let result = sandbox.validate_path(&current_dir);
+        assert!(
+            result.is_ok(),
+            "Current directory should be in default sandbox"
+        );
     }
 }
