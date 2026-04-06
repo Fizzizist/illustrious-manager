@@ -93,7 +93,8 @@ impl App {
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+        let max = self.max_scroll();
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
     }
 
     pub fn scroll_down(&mut self, amount: u16) {
@@ -102,6 +103,11 @@ impl App {
 
     fn half_page(&self) -> u16 {
         (self.viewport_height / 2).max(1)
+    }
+
+    fn max_scroll(&self) -> u16 {
+        let total = self.conversation_lines().len() as u16;
+        total.saturating_sub(self.viewport_height)
     }
 
     fn conversation_lines(&self) -> Vec<Line<'_>> {
@@ -160,19 +166,17 @@ impl Default for App {
 }
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
-pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
+pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(frame.area());
 
     let visible_height = chunks[0].height.saturating_sub(2);
-    app.viewport_height = visible_height;
     let conv_lines = app.conversation_lines();
     let total_lines = conv_lines.len() as u16;
     let auto_scroll = total_lines.saturating_sub(visible_height);
-    let clamped_offset = app.scroll_offset.min(auto_scroll);
-    let scroll_row = auto_scroll.saturating_sub(clamped_offset);
+    let scroll_row = auto_scroll.saturating_sub(app.scroll_offset.min(auto_scroll));
 
     let conversation = Paragraph::new(conv_lines)
         .block(Block::default().borders(Borders::ALL).title("Conversation"))
@@ -235,7 +239,8 @@ async fn run_app(
     }
 
     loop {
-        terminal.draw(|frame| render_app(&mut app, frame))?;
+        app.viewport_height = terminal.size()?.height.saturating_sub(5);
+        terminal.draw(|frame| render_app(&app, frame))?;
 
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
@@ -360,6 +365,7 @@ async fn run_app(
                     match agent_event {
                         AgentEvent::TokenReceived(text) => {
                             app.current_response.push_str(&text);
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ResponseComplete(full) => {
                             app.conversation.push(ConversationEntry {
@@ -369,6 +375,7 @@ async fn run_app(
                             app.current_response.clear();
                             app.confirmation_tx = None;
                             app.state = AppState::Input;
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::Error(msg) => {
                             app.conversation.push(ConversationEntry {
@@ -378,6 +385,7 @@ async fn run_app(
                             app.current_response.clear();
                             app.confirmation_tx = None;
                             app.state = AppState::Input;
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolUseReceived { name, input, .. } => {
                             app.current_response.clear();
@@ -385,6 +393,7 @@ async fn run_app(
                                 role: ConversationRole::ToolUse,
                                 content: tool_use_display_content(&name, &input),
                             });
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolResult { content, is_error, .. } => {
                             let role = if is_error {
@@ -396,6 +405,7 @@ async fn run_app(
                                 role,
                                 content,
                             });
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                             app.current_response.clear();
@@ -405,13 +415,32 @@ async fn run_app(
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
                     if event::poll(std::time::Duration::from_millis(0))?
-                        && let Event::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        }) = event::read()?
+                        && let Event::Key(key) = event::read()?
                     {
-                        break;
+                        match key {
+                            KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => break,
+                            KeyEvent {
+                                code: KeyCode::Char('u'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                let amount = app.half_page();
+                                app.scroll_up(amount);
+                            }
+                            KeyEvent {
+                                code: KeyCode::Char('d'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } => {
+                                let amount = app.half_page();
+                                app.scroll_down(amount);
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -472,9 +501,21 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
+    fn app_with_content(viewport_height: u16) -> App {
+        let mut app = App::new();
+        app.viewport_height = viewport_height;
+        for i in 0..40 {
+            app.conversation.push(ConversationEntry {
+                role: ConversationRole::User,
+                content: format!("line {i}"),
+            });
+        }
+        app
+    }
+
     #[test]
     fn scroll_up_increases_offset() {
-        let mut app = App::new();
+        let mut app = app_with_content(10);
         app.scroll_up(10);
         assert_eq!(app.scroll_offset, 10);
         app.scroll_up(5);
@@ -482,8 +523,16 @@ mod tests {
     }
 
     #[test]
+    fn scroll_up_clamps_at_max_scroll() {
+        let mut app = app_with_content(10);
+        let max = app.max_scroll();
+        app.scroll_up(max + 50);
+        assert_eq!(app.scroll_offset, max);
+    }
+
+    #[test]
     fn scroll_down_decreases_offset() {
-        let mut app = App::new();
+        let mut app = app_with_content(10);
         app.scroll_offset = 20;
         app.scroll_down(10);
         assert_eq!(app.scroll_offset, 10);
