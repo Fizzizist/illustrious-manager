@@ -31,40 +31,44 @@ impl ZaiSseParser {
 
         // Check for finish_reason indicating tool calls are complete
         if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str()
-            && finish_reason == "tool_calls" {
-                // Clear all tracked tool calls and emit ToolUseDone
-                self.tool_calls_by_index.clear();
-                return Ok(Some(StreamEvent::ToolUseDone));
-            }
+            && finish_reason == "tool_calls"
+        {
+            // Clear all tracked tool calls and emit ToolUseDone
+            self.tool_calls_by_index.clear();
+            return Ok(Some(StreamEvent::ToolUseDone));
+        }
 
         // Check for text content in delta
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
-            && !content.is_empty() {
-                return Ok(Some(StreamEvent::TextDelta(content.to_string())));
-            }
+            && !content.is_empty()
+        {
+            return Ok(Some(StreamEvent::TextDelta(content.to_string())));
+        }
 
         // Check for tool_calls in delta (OpenAI-compatible format)
         if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
             for tool_call in tool_calls {
                 if let Some(index) = tool_call["index"].as_u64()
-                    && let Some(function) = tool_call["function"].as_object() {
-                        // Check if this is a new tool call with a name
-                        if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
-                            // Generate a stable ID for this tool call
-                            let id = format!("tool_{}", index);
-                            self.tool_calls_by_index.insert(index, id.clone());
-                            return Ok(Some(StreamEvent::ToolUseStart {
-                                id,
-                                name: name.to_string(),
-                            }));
-                        }
-
-                        // Check if this has arguments (delta)
-                        if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
-                            && !arguments.is_empty() {
-                                return Ok(Some(StreamEvent::ToolUseDelta(arguments.to_string())));
-                            }
+                    && let Some(function) = tool_call["function"].as_object()
+                {
+                    // Check if this is a new tool call with a name
+                    if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                        // Generate a stable ID for this tool call
+                        let id = format!("tool_{}", index);
+                        self.tool_calls_by_index.insert(index, id.clone());
+                        return Ok(Some(StreamEvent::ToolUseStart {
+                            id,
+                            name: name.to_string(),
+                        }));
                     }
+
+                    // Check if this has arguments (delta)
+                    if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
+                        && !arguments.is_empty()
+                    {
+                        return Ok(Some(StreamEvent::ToolUseDelta(arguments.to_string())));
+                    }
+                }
             }
         }
 
