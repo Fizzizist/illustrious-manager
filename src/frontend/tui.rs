@@ -105,6 +105,30 @@ impl App {
         (self.viewport_height / 2).max(1)
     }
 
+    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let amount = self.half_page();
+                self.scroll_up(amount);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let amount = self.half_page();
+                self.scroll_down(amount);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn max_scroll(&self) -> u16 {
         let total = self.conversation_lines().len() as u16;
         total.saturating_sub(self.viewport_height)
@@ -245,93 +269,63 @@ async fn run_app(
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
-            {
-                match key {
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    }
-                    | KeyEvent {
-                        code: KeyCode::Esc, ..
-                    } => break,
-                    KeyEvent {
-                        code: KeyCode::Char('u'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        let amount = app.half_page();
-                        app.scroll_up(amount);
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('d'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        let amount = app.half_page();
-                        app.scroll_down(amount);
-                    }
-                    KeyEvent {
-                        code: KeyCode::Enter,
-                        ..
-                    } => {
-                        if !app.input.trim().is_empty() {
-                            stream_task =
-                                Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
+                && !app.handle_scroll_key(&key) {
+                    match key {
+                        KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
                         }
+                        | KeyEvent {
+                            code: KeyCode::Esc, ..
+                        } => break,
+                        KeyEvent {
+                            code: KeyCode::Enter,
+                            ..
+                        } => {
+                            if !app.input.trim().is_empty() {
+                                stream_task =
+                                    Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
+                            }
+                        }
+                        KeyEvent {
+                            code: KeyCode::Char(c),
+                            ..
+                        } => {
+                            app.input.push(c);
+                        }
+                        KeyEvent {
+                            code: KeyCode::Backspace,
+                            ..
+                        } => {
+                            app.input.pop();
+                        }
+                        _ => {}
                     }
-                    KeyEvent {
-                        code: KeyCode::Char(c),
-                        ..
-                    } => {
-                        app.input.push(c);
-                    }
-                    KeyEvent {
-                        code: KeyCode::Backspace,
-                        ..
-                    } => {
-                        app.input.pop();
-                    }
-                    _ => {}
                 }
-            }
         } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
             {
-                let response = match key {
-                    KeyEvent {
-                        code: KeyCode::Char('y') | KeyCode::Char('Y'),
-                        ..
-                    } => Some(ConfirmationResponse::Approved),
-                    KeyEvent {
-                        code: KeyCode::Char('n') | KeyCode::Char('N'),
-                        ..
-                    } => Some(ConfirmationResponse::Rejected),
-                    KeyEvent {
-                        code: KeyCode::Char('u'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        let amount = app.half_page();
-                        app.scroll_up(amount);
-                        None
+                let response = if app.handle_scroll_key(&key) {
+                    None
+                } else {
+                    match key {
+                        KeyEvent {
+                            code: KeyCode::Char('y') | KeyCode::Char('Y'),
+                            ..
+                        } => Some(ConfirmationResponse::Approved),
+                        KeyEvent {
+                            code: KeyCode::Char('n') | KeyCode::Char('N'),
+                            ..
+                        } => Some(ConfirmationResponse::Rejected),
+                        KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => break,
+                        _ => None,
                     }
-                    KeyEvent {
-                        code: KeyCode::Char('d'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => {
-                        let amount = app.half_page();
-                        app.scroll_down(amount);
-                        None
-                    }
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => break,
-                    _ => None,
                 };
 
                 if let Some(response) = response {
@@ -416,32 +410,14 @@ async fn run_app(
                 _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
                     if event::poll(std::time::Duration::from_millis(0))?
                         && let Event::Key(key) = event::read()?
-                    {
-                        match key {
-                            KeyEvent {
+                        && !app.handle_scroll_key(&key)
+                            && let KeyEvent {
                                 code: KeyCode::Char('c'),
                                 modifiers: KeyModifiers::CONTROL,
                                 ..
-                            } => break,
-                            KeyEvent {
-                                code: KeyCode::Char('u'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } => {
-                                let amount = app.half_page();
-                                app.scroll_up(amount);
+                            } = key {
+                                break;
                             }
-                            KeyEvent {
-                                code: KeyCode::Char('d'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } => {
-                                let amount = app.half_page();
-                                app.scroll_down(amount);
-                            }
-                            _ => {}
-                        }
-                    }
                 }
             }
         }
