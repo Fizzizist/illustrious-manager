@@ -1,7 +1,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 
 use crate::types::{AgentEvent, BoxStream, ConfirmationResponse};
 
@@ -9,7 +9,6 @@ pub async fn run(
     stream: BoxStream<AgentEvent>,
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
 ) -> Result<()> {
-    use std::io::IsTerminal;
     let is_tty = std::io::stdin().is_terminal();
     let stdout = io::stdout();
     let mut handle = stdout.lock();
@@ -62,14 +61,18 @@ async fn run_with_writer<W: Write, R: BufRead>(
                     anyhow::bail!("tool confirmation required in non-TTY mode");
                 }
                 eprint!("Allow tool '{}' with input {}? [y/N] ", name, input);
+                io::stderr().flush()?;
                 let mut response = String::new();
+                // blocking call, acceptable for single-shot CLI
                 stdin.read_line(&mut response)?;
                 let decision = if response.trim().eq_ignore_ascii_case("y") {
                     ConfirmationResponse::Approved
                 } else {
                     ConfirmationResponse::Rejected
                 };
-                let _ = confirm_tx.unbounded_send(decision);
+                confirm_tx
+                    .unbounded_send(decision)
+                    .map_err(|_| anyhow::anyhow!("agent confirmation channel closed"))?;
             }
         }
     }
