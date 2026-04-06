@@ -443,6 +443,7 @@ pub async fn submit_message(
         content: input.clone(),
     });
 
+    app.scroll_offset = 0;
     app.state = AppState::Streaming;
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
@@ -520,6 +521,49 @@ mod tests {
         let mut app = App::new();
         app.scroll_offset = 5;
         app.scroll_down(20);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[tokio::test]
+    async fn submit_message_resets_scroll_offset() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let agent = Arc::new(Agent::new(
+            Box::new(StubBackend),
+            RequestConfig {
+                model: "test".to_string(),
+                max_tokens: 1024,
+                tools: vec![],
+            },
+        ));
+
+        let mut app = app_with_content(10);
+        app.scroll_offset = 15;
+        app.input = "hello".to_string();
+
+        let (tx, _rx) = mpsc::channel(10);
+        submit_message(&mut app, agent, &tx)
+            .await
+            .expect("submit must succeed");
+
         assert_eq!(app.scroll_offset, 0);
     }
 
