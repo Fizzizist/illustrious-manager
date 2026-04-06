@@ -281,7 +281,7 @@ pub async fn submit_message(
     // so it doesn't block the UI event loop
     let handle = tokio::spawn(async move {
         // Call agent.send() in the background task
-        match agent.send(input).await {
+        match agent.send(input, None).await {
             Ok(mut stream) => {
                 while let Some(event) = stream.next().await {
                     if tx.send(event).await.is_err() {

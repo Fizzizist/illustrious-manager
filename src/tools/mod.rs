@@ -56,6 +56,9 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn input_schema(&self) -> &Value;
     fn execute(&self, input: Value) -> Result<ToolResult, ToolError>;
+    fn is_write_tool(&self) -> bool {
+        false
+    }
 }
 
 /// Registry for tool discovery and execution
