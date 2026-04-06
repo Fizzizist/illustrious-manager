@@ -5,6 +5,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
+use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -16,13 +17,19 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
-use crate::types::AgentEvent;
+use crate::types::{AgentEvent, ConfirmationResponse};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const TOOL_RESULT_TRUNCATE_LEN: usize = 200;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
     Input,
     Streaming,
+    ToolConfirmation {
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +37,8 @@ pub enum ConversationRole {
     User,
     Assistant,
     Error,
+    ToolUse,
+    ToolResult,
 }
 
 impl ConversationRole {
@@ -38,6 +47,8 @@ impl ConversationRole {
             ConversationRole::User => "You",
             ConversationRole::Assistant => "Assistant",
             ConversationRole::Error => "Error",
+            ConversationRole::ToolUse => "[Tool]",
+            ConversationRole::ToolResult => "[Result]",
         }
     }
 
@@ -46,6 +57,8 @@ impl ConversationRole {
             ConversationRole::User => Color::Green,
             ConversationRole::Assistant => Color::Blue,
             ConversationRole::Error => Color::Red,
+            ConversationRole::ToolUse => Color::Cyan,
+            ConversationRole::ToolResult => Color::Yellow,
         }
     }
 }
@@ -60,6 +73,7 @@ pub struct App {
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub state: AppState,
+    pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
 }
 
 impl App {
@@ -69,6 +83,7 @@ impl App {
             conversation: Vec::new(),
             current_response: String::new(),
             state: AppState::Input,
+            confirmation_tx: None,
         }
     }
 
@@ -79,7 +94,8 @@ impl App {
                 format!("{}:", entry.role.display_label()),
                 Style::default().fg(entry.role.color()),
             )));
-            for line in entry.content.lines() {
+            let display_content = truncate_if_needed(&entry.content, entry.role);
+            for line in display_content.lines() {
                 lines.push(Line::from(format!("  {line}")));
             }
             lines.push(Line::from(""));
@@ -96,6 +112,14 @@ impl App {
         }
 
         lines
+    }
+}
+
+fn truncate_if_needed(content: &str, role: ConversationRole) -> String {
+    if role == ConversationRole::ToolResult && content.len() > TOOL_RESULT_TRUNCATE_LEN {
+        format!("{}...[truncated]", &content[..TOOL_RESULT_TRUNCATE_LEN])
+    } else {
+        content.to_string()
     }
 }
 
@@ -123,11 +147,25 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .scroll((scroll, 0));
     frame.render_widget(conversation, chunks[0]);
 
-    let input_title = match app.state {
+    let input_title = match &app.state {
         AppState::Input => "Input (Enter to send, Ctrl+C to quit)",
         AppState::Streaming => "Streaming...",
+        AppState::ToolConfirmation { name, .. } => {
+            // We store the title in a thread-local to avoid lifetime issues with the format string
+            // Since ratatui titles accept Into<Title>, we render a static-ish approach via Span
+            let _ = name;
+            "Confirm tool execution [y/n]"
+        }
     };
-    let input = Paragraph::new(app.input.as_str())
+
+    let input_content = match &app.state {
+        AppState::ToolConfirmation { name, input } => {
+            format!("Allow '{}' with input {}?", name, input)
+        }
+        _ => app.input.clone(),
+    };
+
+    let input = Paragraph::new(input_content.as_str())
         .block(Block::default().borders(Borders::ALL).title(input_title));
     frame.render_widget(input, chunks[1]);
 
@@ -171,7 +209,7 @@ async fn run_app(
     loop {
         terminal.draw(|frame| render_app(&app, frame))?;
 
-        match app.state {
+        match &app.state.clone() {
             AppState::Input => {
                 if event::poll(std::time::Duration::from_millis(50))?
                     && let Event::Key(key) = event::read()?
@@ -210,6 +248,58 @@ async fn run_app(
                     }
                 }
             }
+            AppState::ToolConfirmation { name, input } => {
+                let name = name.clone();
+                let input = input.clone();
+                if event::poll(std::time::Duration::from_millis(50))?
+                    && let Event::Key(key) = event::read()?
+                {
+                    match key {
+                        KeyEvent {
+                            code: KeyCode::Char('y') | KeyCode::Char('Y'),
+                            ..
+                        } => {
+                            app.conversation.push(ConversationEntry {
+                                role: ConversationRole::ToolUse,
+                                content: format!(
+                                    "{}\n  {}",
+                                    name,
+                                    serde_json::to_string(&input)
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                ),
+                            });
+                            if let Some(tx) = &app.confirmation_tx {
+                                let _ = tx.unbounded_send(ConfirmationResponse::Approved);
+                            }
+                            app.state = AppState::Streaming;
+                        }
+                        KeyEvent {
+                            code: KeyCode::Char('n') | KeyCode::Char('N'),
+                            ..
+                        } => {
+                            app.conversation.push(ConversationEntry {
+                                role: ConversationRole::ToolUse,
+                                content: format!(
+                                    "{}\n  {}",
+                                    name,
+                                    serde_json::to_string(&input)
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                ),
+                            });
+                            if let Some(tx) = &app.confirmation_tx {
+                                let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
+                            }
+                            app.state = AppState::Streaming;
+                        }
+                        KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => break,
+                        _ => {}
+                    }
+                }
+            }
             AppState::Streaming => {
                 tokio::select! {
                     Some(agent_event) = event_rx.recv() => {
@@ -223,6 +313,7 @@ async fn run_app(
                                     content: full,
                                 });
                                 app.current_response.clear();
+                                app.confirmation_tx = None;
                                 app.state = AppState::Input;
                             }
                             AgentEvent::Error(msg) => {
@@ -231,10 +322,35 @@ async fn run_app(
                                     content: msg,
                                 });
                                 app.current_response.clear();
+                                app.confirmation_tx = None;
                                 app.state = AppState::Input;
                             }
-                            AgentEvent::ToolUseReceived { .. } | AgentEvent::ToolResult { .. } | AgentEvent::ToolConfirmationRequired { .. } => {
-                                app.current_response.push_str("[Tool use not yet supported]");
+                            AgentEvent::ToolUseReceived { name, input, .. } => {
+                                app.current_response.clear();
+                                app.conversation.push(ConversationEntry {
+                                    role: ConversationRole::ToolUse,
+                                    content: format!(
+                                        "{}\n  {}",
+                                        name,
+                                        serde_json::to_string(&input)
+                                            .unwrap_or_else(|_| "{}".to_string())
+                                    ),
+                                });
+                            }
+                            AgentEvent::ToolResult { content, is_error, .. } => {
+                                let role = if is_error {
+                                    ConversationRole::Error
+                                } else {
+                                    ConversationRole::ToolResult
+                                };
+                                app.conversation.push(ConversationEntry {
+                                    role,
+                                    content,
+                                });
+                            }
+                            AgentEvent::ToolConfirmationRequired { name, input, .. } => {
+                                app.current_response.clear();
+                                app.state = AppState::ToolConfirmation { name, input };
                             }
                         }
                     }
@@ -275,13 +391,13 @@ pub async fn submit_message(
 
     app.state = AppState::Streaming;
 
+    let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
+    app.confirmation_tx = Some(confirm_tx);
+
     let tx = event_tx.clone();
 
-    // Spawn the entire message sending operation in a background task
-    // so it doesn't block the UI event loop
     let handle = tokio::spawn(async move {
-        // Call agent.send() in the background task
-        match agent.send(input, None).await {
+        match agent.send(input, Some(confirm_rx)).await {
             Ok(mut stream) => {
                 while let Some(event) = stream.next().await {
                     if tx.send(event).await.is_err() {
