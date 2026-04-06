@@ -14,6 +14,9 @@ use agent::Agent;
 use futures::channel::mpsc;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
+use tools::edit_file::EditFile;
+use tools::write_file::WriteFileTool;
+use tools::sandbox::SandboxPolicy;
 use types::{ConfirmationResponse, RequestConfig};
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -87,6 +90,10 @@ async fn main() -> Result<()> {
         app_config.tools.confirmation.clone(),
         Box::new(|_| true),
     )))?;
+
+    let sandbox_policy = SandboxPolicy::new(std::path::Path::new(&app_config.tools.sandbox_root));
+    registry.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
+    registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
 
     let request_config = RequestConfig {
         model: selection.model,

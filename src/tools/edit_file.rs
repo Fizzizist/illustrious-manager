@@ -53,6 +53,10 @@ impl Tool for EditFile {
         &SCHEMA
     }
 
+
+    fn is_write_tool(&self) -> bool {
+        true
+    }
     fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         use std::fs;
 
