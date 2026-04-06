@@ -29,6 +29,7 @@ async fn run_with_writer<W: Write, R: BufRead>(
     while let Some(event) = stream.next().await {
         if let Some(ref mut log) = logger {
             log.log_event(&event)?;
+            log.flush()?;
         }
         match event {
             AgentEvent::TokenReceived(text) => {
