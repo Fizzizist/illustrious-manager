@@ -197,9 +197,24 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .split(frame.area());
 
     let visible_height = chunks[0].height.saturating_sub(2);
+    let text_width = chunks[0].width.saturating_sub(2);
     let conv_lines = app.conversation_lines();
-    let total_lines = conv_lines.len() as u16;
-    let auto_scroll = total_lines.saturating_sub(visible_height);
+    let total_visual: u16 = conv_lines
+        .iter()
+        .map(|line| {
+            if text_width == 0 {
+                1u16
+            } else {
+                let w = line.width() as u16;
+                if w == 0 {
+                    1u16
+                } else {
+                    (w + text_width - 1) / text_width
+                }
+            }
+        })
+        .sum();
+    let auto_scroll = total_visual.saturating_sub(visible_height);
     let scroll_row = auto_scroll.saturating_sub(app.scroll_offset.min(auto_scroll));
 
     let conversation = Paragraph::new(conv_lines)
