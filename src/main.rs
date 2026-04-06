@@ -2,6 +2,7 @@ pub mod agent;
 pub mod backend;
 pub mod config;
 pub mod frontend;
+pub mod logging;
 pub mod tools;
 pub mod types;
 
@@ -9,14 +10,16 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use agent::Agent;
 use futures::channel::mpsc;
+use logging::Logger;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
-use tools::write_file::WriteFileTool;
 use tools::sandbox::SandboxPolicy;
+use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -41,6 +44,9 @@ struct Cli {
 
     #[arg(long)]
     config: Option<PathBuf>,
+
+    #[arg(long)]
+    debug: bool,
 }
 
 #[derive(Debug)]
@@ -107,11 +113,21 @@ async fn main() -> Result<()> {
             .with_tool_config(&app_config.tools),
     );
 
+    let mut logger = if cli.debug {
+        let log_path = create_log_path()?;
+        Some(Logger::new(Some(log_path))?)
+    } else {
+        None
+    };
+
     match mode {
         Mode::SingleShot { prompt } => {
+            if let Some(ref mut log) = logger {
+                log.log_user_input(&prompt)?;
+            }
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
-            frontend::stdout::run(stream, confirm_tx).await?;
+            frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt).await?;
@@ -119,6 +135,17 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn create_log_path() -> Result<PathBuf> {
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("Time went backwards");
+    let timestamp = duration.as_secs();
+    Ok(PathBuf::from(format!(
+        "illustrious-manager_{}.log",
+        timestamp
+    )))
 }
 
 #[cfg(test)]
@@ -162,5 +189,17 @@ mod tests {
             }
             Mode::SingleShot { .. } => panic!("Expected Repl mode"),
         }
+    }
+
+    #[test]
+    fn debug_flag_is_parsed_when_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--debug"]).unwrap();
+        assert_eq!(cli.debug, true);
+    }
+
+    #[test]
+    fn debug_flag_is_false_when_not_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert_eq!(cli.debug, false);
     }
 }

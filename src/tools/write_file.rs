@@ -46,7 +46,6 @@ impl Tool for WriteFileTool {
         &self.schema
     }
 
-
     fn is_write_tool(&self) -> bool {
         true
     }

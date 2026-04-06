@@ -3,17 +3,19 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use std::io::{self, BufRead, IsTerminal, Write};
 
+use crate::logging::Logger;
 use crate::types::{AgentEvent, BoxStream, ConfirmationResponse};
 
 pub async fn run(
     stream: BoxStream<AgentEvent>,
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
+    logger: Option<&mut Logger>,
 ) -> Result<()> {
     let is_tty = std::io::stdin().is_terminal();
     let stdout = io::stdout();
     let mut handle = stdout.lock();
     let mut stdin = io::BufReader::new(std::io::stdin());
-    run_with_writer(stream, &mut handle, confirm_tx, is_tty, &mut stdin).await
+    run_with_writer(stream, &mut handle, confirm_tx, is_tty, &mut stdin, logger).await
 }
 
 async fn run_with_writer<W: Write, R: BufRead>(
@@ -22,8 +24,12 @@ async fn run_with_writer<W: Write, R: BufRead>(
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
     is_tty: bool,
     stdin: &mut R,
+    mut logger: Option<&mut Logger>,
 ) -> Result<()> {
     while let Some(event) = stream.next().await {
+        if let Some(ref mut log) = logger {
+            log.log_event(&event)?;
+        }
         match event {
             AgentEvent::TokenReceived(text) => {
                 write!(writer, "{}", text)?;
@@ -104,7 +110,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        run_with_writer(s, &mut buf, tx, false, &mut io::empty())
+        run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None)
             .await
             .expect("stdout run should succeed");
 
@@ -124,7 +130,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        run_with_writer(s, &mut buf, tx, false, &mut io::empty())
+        run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None)
             .await
             .expect("stdout run should succeed");
 
@@ -141,7 +147,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        let result = run_with_writer(s, &mut buf, tx, false, &mut io::empty()).await;
+        let result = run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None).await;
 
         assert!(result.is_err());
         assert!(
@@ -167,7 +173,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        run_with_writer(s, &mut buf, tx, false, &mut io::empty())
+        run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None)
             .await
             .expect("should succeed");
 
@@ -193,7 +199,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        run_with_writer(s, &mut buf, tx, false, &mut io::empty())
+        run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None)
             .await
             .expect("should succeed");
 
@@ -222,7 +228,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
 
-        run_with_writer(s, &mut buf, tx, false, &mut io::empty())
+        run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None)
             .await
             .expect("should succeed");
 
@@ -248,7 +254,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, mut rx) = make_confirm_channel();
 
-        let result = run_with_writer(s, &mut buf, tx, false, &mut io::empty()).await;
+        let result = run_with_writer(s, &mut buf, tx, false, &mut io::empty(), None).await;
 
         assert!(result.is_err(), "should error in non-TTY mode");
         assert!(
@@ -279,7 +285,7 @@ mod tests {
         let (tx, mut rx) = make_confirm_channel();
         let mut fake_stdin = io::Cursor::new(b"y\n".as_ref());
 
-        run_with_writer(s, &mut buf, tx, true, &mut fake_stdin)
+        run_with_writer(s, &mut buf, tx, true, &mut fake_stdin, None)
             .await
             .expect("should succeed in TTY mode");
 
@@ -306,7 +312,7 @@ mod tests {
         let (tx, mut rx) = make_confirm_channel();
         let mut fake_stdin = io::Cursor::new(b"n\n".as_ref());
 
-        run_with_writer(s, &mut buf, tx, true, &mut fake_stdin)
+        run_with_writer(s, &mut buf, tx, true, &mut fake_stdin, None)
             .await
             .expect("should succeed in TTY mode");
 
