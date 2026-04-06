@@ -117,14 +117,20 @@ impl ZaiBackend {
         for m in messages {
             match m.role {
                 Role::User => {
-                    let has_tool_results =
-                        m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                    let has_tool_results = m
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
 
                     if has_tool_results {
                         // Each tool result becomes a separate "tool" role message.
                         for block in &m.content {
                             match block {
-                                ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                                ContentBlock::ToolResult {
+                                    tool_use_id,
+                                    content,
+                                    ..
+                                } => {
                                     messages_json.push(serde_json::json!({
                                         "role": "tool",
                                         "tool_call_id": tool_use_id,
@@ -141,24 +147,25 @@ impl ZaiBackend {
                             }
                         }
                     } else {
-                        let content: Vec<serde_json::Value> = m
-                            .content
-                            .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text(text) => {
-                                    serde_json::json!({"type": "text", "text": text})
-                                }
-                                other => {
-                                    serde_json::to_value(other).unwrap_or(serde_json::Value::Null)
-                                }
-                            })
-                            .collect();
+                        let content: Vec<serde_json::Value> =
+                            m.content
+                                .iter()
+                                .map(|block| match block {
+                                    ContentBlock::Text(text) => {
+                                        serde_json::json!({"type": "text", "text": text})
+                                    }
+                                    other => serde_json::to_value(other)
+                                        .unwrap_or(serde_json::Value::Null),
+                                })
+                                .collect();
                         messages_json.push(serde_json::json!({"role": "user", "content": content}));
                     }
                 }
                 Role::Assistant => {
-                    let has_tool_use =
-                        m.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+                    let has_tool_use = m
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
 
                     if has_tool_use {
                         // Convert to OpenAI tool_calls format.
@@ -191,18 +198,17 @@ impl ZaiBackend {
                         msg["tool_calls"] = serde_json::json!(tool_calls);
                         messages_json.push(msg);
                     } else {
-                        let content: Vec<serde_json::Value> = m
-                            .content
-                            .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text(text) => {
-                                    serde_json::json!({"type": "text", "text": text})
-                                }
-                                other => {
-                                    serde_json::to_value(other).unwrap_or(serde_json::Value::Null)
-                                }
-                            })
-                            .collect();
+                        let content: Vec<serde_json::Value> =
+                            m.content
+                                .iter()
+                                .map(|block| match block {
+                                    ContentBlock::Text(text) => {
+                                        serde_json::json!({"type": "text", "text": text})
+                                    }
+                                    other => serde_json::to_value(other)
+                                        .unwrap_or(serde_json::Value::Null),
+                                })
+                                .collect();
                         messages_json
                             .push(serde_json::json!({"role": "assistant", "content": content}));
                     }
@@ -760,7 +766,9 @@ mod tests {
             assistant_msg.get("content").is_none() || assistant_msg["content"].is_null(),
             "no text content expected"
         );
-        let tool_calls = assistant_msg["tool_calls"].as_array().expect("tool_calls array");
+        let tool_calls = assistant_msg["tool_calls"]
+            .as_array()
+            .expect("tool_calls array");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["id"], "tool_0");
         assert_eq!(tool_calls[0]["type"], "function");
@@ -779,16 +787,14 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
         };
-        let messages = vec![
-            Message {
-                role: Role::User,
-                content: vec![ContentBlock::ToolResult {
-                    tool_use_id: "tool_0".to_string(),
-                    content: "file1.txt\nfile2.txt".to_string(),
-                    is_error: false,
-                }],
-            },
-        ];
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_0".to_string(),
+                content: "file1.txt\nfile2.txt".to_string(),
+                is_error: false,
+            }],
+        }];
 
         let body = backend.build_request_body(&messages, &config);
         let msgs = body["messages"].as_array().expect("messages array");
