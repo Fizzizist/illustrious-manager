@@ -2,6 +2,7 @@ pub mod agent;
 pub mod backend;
 pub mod config;
 pub mod frontend;
+pub mod tools;
 pub mod types;
 
 use anyhow::Result;
@@ -85,7 +86,7 @@ async fn main() -> Result<()> {
 
     match mode {
         Mode::SingleShot { prompt } => {
-            let stream = agent.send(prompt).await?;
+            let stream = agent.send(prompt, None).await?;
             frontend::stdout::run(stream).await?;
         }
         Mode::Repl { initial_prompt } => {
