@@ -75,6 +75,8 @@ pub struct App {
     pub current_response: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
+    pub scroll_offset: u16,
+    pub viewport_height: u16,
 }
 
 impl App {
@@ -85,7 +87,51 @@ impl App {
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
+            scroll_offset: 0,
+            viewport_height: 0,
         }
+    }
+
+    pub fn scroll_up(&mut self, amount: u16) {
+        let max = self.max_scroll();
+        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
+    }
+
+    pub fn scroll_down(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    fn half_page(&self) -> u16 {
+        (self.viewport_height / 2).max(1)
+    }
+
+    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('u'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let amount = self.half_page();
+                self.scroll_up(amount);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => {
+                let amount = self.half_page();
+                self.scroll_down(amount);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn max_scroll(&self) -> u16 {
+        let total = self.conversation_lines().len() as u16;
+        total.saturating_sub(self.viewport_height)
     }
 
     fn conversation_lines(&self) -> Vec<Line<'_>> {
@@ -150,15 +196,27 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(frame.area());
 
-    let conv_lines = app.conversation_lines();
-    let total_lines = conv_lines.len() as u16;
     let visible_height = chunks[0].height.saturating_sub(2);
-    let scroll = total_lines.saturating_sub(visible_height);
+    let text_width = chunks[0].width.saturating_sub(2);
+    let conv_lines = app.conversation_lines();
+    let total_visual: u16 = conv_lines
+        .iter()
+        .map(|line| {
+            if text_width == 0 {
+                1u16
+            } else {
+                let w = line.width() as u16;
+                if w == 0 { 1u16 } else { w.div_ceil(text_width) }
+            }
+        })
+        .sum();
+    let auto_scroll = total_visual.saturating_sub(visible_height);
+    let scroll_row = auto_scroll.saturating_sub(app.scroll_offset.min(auto_scroll));
 
     let conversation = Paragraph::new(conv_lines)
         .block(Block::default().borders(Borders::ALL).title("Conversation"))
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((scroll_row, 0));
     frame.render_widget(conversation, chunks[0]);
 
     let input_title = match &app.state {
@@ -216,11 +274,13 @@ async fn run_app(
     }
 
     loop {
+        app.viewport_height = terminal.size()?.height.saturating_sub(5);
         terminal.draw(|frame| render_app(&app, frame))?;
 
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
+                && !app.handle_scroll_key(&key)
             {
                 match key {
                     KeyEvent {
@@ -259,21 +319,25 @@ async fn run_app(
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
             {
-                let response = match key {
-                    KeyEvent {
-                        code: KeyCode::Char('y') | KeyCode::Char('Y'),
-                        ..
-                    } => Some(ConfirmationResponse::Approved),
-                    KeyEvent {
-                        code: KeyCode::Char('n') | KeyCode::Char('N'),
-                        ..
-                    } => Some(ConfirmationResponse::Rejected),
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    } => break,
-                    _ => None,
+                let response = if app.handle_scroll_key(&key) {
+                    None
+                } else {
+                    match key {
+                        KeyEvent {
+                            code: KeyCode::Char('y') | KeyCode::Char('Y'),
+                            ..
+                        } => Some(ConfirmationResponse::Approved),
+                        KeyEvent {
+                            code: KeyCode::Char('n') | KeyCode::Char('N'),
+                            ..
+                        } => Some(ConfirmationResponse::Rejected),
+                        KeyEvent {
+                            code: KeyCode::Char('c'),
+                            modifiers: KeyModifiers::CONTROL,
+                            ..
+                        } => break,
+                        _ => None,
+                    }
                 };
 
                 if let Some(response) = response {
@@ -307,6 +371,7 @@ async fn run_app(
                     match agent_event {
                         AgentEvent::TokenReceived(text) => {
                             app.current_response.push_str(&text);
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ResponseComplete(full) => {
                             app.conversation.push(ConversationEntry {
@@ -316,6 +381,7 @@ async fn run_app(
                             app.current_response.clear();
                             app.confirmation_tx = None;
                             app.state = AppState::Input;
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::Error(msg) => {
                             app.conversation.push(ConversationEntry {
@@ -325,6 +391,7 @@ async fn run_app(
                             app.current_response.clear();
                             app.confirmation_tx = None;
                             app.state = AppState::Input;
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolUseReceived { name, input, .. } => {
                             app.current_response.clear();
@@ -332,6 +399,7 @@ async fn run_app(
                                 role: ConversationRole::ToolUse,
                                 content: tool_use_display_content(&name, &input),
                             });
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolResult { content, is_error, .. } => {
                             let role = if is_error {
@@ -343,6 +411,7 @@ async fn run_app(
                                 role,
                                 content,
                             });
+                            app.scroll_offset = 0;
                         }
                         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                             app.current_response.clear();
@@ -352,14 +421,15 @@ async fn run_app(
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
                     if event::poll(std::time::Duration::from_millis(0))?
-                        && let Event::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        }) = event::read()?
-                    {
-                        break;
-                    }
+                        && let Event::Key(key) = event::read()?
+                        && !app.handle_scroll_key(&key)
+                            && let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key {
+                                break;
+                            }
                 }
             }
         }
@@ -384,6 +454,7 @@ pub async fn submit_message(
         content: input.clone(),
     });
 
+    app.scroll_offset = 0;
     app.state = AppState::Streaming;
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
@@ -412,6 +483,100 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_offset_starts_at_zero() {
+        let app = App::new();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    fn app_with_content(viewport_height: u16) -> App {
+        let mut app = App::new();
+        app.viewport_height = viewport_height;
+        for i in 0..40 {
+            app.conversation.push(ConversationEntry {
+                role: ConversationRole::User,
+                content: format!("line {i}"),
+            });
+        }
+        app
+    }
+
+    #[test]
+    fn scroll_up_increases_offset() {
+        let mut app = app_with_content(10);
+        app.scroll_up(10);
+        assert_eq!(app.scroll_offset, 10);
+        app.scroll_up(5);
+        assert_eq!(app.scroll_offset, 15);
+    }
+
+    #[test]
+    fn scroll_up_clamps_at_max_scroll() {
+        let mut app = app_with_content(10);
+        let max = app.max_scroll();
+        app.scroll_up(max + 50);
+        assert_eq!(app.scroll_offset, max);
+    }
+
+    #[test]
+    fn scroll_down_decreases_offset() {
+        let mut app = app_with_content(10);
+        app.scroll_offset = 20;
+        app.scroll_down(10);
+        assert_eq!(app.scroll_offset, 10);
+    }
+
+    #[test]
+    fn scroll_down_does_not_underflow() {
+        let mut app = App::new();
+        app.scroll_offset = 5;
+        app.scroll_down(20);
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[tokio::test]
+    async fn submit_message_resets_scroll_offset() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+        use tokio::sync::mpsc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let agent = Arc::new(Agent::new(
+            Box::new(StubBackend),
+            RequestConfig {
+                model: "test".to_string(),
+                max_tokens: 1024,
+                tools: vec![],
+            },
+        ));
+
+        let mut app = app_with_content(10);
+        app.scroll_offset = 15;
+        app.input = "hello".to_string();
+
+        let (tx, _rx) = mpsc::channel(10);
+        submit_message(&mut app, agent, &tx)
+            .await
+            .expect("submit must succeed");
+
+        assert_eq!(app.scroll_offset, 0);
+    }
 
     #[test]
     fn maybe_truncate_borrows_short_tool_result() {

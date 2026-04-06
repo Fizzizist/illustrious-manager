@@ -15,8 +15,8 @@ use futures::channel::mpsc;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
-use tools::write_file::WriteFileTool;
 use tools::sandbox::SandboxPolicy;
+use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
