@@ -6,6 +6,83 @@ use illustrious_manager::frontend::tui::{
 };
 
 #[test]
+fn test_tui_tool_call_renders_inline() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::User,
+        content: "Run ls".to_string(),
+    });
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolUse,
+        content: "bash\n  {\"command\":\"ls\"}".to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_tool_result_renders_below_invocation() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolUse,
+        content: "bash\n  {\"command\":\"ls\"}".to_string(),
+    });
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolResult,
+        content: "file1.txt\nfile2.txt".to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_long_tool_result_is_truncated() {
+    let mut app = App::new();
+    let long_output = "x".repeat(500);
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolResult,
+        content: long_output,
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_confirmation_prompt_state_renders() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::User,
+        content: "Write a file".to_string(),
+    });
+    app.state = AppState::ToolConfirmation {
+        name: "write_file".to_string(),
+        input: serde_json::json!({"path": "/tmp/test.txt", "content": "hello"}),
+    };
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
 fn test_tui_initial_state() {
     let app = App::new();
     let backend = TestBackend::new(80, 24);
