@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent::Agent;
-use types::RequestConfig;
+use futures::channel::mpsc;
+use types::{ConfirmationResponse, RequestConfig};
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
@@ -86,8 +87,9 @@ async fn main() -> Result<()> {
 
     match mode {
         Mode::SingleShot { prompt } => {
-            let stream = agent.send(prompt, None).await?;
-            frontend::stdout::run(stream).await?;
+            let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+            let stream = agent.send(prompt, Some(confirm_rx)).await?;
+            frontend::stdout::run(stream, confirm_tx).await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt).await?;
