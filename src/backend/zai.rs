@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
-use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, StreamEvent};
+use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent};
 
 const ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 
@@ -112,22 +112,103 @@ impl ZaiBackend {
         messages: &[Message],
         config: &RequestConfig,
     ) -> serde_json::Value {
-        let messages_json: Vec<serde_json::Value> = messages
-            .iter()
-            .map(|m| {
-                let content: Vec<serde_json::Value> = m
-                    .content
-                    .iter()
-                    .map(|block| match block {
-                        ContentBlock::Text(text) => {
-                            serde_json::json!({"type": "text", "text": text})
+        let mut messages_json: Vec<serde_json::Value> = Vec::new();
+
+        for m in messages {
+            match m.role {
+                Role::User => {
+                    let has_tool_results =
+                        m.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+
+                    if has_tool_results {
+                        // Each tool result becomes a separate "tool" role message.
+                        for block in &m.content {
+                            match block {
+                                ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                                    messages_json.push(serde_json::json!({
+                                        "role": "tool",
+                                        "tool_call_id": tool_use_id,
+                                        "content": content
+                                    }));
+                                }
+                                ContentBlock::Text(text) => {
+                                    messages_json.push(serde_json::json!({
+                                        "role": "user",
+                                        "content": [{"type": "text", "text": text}]
+                                    }));
+                                }
+                                _ => {}
+                            }
                         }
-                        other => serde_json::to_value(other).unwrap_or(serde_json::Value::Null),
-                    })
-                    .collect();
-                serde_json::json!({"role": m.role, "content": content})
-            })
-            .collect();
+                    } else {
+                        let content: Vec<serde_json::Value> = m
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text(text) => {
+                                    serde_json::json!({"type": "text", "text": text})
+                                }
+                                other => {
+                                    serde_json::to_value(other).unwrap_or(serde_json::Value::Null)
+                                }
+                            })
+                            .collect();
+                        messages_json.push(serde_json::json!({"role": "user", "content": content}));
+                    }
+                }
+                Role::Assistant => {
+                    let has_tool_use =
+                        m.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+
+                    if has_tool_use {
+                        // Convert to OpenAI tool_calls format.
+                        let mut text_parts: Vec<String> = Vec::new();
+                        let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+
+                        for block in &m.content {
+                            match block {
+                                ContentBlock::Text(text) => text_parts.push(text.clone()),
+                                ContentBlock::ToolUse { id, name, input } => {
+                                    let arguments = serde_json::to_string(input)
+                                        .unwrap_or_else(|_| "{}".to_string());
+                                    tool_calls.push(serde_json::json!({
+                                        "id": id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": arguments
+                                        }
+                                    }));
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        let mut msg = serde_json::json!({"role": "assistant"});
+                        if !text_parts.is_empty() {
+                            msg["content"] = serde_json::json!(text_parts.join(""));
+                        }
+                        msg["tool_calls"] = serde_json::json!(tool_calls);
+                        messages_json.push(msg);
+                    } else {
+                        let content: Vec<serde_json::Value> = m
+                            .content
+                            .iter()
+                            .map(|block| match block {
+                                ContentBlock::Text(text) => {
+                                    serde_json::json!({"type": "text", "text": text})
+                                }
+                                other => {
+                                    serde_json::to_value(other).unwrap_or(serde_json::Value::Null)
+                                }
+                            })
+                            .collect();
+                        messages_json
+                            .push(serde_json::json!({"role": "assistant", "content": content}));
+                    }
+                }
+            }
+        }
 
         let mut body = serde_json::json!({
             "model": config.model,
@@ -644,5 +725,118 @@ mod tests {
         let result5 = parser.parse("");
         assert!(result5.is_ok());
         assert!(result5.unwrap().is_none());
+    }
+
+    #[test]
+    fn build_request_body_converts_assistant_tool_use_to_tool_calls_format() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text("run ls".to_string())],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool_0".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+        ];
+
+        let body = backend.build_request_body(&messages, &config);
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 2);
+
+        let assistant_msg = &msgs[1];
+        assert_eq!(assistant_msg["role"], "assistant");
+        assert!(
+            assistant_msg.get("content").is_none() || assistant_msg["content"].is_null(),
+            "no text content expected"
+        );
+        let tool_calls = assistant_msg["tool_calls"].as_array().expect("tool_calls array");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "tool_0");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "bash");
+        let args: serde_json::Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap())
+                .expect("arguments should be JSON string");
+        assert_eq!(args["command"], "ls");
+    }
+
+    #[test]
+    fn build_request_body_converts_tool_results_to_tool_role_messages() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool_0".to_string(),
+                    content: "file1.txt\nfile2.txt".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let body = backend.build_request_body(&messages, &config);
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["tool_call_id"], "tool_0");
+        assert_eq!(msgs[0]["content"], "file1.txt\nfile2.txt");
+    }
+
+    #[test]
+    fn build_request_body_full_tool_use_round_trip_formats_correctly() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+        };
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text("run ls".to_string())],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool_0".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "tool_0".to_string(),
+                    content: "file1.txt".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        let body = backend.build_request_body(&messages, &config);
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert!(msgs[1]["tool_calls"].as_array().is_some());
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "tool_0");
+        assert_eq!(msgs[2]["content"], "file1.txt");
     }
 }
