@@ -209,7 +209,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
                 if w == 0 {
                     1u16
                 } else {
-                    (w + text_width - 1) / text_width
+                    w.div_ceil(text_width)
                 }
             }
         })
