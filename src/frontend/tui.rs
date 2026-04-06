@@ -206,11 +206,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
                 1u16
             } else {
                 let w = line.width() as u16;
-                if w == 0 {
-                    1u16
-                } else {
-                    w.div_ceil(text_width)
-                }
+                if w == 0 { 1u16 } else { w.div_ceil(text_width) }
             }
         })
         .sum();
