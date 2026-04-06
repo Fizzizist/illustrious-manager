@@ -46,6 +46,10 @@ impl Tool for WriteFileTool {
         &self.schema
     }
 
+
+    fn is_write_tool(&self) -> bool {
+        true
+    }
     fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let path_str = input["path"]
             .as_str()
