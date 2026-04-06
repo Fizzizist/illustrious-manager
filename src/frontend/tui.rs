@@ -75,6 +75,8 @@ pub struct App {
     pub current_response: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
+    pub scroll_offset: u16,
+    pub viewport_height: u16,
 }
 
 impl App {
@@ -85,7 +87,21 @@ impl App {
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
+            scroll_offset: 0,
+            viewport_height: 0,
         }
+    }
+
+    pub fn scroll_up(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_add(amount);
+    }
+
+    pub fn scroll_down(&mut self, amount: u16) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
+    }
+
+    fn half_page(&self) -> u16 {
+        (self.viewport_height / 2).max(1)
     }
 
     fn conversation_lines(&self) -> Vec<Line<'_>> {
@@ -144,21 +160,24 @@ impl Default for App {
 }
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
-pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(frame.area());
 
+    let visible_height = chunks[0].height.saturating_sub(2);
+    app.viewport_height = visible_height;
     let conv_lines = app.conversation_lines();
     let total_lines = conv_lines.len() as u16;
-    let visible_height = chunks[0].height.saturating_sub(2);
-    let scroll = total_lines.saturating_sub(visible_height);
+    let auto_scroll = total_lines.saturating_sub(visible_height);
+    let clamped_offset = app.scroll_offset.min(auto_scroll);
+    let scroll_row = auto_scroll.saturating_sub(clamped_offset);
 
     let conversation = Paragraph::new(conv_lines)
         .block(Block::default().borders(Borders::ALL).title("Conversation"))
         .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
+        .scroll((scroll_row, 0));
     frame.render_widget(conversation, chunks[0]);
 
     let input_title = match &app.state {
@@ -216,7 +235,7 @@ async fn run_app(
     }
 
     loop {
-        terminal.draw(|frame| render_app(&app, frame))?;
+        terminal.draw(|frame| render_app(&mut app, frame))?;
 
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
@@ -231,6 +250,22 @@ async fn run_app(
                     | KeyEvent {
                         code: KeyCode::Esc, ..
                     } => break,
+                    KeyEvent {
+                        code: KeyCode::Char('u'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        let amount = app.half_page();
+                        app.scroll_up(amount);
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('d'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        let amount = app.half_page();
+                        app.scroll_down(amount);
+                    }
                     KeyEvent {
                         code: KeyCode::Enter,
                         ..
@@ -268,6 +303,24 @@ async fn run_app(
                         code: KeyCode::Char('n') | KeyCode::Char('N'),
                         ..
                     } => Some(ConfirmationResponse::Rejected),
+                    KeyEvent {
+                        code: KeyCode::Char('u'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        let amount = app.half_page();
+                        app.scroll_up(amount);
+                        None
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char('d'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => {
+                        let amount = app.half_page();
+                        app.scroll_down(amount);
+                        None
+                    }
                     KeyEvent {
                         code: KeyCode::Char('c'),
                         modifiers: KeyModifiers::CONTROL,
@@ -412,6 +465,37 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_offset_starts_at_zero() {
+        let app = App::new();
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_up_increases_offset() {
+        let mut app = App::new();
+        app.scroll_up(10);
+        assert_eq!(app.scroll_offset, 10);
+        app.scroll_up(5);
+        assert_eq!(app.scroll_offset, 15);
+    }
+
+    #[test]
+    fn scroll_down_decreases_offset() {
+        let mut app = App::new();
+        app.scroll_offset = 20;
+        app.scroll_down(10);
+        assert_eq!(app.scroll_offset, 10);
+    }
+
+    #[test]
+    fn scroll_down_does_not_underflow() {
+        let mut app = App::new();
+        app.scroll_offset = 5;
+        app.scroll_down(20);
+        assert_eq!(app.scroll_offset, 0);
+    }
 
     #[test]
     fn maybe_truncate_borrows_short_tool_result() {

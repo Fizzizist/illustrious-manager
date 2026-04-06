@@ -20,7 +20,7 @@ fn test_tui_tool_call_renders_inline() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -40,7 +40,7 @@ fn test_tui_tool_result_renders_below_invocation() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -57,7 +57,7 @@ fn test_tui_long_tool_result_is_truncated() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -77,19 +77,19 @@ fn test_tui_confirmation_prompt_state_renders() {
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
 
 #[test]
 fn test_tui_initial_state() {
-    let app = App::new();
+    let mut app = App::new();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -110,7 +110,7 @@ fn test_tui_with_conversation() {
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -129,7 +129,7 @@ fn test_tui_streaming_state() {
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
     terminal
-        .draw(|frame| render_app(&app, frame))
+        .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
     assert_snapshot!(terminal.backend());
 }
@@ -228,4 +228,23 @@ async fn user_message_appears_immediately() {
 
     // Verify the backend call was actually made (background task started)
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_tui_scrolled_up_shows_earlier_content() {
+    let mut app = App::new();
+    for i in 0..20 {
+        app.conversation.push(ConversationEntry {
+            role: ConversationRole::User,
+            content: format!("Message {i}"),
+        });
+    }
+    app.scroll_offset = 10;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&mut app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
 }
