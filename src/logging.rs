@@ -1,11 +1,11 @@
 use crate::types::AgentEvent;
 use anyhow::Result;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 pub struct Logger {
-    log_file: Option<File>,
+    log_file: Option<BufWriter<File>>,
 }
 
 impl Logger {
@@ -13,52 +13,55 @@ impl Logger {
         let log_file = match log_path {
             Some(path) => {
                 let file = File::create(&path)?;
-                Some(file)
+                Some(BufWriter::new(file))
             }
             None => None,
         };
         Ok(Self { log_file })
     }
 
+    pub fn flush(&mut self) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writer.flush()?;
+        }
+        Ok(())
+    }
+
     pub fn log_user_input(&mut self, input: &str) -> Result<()> {
-        if let Some(ref mut file) = self.log_file {
-            writeln!(file, "[USER INPUT]")?;
-            writeln!(file, "{}", input)?;
-            writeln!(file)?;
-            file.flush()?;
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[USER INPUT]")?;
+            writeln!(writer, "{}", input)?;
+            writeln!(writer)?;
         }
         Ok(())
     }
 
     pub fn log_tool_use(&mut self, name: &str, input: &serde_json::Value) -> Result<()> {
-        if let Some(ref mut file) = self.log_file {
-            writeln!(file, "[TOOL CALL]")?;
-            writeln!(file, "name: {}", name)?;
-            writeln!(file, "input: {}", serde_json::to_string(input)?)?;
-            writeln!(file)?;
-            file.flush()?;
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[TOOL CALL]")?;
+            writeln!(writer, "name: {}", name)?;
+            writeln!(writer, "input: {}", serde_json::to_string(input)?)?;
+            writeln!(writer)?;
         }
         Ok(())
     }
 
     pub fn log_tool_result(&mut self, name: &str, content: &str, is_error: bool) -> Result<()> {
-        if let Some(ref mut file) = self.log_file {
-            writeln!(file, "[TOOL RESULT]")?;
-            writeln!(file, "name: {}", name)?;
-            writeln!(file, "content: {}", content)?;
-            writeln!(file, "is_error: {}", is_error)?;
-            writeln!(file)?;
-            file.flush()?;
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[TOOL RESULT]")?;
+            writeln!(writer, "name: {}", name)?;
+            writeln!(writer, "content: {}", content)?;
+            writeln!(writer, "is_error: {}", is_error)?;
+            writeln!(writer)?;
         }
         Ok(())
     }
 
     pub fn log_assistant_response(&mut self, response: &str) -> Result<()> {
-        if let Some(ref mut file) = self.log_file {
-            writeln!(file, "[ASSISTANT RESPONSE]")?;
-            writeln!(file, "{}", response)?;
-            writeln!(file)?;
-            file.flush()?;
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[ASSISTANT RESPONSE]")?;
+            writeln!(writer, "{}", response)?;
+            writeln!(writer)?;
         }
         Ok(())
     }
@@ -81,6 +84,14 @@ impl Logger {
             _ => {}
         }
         Ok(())
+    }
+}
+
+impl Drop for Logger {
+    fn drop(&mut self) {
+        if let Some(ref mut writer) = self.log_file {
+            let _ = writer.flush();
+        }
     }
 }
 
@@ -109,11 +120,13 @@ mod tests {
     fn log_user_input_writes_to_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        logger
-            .log_user_input("hello world")
-            .expect("Failed to log user input");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            logger
+                .log_user_input("hello world")
+                .expect("Failed to log user input");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[USER INPUT]"));
@@ -124,12 +137,14 @@ mod tests {
     fn log_tool_use_writes_name_and_input_to_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        let input = serde_json::json!({"command": "ls -la"});
-        logger
-            .log_tool_use("bash", &input)
-            .expect("Failed to log tool use");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            let input = serde_json::json!({"command": "ls -la"});
+            logger
+                .log_tool_use("bash", &input)
+                .expect("Failed to log tool use");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[TOOL CALL]"));
@@ -141,11 +156,13 @@ mod tests {
     fn log_tool_result_writes_name_content_and_error_status_to_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        logger
-            .log_tool_result("bash", "file1.txt\nfile2.txt", false)
-            .expect("Failed to log tool result");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            logger
+                .log_tool_result("bash", "file1.txt\nfile2.txt", false)
+                .expect("Failed to log tool result");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[TOOL RESULT]"));
@@ -158,11 +175,13 @@ mod tests {
     fn log_assistant_response_writes_response_to_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        logger
-            .log_assistant_response("Hello, how can I help you?")
-            .expect("Failed to log assistant response");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            logger
+                .log_assistant_response("Hello, how can I help you?")
+                .expect("Failed to log assistant response");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[ASSISTANT RESPONSE]"));
@@ -173,14 +192,16 @@ mod tests {
     fn log_event_tool_use_received_calls_log_tool_use() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        let event = AgentEvent::ToolUseReceived {
-            id: "tool-1".to_string(),
-            name: "bash".to_string(),
-            input: serde_json::json!({"command": "ls"}),
-        };
-        logger.log_event(&event).expect("Failed to log event");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            let event = AgentEvent::ToolUseReceived {
+                id: "tool-1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            };
+            logger.log_event(&event).expect("Failed to log event");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[TOOL CALL]"));
@@ -191,14 +212,16 @@ mod tests {
     fn log_event_tool_result_calls_log_tool_result() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        let event = AgentEvent::ToolResult {
-            name: "bash".to_string(),
-            content: "output".to_string(),
-            is_error: false,
-        };
-        logger.log_event(&event).expect("Failed to log event");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            let event = AgentEvent::ToolResult {
+                name: "bash".to_string(),
+                content: "output".to_string(),
+                is_error: false,
+            };
+            logger.log_event(&event).expect("Failed to log event");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[TOOL RESULT]"));
@@ -210,10 +233,12 @@ mod tests {
     fn log_event_response_complete_calls_log_assistant_response() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        let event = AgentEvent::ResponseComplete("Hello world".to_string());
-        logger.log_event(&event).expect("Failed to log event");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            let event = AgentEvent::ResponseComplete("Hello world".to_string());
+            logger.log_event(&event).expect("Failed to log event");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[ASSISTANT RESPONSE]"));
@@ -224,21 +249,53 @@ mod tests {
     fn multiple_logs_append_to_same_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
 
-        logger.log_user_input("input1").expect("Failed to log");
-        logger
-            .log_assistant_response("response1")
-            .expect("Failed to log");
-        logger.log_user_input("input2").expect("Failed to log");
-        logger
-            .log_assistant_response("response2")
-            .expect("Failed to log");
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            logger.log_user_input("input1").expect("Failed to log");
+            logger
+                .log_assistant_response("response1")
+                .expect("Failed to log");
+            logger.log_user_input("input2").expect("Failed to log");
+            logger
+                .log_assistant_response("response2")
+                .expect("Failed to log");
+        }
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("input1"));
         assert!(content.contains("response1"));
         assert!(content.contains("input2"));
         assert!(content.contains("response2"));
+    }
+
+    #[test]
+    fn logger_flushes_on_drop() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let log_path = temp_dir.path().join("test.log");
+
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            logger.log_user_input("test input").expect("Failed to log");
+        }
+
+        let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
+        assert!(content.contains("[USER INPUT]"));
+        assert!(content.contains("test input"));
+    }
+
+    #[test]
+    fn explicit_flush_method_writes_buffered_content() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let log_path = temp_dir.path().join("test.log");
+        let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+
+        logger
+            .log_user_input("before flush")
+            .expect("Failed to log");
+        logger.flush().expect("Failed to flush");
+
+        let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
+        assert!(content.contains("before flush"));
     }
 }
