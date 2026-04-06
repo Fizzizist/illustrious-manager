@@ -52,7 +52,7 @@ async fn test_agent_single_message() {
     };
     let mut agent = Agent::new(Box::new(backend), config);
 
-    let mut stream = agent.send("Hi".to_string()).await.unwrap();
+    let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {
@@ -96,11 +96,11 @@ async fn test_agent_history_accumulates() {
     let mut agent = Agent::new(Box::new(backend), config);
 
     // First message
-    let stream = agent.send("Hello".to_string()).await.unwrap();
+    let stream = agent.send("Hello".to_string(), None).await.unwrap();
     let _: Vec<_> = stream.collect().await;
 
     // Second message
-    let stream = agent.send("Again".to_string()).await.unwrap();
+    let stream = agent.send("Again".to_string(), None).await.unwrap();
     let _: Vec<_> = stream.collect().await;
 
     // History should have 4 messages: user, assistant, user, assistant
@@ -134,7 +134,7 @@ async fn test_agent_backend_error_emits_error_event() {
     };
     let mut agent = Agent::new(Box::new(ErrorBackend), config);
 
-    let mut stream = agent.send("Hi".to_string()).await.unwrap();
+    let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 
     let mut events = Vec::new();
     while let Some(event) = stream.next().await {

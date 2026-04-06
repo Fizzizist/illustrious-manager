@@ -12,6 +12,12 @@ use crate::types::{
     StreamEvent,
 };
 
+struct PendingToolCall {
+    id: String,
+    name: String,
+    input_json: String,
+}
+
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     history: Arc<Mutex<Vec<Message>>>,
@@ -19,9 +25,11 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
-    confirmation_rx: Option<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<ConfirmationResponse>>>>,
 }
 
+// Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
+// history in an unknown state. Panicking here would crash the app; accepting partial
+// corruption is the lesser evil for a long-running interactive process.
 fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -35,7 +43,6 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            confirmation_rx: None,
         }
     }
 
@@ -50,19 +57,16 @@ impl Agent {
         self
     }
 
-    pub fn with_confirmation_channel(
-        mut self,
-        rx: mpsc::UnboundedReceiver<ConfirmationResponse>,
-    ) -> Self {
-        self.confirmation_rx = Some(Arc::new(tokio::sync::Mutex::new(rx)));
-        self
-    }
-
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
     }
 
-    pub async fn send(&self, input: String) -> Result<BoxStream<AgentEvent>> {
+    pub async fn send(
+        &self,
+        input: String,
+        confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
+    ) -> Result<BoxStream<AgentEvent>> {
+        let pre_send_len = lock(&self.history).len();
         lock(&self.history).push(Message::text(Role::User, input));
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
@@ -72,13 +76,14 @@ impl Agent {
         let config = self.config.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
-        let confirmation_rx = self.confirmation_rx.clone();
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
+            let mut confirmation_rx = confirmation_rx;
 
-            loop {
+            'outer: loop {
                 if iterations >= max_iterations {
+                    lock(&history_arc).truncate(pre_send_len);
                     let _ = event_tx.unbounded_send(AgentEvent::Error(format!(
                         "Max tool iterations ({max_iterations}) exceeded"
                     )));
@@ -90,19 +95,16 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        if iterations == 1 {
-                            lock(&history_arc).pop();
-                        }
+                        lock(&history_arc).truncate(pre_send_len);
                         let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
                         break;
                     }
                 };
 
                 let mut text_accumulated = String::new();
-                let mut tool_calls: Vec<(String, String, String)> = vec![];
-                let mut current_tool: Option<(String, String, String)> = None;
+                let mut tool_calls: Vec<PendingToolCall> = vec![];
+                let mut current_tool: Option<PendingToolCall> = None;
                 let mut stream = backend_stream;
-                let mut had_error = false;
 
                 while let Some(result) = stream.next().await {
                     match result {
@@ -111,29 +113,29 @@ impl Agent {
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                         }
                         Ok(StreamEvent::ToolUseStart { id, name }) => {
-                            current_tool = Some((id, name, String::new()));
+                            current_tool = Some(PendingToolCall {
+                                id,
+                                name,
+                                input_json: String::new(),
+                            });
                         }
                         Ok(StreamEvent::ToolUseDelta(chunk)) => {
-                            if let Some((_, _, ref mut acc)) = current_tool {
-                                acc.push_str(&chunk);
+                            if let Some(ref mut t) = current_tool {
+                                t.input_json.push_str(&chunk);
                             }
                         }
                         Ok(StreamEvent::ToolUseDone) => {
-                            if let Some(tool) = current_tool.take() {
-                                tool_calls.push(tool);
+                            if let Some(t) = current_tool.take() {
+                                tool_calls.push(t);
                             }
                         }
                         Ok(StreamEvent::Done) => break,
                         Err(e) => {
+                            lock(&history_arc).truncate(pre_send_len);
                             let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
-                            had_error = true;
-                            break;
+                            break 'outer;
                         }
                     }
-                }
-
-                if had_error {
-                    break;
                 }
 
                 if tool_calls.is_empty() {
@@ -149,89 +151,15 @@ impl Agent {
                     break;
                 }
 
-                let mut assistant_content: Vec<ContentBlock> = vec![];
-                if !text_accumulated.is_empty() {
-                    assistant_content.push(ContentBlock::Text(text_accumulated));
-                }
-                let mut tool_result_blocks: Vec<ContentBlock> = vec![];
-
-                for (id, name, input_json) in tool_calls {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&input_json).unwrap_or(serde_json::Value::Null);
-
-                    assistant_content.push(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-                    let _ = event_tx.unbounded_send(AgentEvent::ToolUseReceived {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                    });
-
-                    let needs_confirmation = match confirmation_mode {
-                        ConfirmationMode::Always => true,
-                        ConfirmationMode::Never => false,
-                        ConfirmationMode::WriteOnly => {
-                            tools.lookup(&name).is_ok_and(|t| t.is_write_tool())
-                        }
-                    };
-
-                    let approved = if needs_confirmation {
-                        let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                            id: id.clone(),
-                            name: name.clone(),
-                            input: input.clone(),
-                        });
-                        if let Some(ref rx_arc) = confirmation_rx {
-                            let mut rx = rx_arc.lock().await;
-                            matches!(rx.next().await, Some(ConfirmationResponse::Approved))
-                        } else {
-                            false
-                        }
-                    } else {
-                        true
-                    };
-
-                    let (result_content, is_error) = if approved {
-                        match tools.lookup(&name) {
-                            Ok(tool) => match tool.execute(input) {
-                                Ok(result) => {
-                                    let content = result
-                                        .content
-                                        .iter()
-                                        .filter_map(|b| {
-                                            if let ContentBlock::Text(s) = b {
-                                                Some(s.clone())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    (content, result.is_error)
-                                }
-                                Err(e) => (e.to_string(), true),
-                            },
-                            Err(e) => (e.to_string(), true),
-                        }
-                    } else {
-                        ("User declined to execute this tool.".to_string(), true)
-                    };
-
-                    let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
-                        name: name.clone(),
-                        content: result_content.clone(),
-                        is_error,
-                    });
-
-                    tool_result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content: result_content,
-                        is_error,
-                    });
-                }
+                let (assistant_content, tool_result_blocks) = execute_tool_calls(
+                    tool_calls,
+                    text_accumulated,
+                    &tools,
+                    &confirmation_mode,
+                    &mut confirmation_rx,
+                    &event_tx,
+                )
+                .await;
 
                 lock(&history_arc).push(Message {
                     role: Role::Assistant,
@@ -246,6 +174,122 @@ impl Agent {
 
         Ok(Box::pin(event_rx))
     }
+}
+
+async fn execute_tool_calls(
+    tool_calls: Vec<PendingToolCall>,
+    text_prefix: String,
+    tools: &ToolRegistry,
+    confirmation_mode: &ConfirmationMode,
+    confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
+    let mut assistant_content: Vec<ContentBlock> = vec![];
+    if !text_prefix.is_empty() {
+        assistant_content.push(ContentBlock::Text(text_prefix));
+    }
+
+    // TODO: tool calls within a single response are independent and could be executed concurrently.
+    let mut tool_result_blocks: Vec<ContentBlock> = vec![];
+
+    for call in tool_calls {
+        let (input, parse_error) = match serde_json::from_str::<serde_json::Value>(&call.input_json)
+        {
+            Ok(v) => (v, None),
+            Err(e) => (
+                serde_json::Value::Null,
+                Some(format!("Invalid tool input JSON: {e}")),
+            ),
+        };
+
+        assistant_content.push(ContentBlock::ToolUse {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input: input.clone(),
+        });
+        let _ = event_tx.unbounded_send(AgentEvent::ToolUseReceived {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input: input.clone(),
+        });
+
+        if let Some(err_msg) = parse_error {
+            let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+                name: call.name.clone(),
+                content: err_msg.clone(),
+                is_error: true,
+            });
+            tool_result_blocks.push(ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: err_msg,
+                is_error: true,
+            });
+            continue;
+        }
+
+        let needs_confirmation = match confirmation_mode {
+            ConfirmationMode::Always => true,
+            ConfirmationMode::Never => false,
+            ConfirmationMode::WriteOnly => {
+                tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool())
+            }
+        };
+
+        let approved = if needs_confirmation {
+            let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: input.clone(),
+            });
+            if let Some(rx) = confirmation_rx.as_mut() {
+                matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+            } else {
+                false
+            }
+        } else {
+            true
+        };
+
+        let (result_content, is_error) = if approved {
+            match tools.lookup(&call.name) {
+                Ok(tool) => match tool.execute(input) {
+                    Ok(result) => {
+                        let content = result
+                            .content
+                            .iter()
+                            .filter_map(|b| {
+                                if let ContentBlock::Text(s) = b {
+                                    Some(s.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (content, result.is_error)
+                    }
+                    Err(e) => (e.to_string(), true),
+                },
+                Err(e) => (e.to_string(), true),
+            }
+        } else {
+            ("User declined to execute this tool.".to_string(), true)
+        };
+
+        let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+            name: call.name.clone(),
+            content: result_content.clone(),
+            is_error,
+        });
+
+        tool_result_blocks.push(ContentBlock::ToolResult {
+            tool_use_id: call.id,
+            content: result_content,
+            is_error,
+        });
+    }
+
+    (assistant_content, tool_result_blocks)
 }
 
 #[cfg(test)]
@@ -389,7 +433,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never);
 
         let stream = agent
-            .send("hi".to_string())
+            .send("hi".to_string(), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -427,7 +471,7 @@ mod tests {
         );
 
         let stream = agent
-            .send("run ls".to_string())
+            .send("run ls".to_string(), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -480,11 +524,10 @@ mod tests {
 
         let agent = Agent::new(Box::new(backend), config)
             .with_tools(registry)
-            .with_tool_config(&tool_config)
-            .with_confirmation_channel(confirm_rx);
+            .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string())
+            .send("run".to_string(), Some(confirm_rx))
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -524,11 +567,10 @@ mod tests {
 
         let agent = Agent::new(Box::new(backend), config)
             .with_tools(registry)
-            .with_tool_config(&tool_config)
-            .with_confirmation_channel(confirm_rx);
+            .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string())
+            .send("run".to_string(), Some(confirm_rx))
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -569,11 +611,10 @@ mod tests {
 
         let agent = Agent::new(Box::new(backend), config)
             .with_tools(registry)
-            .with_tool_config(&tool_config)
-            .with_confirmation_channel(confirm_rx);
+            .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string())
+            .send("run".to_string(), Some(confirm_rx))
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -618,7 +659,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string())
+            .send("run".to_string(), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -672,7 +713,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string())
+            .send("run".to_string(), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -687,6 +728,72 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "expected ResponseComplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_input_json_sends_error_result_to_model() {
+        let bad_json_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("not valid json {{{".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![bad_json_response, text_response("ok")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        );
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { is_error, .. } if *is_error)),
+            "malformed JSON should produce error ToolResult"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "loop should continue and complete after malformed input"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_error_on_second_iteration_clears_history() {
+        let backend = SequencedBackend::new(vec![
+            tool_call_response("t1", "bash", r#"{}"#),
+            vec![Err(anyhow::anyhow!("backend failure on iteration 2"))],
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        );
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "expected Error event"
+        );
+        assert!(
+            agent.history().is_empty(),
+            "history must be fully cleared after mid-loop backend error"
         );
     }
 
@@ -716,11 +823,10 @@ mod tests {
 
         let agent = Agent::new(Box::new(backend), config)
             .with_tools(registry)
-            .with_tool_config(&tool_config)
-            .with_confirmation_channel(confirm_rx);
+            .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("write".to_string())
+            .send("write".to_string(), Some(confirm_rx))
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
