@@ -12,6 +12,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use std::borrow::Cow;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -20,7 +21,7 @@ use crate::agent::Agent;
 use crate::types::{AgentEvent, ConfirmationResponse};
 use std::sync::Arc;
 
-const TOOL_RESULT_TRUNCATE_LEN: usize = 200;
+const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
@@ -94,7 +95,7 @@ impl App {
                 format!("{}:", entry.role.display_label()),
                 Style::default().fg(entry.role.color()),
             )));
-            let display_content = truncate_if_needed(&entry.content, entry.role);
+            let display_content = maybe_truncate(&entry.content, entry.role);
             for line in display_content.lines() {
                 lines.push(Line::from(format!("  {line}")));
             }
@@ -115,12 +116,25 @@ impl App {
     }
 }
 
-fn truncate_if_needed(content: &str, role: ConversationRole) -> String {
-    if role == ConversationRole::ToolResult && content.len() > TOOL_RESULT_TRUNCATE_LEN {
-        format!("{}...[truncated]", &content[..TOOL_RESULT_TRUNCATE_LEN])
-    } else {
-        content.to_string()
+fn maybe_truncate(content: &str, role: ConversationRole) -> Cow<'_, str> {
+    if role != ConversationRole::ToolResult {
+        return Cow::Borrowed(content);
     }
+    let mut chars = content.chars();
+    let head: String = (&mut chars).take(TOOL_RESULT_TRUNCATE_CHARS).collect();
+    if chars.next().is_some() {
+        Cow::Owned(format!("{head}...[truncated]"))
+    } else {
+        Cow::Borrowed(content)
+    }
+}
+
+fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String {
+    format!(
+        "{}\n  {}",
+        name,
+        serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
+    )
 }
 
 impl Default for App {
@@ -148,14 +162,9 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
     frame.render_widget(conversation, chunks[0]);
 
     let input_title = match &app.state {
-        AppState::Input => "Input (Enter to send, Ctrl+C to quit)",
-        AppState::Streaming => "Streaming...",
-        AppState::ToolConfirmation { name, .. } => {
-            // We store the title in a thread-local to avoid lifetime issues with the format string
-            // Since ratatui titles accept Into<Title>, we render a static-ish approach via Span
-            let _ = name;
-            "Confirm tool execution [y/n]"
-        }
+        AppState::Input => "Input (Enter to send, Ctrl+C to quit)".to_string(),
+        AppState::Streaming => "Streaming...".to_string(),
+        AppState::ToolConfirmation { name, .. } => format!("Allow '{name}'? [y/n]"),
     };
 
     let input_content = match &app.state {
@@ -209,161 +218,147 @@ async fn run_app(
     loop {
         terminal.draw(|frame| render_app(&app, frame))?;
 
-        match &app.state.clone() {
-            AppState::Input => {
-                if event::poll(std::time::Duration::from_millis(50))?
-                    && let Event::Key(key) = event::read()?
-                {
-                    match key {
-                        KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
+        if matches!(app.state, AppState::Input) {
+            if event::poll(std::time::Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+            {
+                match key {
+                    KeyEvent {
+                        code: KeyCode::Char('c'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    }
+                    | KeyEvent {
+                        code: KeyCode::Esc, ..
+                    } => break,
+                    KeyEvent {
+                        code: KeyCode::Enter,
+                        ..
+                    } => {
+                        if !app.input.trim().is_empty() {
+                            stream_task =
+                                Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                         }
-                        | KeyEvent {
-                            code: KeyCode::Esc, ..
-                        } => break,
-                        KeyEvent {
-                            code: KeyCode::Enter,
-                            ..
-                        } => {
-                            if !app.input.trim().is_empty() {
-                                stream_task =
-                                    Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
-                            }
-                        }
-                        KeyEvent {
-                            code: KeyCode::Char(c),
-                            ..
-                        } => {
-                            app.input.push(c);
-                        }
-                        KeyEvent {
-                            code: KeyCode::Backspace,
-                            ..
-                        } => {
-                            app.input.pop();
-                        }
-                        _ => {}
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char(c),
+                        ..
+                    } => {
+                        app.input.push(c);
+                    }
+                    KeyEvent {
+                        code: KeyCode::Backspace,
+                        ..
+                    } => {
+                        app.input.pop();
+                    }
+                    _ => {}
+                }
+            }
+        } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
+            if event::poll(std::time::Duration::from_millis(50))?
+                && let Event::Key(key) = event::read()?
+            {
+                let response = match key {
+                    KeyEvent {
+                        code: KeyCode::Char('y') | KeyCode::Char('Y'),
+                        ..
+                    } => Some(ConfirmationResponse::Approved),
+                    KeyEvent {
+                        code: KeyCode::Char('n') | KeyCode::Char('N'),
+                        ..
+                    } => Some(ConfirmationResponse::Rejected),
+                    KeyEvent {
+                        code: KeyCode::Char('c'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
+                    } => break,
+                    _ => None,
+                };
+
+                if let Some(response) = response {
+                    let (name, input) = match &app.state {
+                        AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
+                        _ => unreachable!(),
+                    };
+                    app.conversation.push(ConversationEntry {
+                        role: ConversationRole::ToolUse,
+                        content: tool_use_display_content(&name, &input),
+                    });
+                    let sent = app
+                        .confirmation_tx
+                        .as_ref()
+                        .is_some_and(|tx| tx.unbounded_send(response).is_ok());
+                    if sent {
+                        app.state = AppState::Streaming;
+                    } else {
+                        app.conversation.push(ConversationEntry {
+                            role: ConversationRole::Error,
+                            content: "Confirmation channel closed unexpectedly.".to_string(),
+                        });
+                        app.confirmation_tx = None;
+                        app.state = AppState::Input;
                     }
                 }
             }
-            AppState::ToolConfirmation { name, input } => {
-                let name = name.clone();
-                let input = input.clone();
-                if event::poll(std::time::Duration::from_millis(50))?
-                    && let Event::Key(key) = event::read()?
-                {
-                    match key {
-                        KeyEvent {
-                            code: KeyCode::Char('y') | KeyCode::Char('Y'),
-                            ..
-                        } => {
+        } else {
+            tokio::select! {
+                Some(agent_event) = event_rx.recv() => {
+                    match agent_event {
+                        AgentEvent::TokenReceived(text) => {
+                            app.current_response.push_str(&text);
+                        }
+                        AgentEvent::ResponseComplete(full) => {
+                            app.conversation.push(ConversationEntry {
+                                role: ConversationRole::Assistant,
+                                content: full,
+                            });
+                            app.current_response.clear();
+                            app.confirmation_tx = None;
+                            app.state = AppState::Input;
+                        }
+                        AgentEvent::Error(msg) => {
+                            app.conversation.push(ConversationEntry {
+                                role: ConversationRole::Error,
+                                content: msg,
+                            });
+                            app.current_response.clear();
+                            app.confirmation_tx = None;
+                            app.state = AppState::Input;
+                        }
+                        AgentEvent::ToolUseReceived { name, input, .. } => {
+                            app.current_response.clear();
                             app.conversation.push(ConversationEntry {
                                 role: ConversationRole::ToolUse,
-                                content: format!(
-                                    "{}\n  {}",
-                                    name,
-                                    serde_json::to_string(&input)
-                                        .unwrap_or_else(|_| "{}".to_string())
-                                ),
+                                content: tool_use_display_content(&name, &input),
                             });
-                            if let Some(tx) = &app.confirmation_tx {
-                                let _ = tx.unbounded_send(ConfirmationResponse::Approved);
-                            }
-                            app.state = AppState::Streaming;
                         }
-                        KeyEvent {
-                            code: KeyCode::Char('n') | KeyCode::Char('N'),
-                            ..
-                        } => {
+                        AgentEvent::ToolResult { content, is_error, .. } => {
+                            let role = if is_error {
+                                ConversationRole::Error
+                            } else {
+                                ConversationRole::ToolResult
+                            };
                             app.conversation.push(ConversationEntry {
-                                role: ConversationRole::ToolUse,
-                                content: format!(
-                                    "{}\n  {}",
-                                    name,
-                                    serde_json::to_string(&input)
-                                        .unwrap_or_else(|_| "{}".to_string())
-                                ),
+                                role,
+                                content,
                             });
-                            if let Some(tx) = &app.confirmation_tx {
-                                let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
-                            }
-                            app.state = AppState::Streaming;
                         }
-                        KeyEvent {
+                        AgentEvent::ToolConfirmationRequired { name, input, .. } => {
+                            app.current_response.clear();
+                            app.state = AppState::ToolConfirmation { name, input };
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
+                    if event::poll(std::time::Duration::from_millis(0))?
+                        && let Event::Key(KeyEvent {
                             code: KeyCode::Char('c'),
                             modifiers: KeyModifiers::CONTROL,
                             ..
-                        } => break,
-                        _ => {}
-                    }
-                }
-            }
-            AppState::Streaming => {
-                tokio::select! {
-                    Some(agent_event) = event_rx.recv() => {
-                        match agent_event {
-                            AgentEvent::TokenReceived(text) => {
-                                app.current_response.push_str(&text);
-                            }
-                            AgentEvent::ResponseComplete(full) => {
-                                app.conversation.push(ConversationEntry {
-                                    role: ConversationRole::Assistant,
-                                    content: full,
-                                });
-                                app.current_response.clear();
-                                app.confirmation_tx = None;
-                                app.state = AppState::Input;
-                            }
-                            AgentEvent::Error(msg) => {
-                                app.conversation.push(ConversationEntry {
-                                    role: ConversationRole::Error,
-                                    content: msg,
-                                });
-                                app.current_response.clear();
-                                app.confirmation_tx = None;
-                                app.state = AppState::Input;
-                            }
-                            AgentEvent::ToolUseReceived { name, input, .. } => {
-                                app.current_response.clear();
-                                app.conversation.push(ConversationEntry {
-                                    role: ConversationRole::ToolUse,
-                                    content: format!(
-                                        "{}\n  {}",
-                                        name,
-                                        serde_json::to_string(&input)
-                                            .unwrap_or_else(|_| "{}".to_string())
-                                    ),
-                                });
-                            }
-                            AgentEvent::ToolResult { content, is_error, .. } => {
-                                let role = if is_error {
-                                    ConversationRole::Error
-                                } else {
-                                    ConversationRole::ToolResult
-                                };
-                                app.conversation.push(ConversationEntry {
-                                    role,
-                                    content,
-                                });
-                            }
-                            AgentEvent::ToolConfirmationRequired { name, input, .. } => {
-                                app.current_response.clear();
-                                app.state = AppState::ToolConfirmation { name, input };
-                            }
-                        }
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
-                        if event::poll(std::time::Duration::from_millis(0))?
-                            && let Event::Key(KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            }) = event::read()?
-                        {
-                            break;
-                        }
+                        }) = event::read()?
+                    {
+                        break;
                     }
                 }
             }
@@ -412,4 +407,54 @@ pub async fn submit_message(
     });
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maybe_truncate_borrows_short_tool_result() {
+        let content = "short output";
+        let result = maybe_truncate(content, ConversationRole::ToolResult);
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn maybe_truncate_borrows_non_tool_result_roles() {
+        let content = "x".repeat(500);
+        for role in [
+            ConversationRole::User,
+            ConversationRole::Assistant,
+            ConversationRole::Error,
+            ConversationRole::ToolUse,
+        ] {
+            let result = maybe_truncate(&content, role);
+            assert!(
+                matches!(result, Cow::Borrowed(_)),
+                "expected borrow for {role:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn maybe_truncate_handles_multibyte_utf8() {
+        let emoji = "🦀".repeat(300);
+        let result = maybe_truncate(&emoji, ConversationRole::ToolResult);
+        assert!(result.ends_with("...[truncated]"));
+        let char_count = result
+            .strip_suffix("...[truncated]")
+            .unwrap()
+            .chars()
+            .count();
+        assert_eq!(char_count, TOOL_RESULT_TRUNCATE_CHARS);
+    }
+
+    #[test]
+    fn maybe_truncate_does_not_split_multibyte_char() {
+        let content = "é".repeat(300);
+        let result = maybe_truncate(&content, ConversationRole::ToolResult);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
 }
