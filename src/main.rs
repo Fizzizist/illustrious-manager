@@ -141,7 +141,7 @@ fn create_log_path() -> Result<PathBuf> {
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .expect("Time went backwards");
-    let timestamp = duration.as_secs();
+    let timestamp = duration.as_millis();
     Ok(PathBuf::from(format!(
         "illustrious-manager_{}.log",
         timestamp
