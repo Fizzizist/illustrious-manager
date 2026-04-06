@@ -269,40 +269,41 @@ async fn run_app(
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
-                && !app.handle_scroll_key(&key) {
-                    match key {
-                        KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        }
-                        | KeyEvent {
-                            code: KeyCode::Esc, ..
-                        } => break,
-                        KeyEvent {
-                            code: KeyCode::Enter,
-                            ..
-                        } => {
-                            if !app.input.trim().is_empty() {
-                                stream_task =
-                                    Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
-                            }
-                        }
-                        KeyEvent {
-                            code: KeyCode::Char(c),
-                            ..
-                        } => {
-                            app.input.push(c);
-                        }
-                        KeyEvent {
-                            code: KeyCode::Backspace,
-                            ..
-                        } => {
-                            app.input.pop();
-                        }
-                        _ => {}
+                && !app.handle_scroll_key(&key)
+            {
+                match key {
+                    KeyEvent {
+                        code: KeyCode::Char('c'),
+                        modifiers: KeyModifiers::CONTROL,
+                        ..
                     }
+                    | KeyEvent {
+                        code: KeyCode::Esc, ..
+                    } => break,
+                    KeyEvent {
+                        code: KeyCode::Enter,
+                        ..
+                    } => {
+                        if !app.input.trim().is_empty() {
+                            stream_task =
+                                Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
+                        }
+                    }
+                    KeyEvent {
+                        code: KeyCode::Char(c),
+                        ..
+                    } => {
+                        app.input.push(c);
+                    }
+                    KeyEvent {
+                        code: KeyCode::Backspace,
+                        ..
+                    } => {
+                        app.input.pop();
+                    }
+                    _ => {}
                 }
+            }
         } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
             if event::poll(std::time::Duration::from_millis(50))?
                 && let Event::Key(key) = event::read()?
