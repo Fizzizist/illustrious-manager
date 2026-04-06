@@ -84,7 +84,7 @@ fn test_tui_confirmation_prompt_state_renders() {
 
 #[test]
 fn test_tui_initial_state() {
-    let app = App::new();
+    let mut app = App::new();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
@@ -228,4 +228,54 @@ async fn user_message_appears_immediately() {
 
     // Verify the backend call was actually made (background task started)
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
+    let mut app = App::new();
+    // Each assistant response is 100 chars, which wraps at 78 chars (80 wide - 2 borders)
+    let long_response = "x".repeat(100);
+    for i in 0..10 {
+        app.conversation.push(ConversationEntry {
+            role: ConversationRole::User,
+            content: format!("Message {i}"),
+        });
+        app.conversation.push(ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: long_response.clone(),
+        });
+    }
+    // scroll_offset=0 means auto-scroll to bottom — the last entry must be visible
+    app.scroll_offset = 0;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+
+    let rendered = format!("{:?}", terminal.backend());
+    assert!(
+        rendered.contains("Message 9"),
+        "last user message should be visible when auto-scrolled to bottom, got:\n{rendered}"
+    );
+}
+
+#[test]
+fn test_tui_scrolled_up_shows_earlier_content() {
+    let mut app = App::new();
+    for i in 0..20 {
+        app.conversation.push(ConversationEntry {
+            role: ConversationRole::User,
+            content: format!("Message {i}"),
+        });
+    }
+    app.scroll_offset = 10;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
 }

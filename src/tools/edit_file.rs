@@ -53,7 +53,6 @@ impl Tool for EditFile {
         &SCHEMA
     }
 
-
     fn is_write_tool(&self) -> bool {
         true
     }
