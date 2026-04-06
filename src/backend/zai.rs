@@ -24,49 +24,50 @@ impl ZaiSseParser {
     }
 
     pub fn parse(&mut self, data: &str) -> Result<Option<StreamEvent>> {
-        // If we have buffered events, return the next one
+        // Always process incoming data into the buffer first so no SSE events are dropped.
+        // Empty string is used by tests to drain buffered events without consuming new data.
+        if !data.is_empty() {
+            self.fill_buffer(data)?;
+        }
+
         if !self.event_buffer.is_empty() {
             return Ok(Some(self.event_buffer.remove(0)));
         }
 
-        // Handle empty data (used to drain buffer in tests)
-        if data.is_empty() {
-            return Ok(None);
-        }
+        Ok(None)
+    }
 
+    fn fill_buffer(&mut self, data: &str) -> Result<()> {
         if data == "[DONE]" {
-            return Ok(Some(StreamEvent::Done));
+            self.event_buffer.push(StreamEvent::Done);
+            return Ok(());
         }
 
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
-        // Check for finish_reason indicating tool calls are complete
         if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str()
             && finish_reason == "tool_calls"
         {
-            // Clear all tracked tool calls and emit ToolUseDone
             self.tool_calls_by_index.clear();
-            return Ok(Some(StreamEvent::ToolUseDone));
+            self.event_buffer.push(StreamEvent::ToolUseDone);
+            return Ok(());
         }
 
-        // Check for text content in delta
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
             && !content.is_empty()
         {
-            return Ok(Some(StreamEvent::TextDelta(content.to_string())));
+            self.event_buffer
+                .push(StreamEvent::TextDelta(content.to_string()));
+            return Ok(());
         }
 
-        // Check for tool_calls in delta (OpenAI-compatible format)
         if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
-            // Process all tool calls in this chunk and buffer them
             for tool_call in tool_calls {
                 if let Some(index) = tool_call["index"].as_u64()
                     && let Some(function) = tool_call["function"].as_object()
                 {
-                    // Check if this is a new tool call with a name
                     if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
-                        // Generate a stable ID for this tool call
                         let id = format!("tool_{}", index);
                         self.tool_calls_by_index.insert(index, id.clone());
                         self.event_buffer.push(StreamEvent::ToolUseStart {
@@ -75,7 +76,6 @@ impl ZaiSseParser {
                         });
                     }
 
-                    // Check if this has arguments (delta)
                     if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
                         && !arguments.is_empty()
                     {
@@ -84,14 +84,9 @@ impl ZaiSseParser {
                     }
                 }
             }
-
-            // If we buffered events, return the first one
-            if !self.event_buffer.is_empty() {
-                return Ok(Some(self.event_buffer.remove(0)));
-            }
         }
 
-        Ok(None)
+        Ok(())
     }
 }
 
