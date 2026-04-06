@@ -83,6 +83,10 @@ async fn run_with_writer<W: Write, R: BufRead>(
         }
     }
 
+    if let Some(log) = logger {
+        log.flush()?;
+    }
+
     Ok(())
 }
 
