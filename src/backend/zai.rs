@@ -14,6 +14,8 @@ const ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 pub struct ZaiSseParser {
     /// Track tool calls by their index to generate stable IDs
     tool_calls_by_index: HashMap<u64, String>,
+    /// Buffer for events when multiple tool calls appear in a single SSE chunk
+    event_buffer: Vec<StreamEvent>,
 }
 
 impl ZaiSseParser {
@@ -22,6 +24,16 @@ impl ZaiSseParser {
     }
 
     pub fn parse(&mut self, data: &str) -> Result<Option<StreamEvent>> {
+        // If we have buffered events, return the next one
+        if !self.event_buffer.is_empty() {
+            return Ok(Some(self.event_buffer.remove(0)));
+        }
+
+        // Handle empty data (used to drain buffer in tests)
+        if data.is_empty() {
+            return Ok(None);
+        }
+
         if data == "[DONE]" {
             return Ok(Some(StreamEvent::Done));
         }
@@ -47,6 +59,7 @@ impl ZaiSseParser {
 
         // Check for tool_calls in delta (OpenAI-compatible format)
         if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
+            // Process all tool calls in this chunk and buffer them
             for tool_call in tool_calls {
                 if let Some(index) = tool_call["index"].as_u64()
                     && let Some(function) = tool_call["function"].as_object()
@@ -56,19 +69,25 @@ impl ZaiSseParser {
                         // Generate a stable ID for this tool call
                         let id = format!("tool_{}", index);
                         self.tool_calls_by_index.insert(index, id.clone());
-                        return Ok(Some(StreamEvent::ToolUseStart {
+                        self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),
-                        }));
+                        });
                     }
 
                     // Check if this has arguments (delta)
                     if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
                         && !arguments.is_empty()
                     {
-                        return Ok(Some(StreamEvent::ToolUseDelta(arguments.to_string())));
+                        self.event_buffer
+                            .push(StreamEvent::ToolUseDelta(arguments.to_string()));
                     }
                 }
+            }
+
+            // If we buffered events, return the first one
+            if !self.event_buffer.is_empty() {
+                return Ok(Some(self.event_buffer.remove(0)));
             }
         }
 
@@ -180,24 +199,20 @@ impl LlmBackend for ZaiBackend {
     }
 }
 
+/// Deprecated: Use [`ZaiSseParser`] instead for full tool call support.
+///
+/// This is a simple stateless parser that only handles text deltas and done events.
+/// It does not support tool calls. For complete SSE parsing including tool calls,
+/// create a [`ZaiSseParser`] instance and call its [`parse`] method.
+///
+/// [`parse`]: ZaiSseParser::parse
+#[deprecated(
+    since = "0.1.0",
+    note = "Use ZaiSseParser instead for full tool call support"
+)]
 pub fn parse_sse_data(data: &str) -> Result<Option<StreamEvent>> {
-    if data == "[DONE]" {
-        return Ok(Some(StreamEvent::Done));
-    }
-
-    let json: serde_json::Value = serde_json::from_str(data)
-        .with_context(|| format!("Failed to parse SSE data: {}", data))?;
-
-    let content = json["choices"][0]["delta"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    if content.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(StreamEvent::TextDelta(content)))
-    }
+    let mut parser = ZaiSseParser::new();
+    parser.parse(data)
 }
 
 #[cfg(test)]
@@ -543,5 +558,96 @@ mod tests {
         let result = parser.parse(data);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_sse_data_handles_multiple_tool_calls_in_single_chunk() {
+        // Test the critical fix: multiple tool calls in a single SSE chunk
+        let mut parser = ZaiSseParser::new();
+        // Single chunk with two tool call starts
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}},{"index":1,"function":{"name":"read_file","arguments":""}}]}}]}"#;
+
+        // First call should return the first tool call start
+        let result1 = parser.parse(data);
+        assert!(result1.is_ok());
+        let event1 = result1.unwrap();
+        assert!(event1.is_some());
+        if let Some(StreamEvent::ToolUseStart { name, .. }) = event1 {
+            assert_eq!(name, "bash");
+        } else {
+            panic!("First event should be ToolUseStart for bash");
+        }
+
+        // Second call should return the second tool call start (from buffer)
+        // Call with empty data to drain buffer without re-parsing
+        let result2 = parser.parse("");
+        assert!(result2.is_ok());
+        let event2 = result2.unwrap();
+        assert!(event2.is_some());
+        if let Some(StreamEvent::ToolUseStart { name, .. }) = event2 {
+            assert_eq!(name, "read_file");
+        } else {
+            panic!("Second event should be ToolUseStart for read_file");
+        }
+
+        // Third call should return None (buffer is empty)
+        let result3 = parser.parse("");
+        assert!(result3.is_ok());
+        assert!(result3.unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_sse_data_handles_concurrent_tool_calls_with_arguments() {
+        // Test concurrent tool calls with argument deltas
+        let mut parser = ZaiSseParser::new();
+        // Chunk with two tool calls and their argument deltas
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"ls"}},{"index":1,"function":{"name":"read_file","arguments":"tmp"}}]}}]}"#;
+
+        // First call: parse the chunk and get first event
+        let result1 = parser.parse(data);
+        assert!(result1.is_ok());
+        let event1 = result1.unwrap();
+        assert!(event1.is_some());
+        if let Some(StreamEvent::ToolUseStart { name, .. }) = event1 {
+            assert_eq!(name, "bash");
+        } else {
+            panic!("First event should be ToolUseStart for bash");
+        }
+
+        // Drain remaining buffered events with empty calls
+        let result2 = parser.parse("");
+        assert!(result2.is_ok());
+        let event2 = result2.unwrap();
+        assert!(event2.is_some());
+        if let Some(StreamEvent::ToolUseDelta(delta)) = event2 {
+            assert_eq!(delta, "ls");
+        } else {
+            panic!("Second event should be ToolUseDelta for bash");
+        }
+
+        let result3 = parser.parse("");
+        assert!(result3.is_ok());
+        let event3 = result3.unwrap();
+        assert!(event3.is_some());
+        if let Some(StreamEvent::ToolUseStart { name, .. }) = event3 {
+            assert_eq!(name, "read_file");
+        } else {
+            panic!("Third event should be ToolUseStart for read_file");
+        }
+
+        let result4 = parser.parse("");
+        assert!(result4.is_ok());
+        let event4 = result4.unwrap();
+        assert!(event4.is_some());
+        if let Some(StreamEvent::ToolUseDelta(delta)) = event4 {
+            assert_eq!(delta, "tmp");
+        } else {
+            panic!("Fourth event should be ToolUseDelta for read_file");
+        }
+
+        // Fifth call: buffer should be empty
+        let result5 = parser.parse("");
+        assert!(result5.is_ok());
+        assert!(result5.unwrap().is_none());
     }
 }
