@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use agent::Agent;
+use tools::ToolRegistry;
+use tools::bash::BashTool;
 use types::RequestConfig;
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -76,13 +78,26 @@ async fn main() -> Result<()> {
 
     let selection = backend::from_config(&app_config).await?;
 
+    let mut registry = ToolRegistry::new();
+    registry.register(Box::new(BashTool::new(
+        app_config.tools.bash_allowlist.clone(),
+        app_config.tools.bash_denylist.clone(),
+        std::path::PathBuf::from(&app_config.tools.sandbox_root),
+        app_config.tools.confirmation.clone(),
+        Box::new(|_| true),
+    )))?;
+
     let request_config = RequestConfig {
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
-        tools: vec![],
+        tools: registry.definitions(),
     };
 
-    let agent = Arc::new(Agent::new(selection.backend, request_config));
+    let agent = Arc::new(
+        Agent::new(selection.backend, request_config)
+            .with_tools(registry)
+            .with_tool_config(&app_config.tools),
+    );
 
     match mode {
         Mode::SingleShot { prompt } => {
