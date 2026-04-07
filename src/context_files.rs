@@ -10,7 +10,19 @@ pub struct ContextFile {
     pub content: String,
 }
 
-/// Discover all context files from the standard locations
+/// Discover all context files from the standard locations.
+///
+/// Searches the following locations in order:
+/// - `$PWD/.claude/CLAUDE.md`
+/// - `$PWD/CLAUDE.md`
+/// - `$PWD/AGENTS.md`
+/// - `$HOME/.claude/CLAUDE.md`
+/// - `$HOME/CLAUDE.md`
+/// - `$HOME/AGENTS.md`
+///
+/// Note: If the same filename exists in both pwd and home (e.g., `CLAUDE.md`),
+/// both files will be loaded. The files are identified by their full path,
+/// so the LLM will receive context from both locations with clear path labels.
 pub fn discover_context_files(pwd: &Path, home: &Path) -> Result<Vec<ContextFile>> {
     let mut found = Vec::new();
 

@@ -9,7 +9,6 @@ pub mod types;
 
 use anyhow::Result;
 use clap::Parser;
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -117,10 +116,20 @@ async fn main() -> Result<()> {
     );
 
     // Load context files from standard locations
-    let pwd = env::current_dir()?;
-    let home = env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"));
+    let pwd = std::env::current_dir()?;
+
+    // Use dirs crate for cross-platform home directory detection.
+    // If home directory cannot be determined, we skip home directory lookups
+    // and only search in the current working directory.
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            // Log a warning and skip home directory context files
+            eprintln!("Warning: Could not determine home directory, skipping home context files");
+            pwd.clone() // Use pwd as fallback, which effectively skips home lookups
+        }
+    };
+
     let context_files = discover_context_files(&pwd, &home)?;
     agent.load_context_files(context_files);
 
