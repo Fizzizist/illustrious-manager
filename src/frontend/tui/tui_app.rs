@@ -9,21 +9,17 @@ use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use std::borrow::Cow;
+use ratatui::style::Color;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::conversation_area::ConversationArea;
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
 use std::sync::Arc;
-
-const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
@@ -45,7 +41,7 @@ pub enum ConversationRole {
 }
 
 impl ConversationRole {
-    fn display_label(&self) -> &'static str {
+    pub fn display_label(&self) -> &'static str {
         match self {
             ConversationRole::User => "You",
             ConversationRole::Assistant => "Assistant",
@@ -55,7 +51,7 @@ impl ConversationRole {
         }
     }
 
-    fn color(&self) -> Color {
+    pub fn color(&self) -> Color {
         match self {
             ConversationRole::User => Color::Green,
             ConversationRole::Assistant => Color::Blue,
@@ -73,12 +69,11 @@ pub struct ConversationEntry {
 
 pub struct App {
     pub input: InputArea<'static>,
+    pub conversation_area: ConversationArea<'static>,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
-    pub scroll_offset: u16,
-    pub viewport_height: u16,
 }
 
 impl App {
@@ -99,12 +94,11 @@ impl App {
     pub fn new() -> Self {
         Self {
             input: InputArea::new(),
+            conversation_area: ConversationArea::new(),
             conversation: Vec::new(),
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
-            scroll_offset: 0,
-            viewport_height: 0,
         }
     }
 
@@ -119,17 +113,9 @@ impl App {
         }
     }
 
-    pub fn scroll_up(&mut self, amount: u16) {
-        let max = self.max_scroll();
-        self.scroll_offset = self.scroll_offset.saturating_add(amount).min(max);
-    }
-
-    pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-    }
-
-    fn half_page(&self) -> u16 {
-        (self.viewport_height / 2).max(1)
+    pub fn refresh_conversation(&mut self) {
+        self.conversation_area
+            .update_content(&self.conversation, &self.current_response);
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -139,8 +125,7 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                let amount = self.half_page();
-                self.scroll_up(amount);
+                self.conversation_area.scroll_half_page_up();
                 true
             }
             KeyEvent {
@@ -148,57 +133,11 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                let amount = self.half_page();
-                self.scroll_down(amount);
+                self.conversation_area.scroll_half_page_down();
                 true
             }
             _ => false,
         }
-    }
-
-    fn max_scroll(&self) -> u16 {
-        let total = self.conversation_lines().len() as u16;
-        total.saturating_sub(self.viewport_height)
-    }
-
-    fn conversation_lines(&self) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        for entry in &self.conversation {
-            lines.push(Line::from(Span::styled(
-                format!("{}:", entry.role.display_label()),
-                Style::default().fg(entry.role.color()),
-            )));
-            let display_content = maybe_truncate(&entry.content, entry.role);
-            for line in display_content.lines() {
-                lines.push(Line::from(format!("  {line}")));
-            }
-            lines.push(Line::from(""));
-        }
-
-        if !self.current_response.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Assistant:",
-                Style::default().fg(Color::Blue),
-            )));
-            for line in self.current_response.lines() {
-                lines.push(Line::from(format!("  {line}")));
-            }
-        }
-
-        lines
-    }
-}
-
-fn maybe_truncate(content: &str, role: ConversationRole) -> Cow<'_, str> {
-    if role != ConversationRole::ToolResult {
-        return Cow::Borrowed(content);
-    }
-    let mut chars = content.chars();
-    let head: String = (&mut chars).take(TOOL_RESULT_TRUNCATE_CHARS).collect();
-    if chars.next().is_some() {
-        Cow::Owned(format!("{head}...[truncated]"))
-    } else {
-        Cow::Borrowed(content)
     }
 }
 
@@ -227,29 +166,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .constraints([Constraint::Min(1), Constraint::Length(input_height)])
         .split(frame.area());
 
-    let visible_height = chunks[0].height.saturating_sub(2);
-    let text_width = chunks[0].width.saturating_sub(2);
-    let conv_lines = app.conversation_lines();
-    let total_visual: u16 = conv_lines
-        .iter()
-        .map(|line| {
-            if text_width == 0 {
-                1u16
-            } else {
-                let w = line.width() as u16;
-                if w == 0 { 1u16 } else { w.div_ceil(text_width) }
-            }
-        })
-        .sum();
-    let auto_scroll = total_visual.saturating_sub(visible_height);
-    let scroll_row = auto_scroll.saturating_sub(app.scroll_offset.min(auto_scroll));
-
-    let conversation = Paragraph::new(conv_lines)
-        .block(Block::default().borders(Borders::ALL).title("Conversation"))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_row, 0));
-    frame.render_widget(conversation, chunks[0]);
-
+    app.conversation_area.render(frame, chunks[0]);
     app.input.render(frame, chunks[1]);
 }
 
@@ -265,7 +182,7 @@ pub fn handle_agent_event(
     match event {
         AgentEvent::TokenReceived(text) => {
             app.current_response.push_str(&text);
-            app.scroll_offset = 0;
+            app.refresh_conversation();
         }
         AgentEvent::ResponseComplete(full) => {
             app.conversation.push(ConversationEntry {
@@ -275,7 +192,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
-            app.scroll_offset = 0;
+            app.refresh_conversation();
         }
         AgentEvent::Error(msg) => {
             app.conversation.push(ConversationEntry {
@@ -285,7 +202,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
-            app.scroll_offset = 0;
+            app.refresh_conversation();
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
             app.current_response.clear();
@@ -293,7 +210,7 @@ pub fn handle_agent_event(
                 role: ConversationRole::ToolUse,
                 content: tool_use_display_content(&name, &input),
             });
-            app.scroll_offset = 0;
+            app.refresh_conversation();
         }
         AgentEvent::ToolResult {
             content, is_error, ..
@@ -304,11 +221,12 @@ pub fn handle_agent_event(
                 ConversationRole::ToolResult
             };
             app.conversation.push(ConversationEntry { role, content });
-            app.scroll_offset = 0;
+            app.refresh_conversation();
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             app.current_response.clear();
             app.set_state(AppState::ToolConfirmation { name, input });
+            app.refresh_conversation();
         }
         AgentEvent::Usage { .. } => {}
     }
@@ -355,7 +273,6 @@ async fn run_app(
     }
 
     loop {
-        app.viewport_height = terminal.size()?.height.saturating_sub(5);
         terminal.draw(|frame| render_app(&app, frame))?;
 
         if matches!(app.state, AppState::Input) {
@@ -482,7 +399,7 @@ pub async fn submit_message(
         content: input.clone(),
     });
 
-    app.scroll_offset = 0;
+    app.refresh_conversation();
     app.set_state(AppState::Streaming);
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
@@ -512,59 +429,60 @@ pub async fn submit_message(
 mod tests {
     use super::*;
 
-    #[test]
-    fn scroll_offset_starts_at_zero() {
-        let app = App::new();
-        assert_eq!(app.scroll_offset, 0);
-    }
-
-    fn app_with_content(viewport_height: u16) -> App {
+    fn app_with_content() -> App {
         let mut app = App::new();
-        app.viewport_height = viewport_height;
         for i in 0..40 {
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::User,
                 content: format!("line {i}"),
             });
         }
+        app.refresh_conversation();
         app
     }
 
     #[test]
-    fn scroll_up_increases_offset() {
-        let mut app = app_with_content(10);
-        app.scroll_up(10);
-        assert_eq!(app.scroll_offset, 10);
-        app.scroll_up(5);
-        assert_eq!(app.scroll_offset, 15);
+    fn new_app_has_empty_conversation() {
+        let app = App::new();
+        assert!(app.conversation.is_empty());
+        assert!(app.current_response.is_empty());
     }
 
     #[test]
-    fn scroll_up_clamps_at_max_scroll() {
-        let mut app = app_with_content(10);
-        let max = app.max_scroll();
-        app.scroll_up(max + 50);
-        assert_eq!(app.scroll_offset, max);
-    }
-
-    #[test]
-    fn scroll_down_decreases_offset() {
-        let mut app = app_with_content(10);
-        app.scroll_offset = 20;
-        app.scroll_down(10);
-        assert_eq!(app.scroll_offset, 10);
-    }
-
-    #[test]
-    fn scroll_down_does_not_underflow() {
+    fn refresh_conversation_updates_content() {
         let mut app = App::new();
-        app.scroll_offset = 5;
-        app.scroll_down(20);
-        assert_eq!(app.scroll_offset, 0);
+        app.conversation.push(ConversationEntry {
+            role: ConversationRole::User,
+            content: "Hello".to_string(),
+        });
+        app.refresh_conversation();
+        let lines = app.conversation_area.textarea.lines();
+        assert!(lines.iter().any(|l| l.contains("Hello")));
+    }
+
+    #[test]
+    fn handle_scroll_key_ctrl_u_returns_true() {
+        let mut app = app_with_content();
+        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(app.handle_scroll_key(&key));
+    }
+
+    #[test]
+    fn handle_scroll_key_ctrl_d_returns_true() {
+        let mut app = app_with_content();
+        let key = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(app.handle_scroll_key(&key));
+    }
+
+    #[test]
+    fn handle_scroll_key_other_returns_false() {
+        let mut app = app_with_content();
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(!app.handle_scroll_key(&key));
     }
 
     #[tokio::test]
-    async fn submit_message_resets_scroll_offset() {
+    async fn submit_message_adds_user_entry_and_refreshes() {
         use crate::agent::Agent;
         use crate::backend::LlmBackend;
         use crate::types::*;
@@ -594,8 +512,7 @@ mod tests {
             },
         ));
 
-        let mut app = app_with_content(10);
-        app.scroll_offset = 15;
+        let mut app = App::new();
         app.set_input("hello");
 
         let (tx, _rx) = mpsc::channel(10);
@@ -603,52 +520,10 @@ mod tests {
             .await
             .expect("submit must succeed");
 
-        assert_eq!(app.scroll_offset, 0);
-    }
-
-    #[test]
-    fn maybe_truncate_borrows_short_tool_result() {
-        let content = "short output";
-        let result = maybe_truncate(content, ConversationRole::ToolResult);
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn maybe_truncate_borrows_non_tool_result_roles() {
-        let content = "x".repeat(500);
-        for role in [
-            ConversationRole::User,
-            ConversationRole::Assistant,
-            ConversationRole::Error,
-            ConversationRole::ToolUse,
-        ] {
-            let result = maybe_truncate(&content, role);
-            assert!(
-                matches!(result, Cow::Borrowed(_)),
-                "expected borrow for {role:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn maybe_truncate_handles_multibyte_utf8() {
-        let emoji = "🦀".repeat(300);
-        let result = maybe_truncate(&emoji, ConversationRole::ToolResult);
-        assert!(result.ends_with("...[truncated]"));
-        let char_count = result
-            .strip_suffix("...[truncated]")
-            .unwrap()
-            .chars()
-            .count();
-        assert_eq!(char_count, TOOL_RESULT_TRUNCATE_CHARS);
-    }
-
-    #[test]
-    fn maybe_truncate_does_not_split_multibyte_char() {
-        let content = "é".repeat(300);
-        let result = maybe_truncate(&content, ConversationRole::ToolResult);
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].content, "hello");
+        assert_eq!(app.state, AppState::Streaming);
+        assert!(app.input_text().is_empty());
     }
 
     #[test]

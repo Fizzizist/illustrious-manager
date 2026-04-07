@@ -1,15 +1,13 @@
 ---
-source: tests/tui_test.rs
+source: src/frontend/tui/conversation_area.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────────────────────────┐"
-"│[Result]:                                                                     │"
+"│You:                                                                          │"
+"│  Tell me a story                                                             │"
 "│                                                                              │"
-"│xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx│"
-"│xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx│"
-"│xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx                                  │"
-"│...[truncated]                                                                │"
-"│                                                                              │"
+"│Assistant:                                                                    │"
+"│  Once upon a time                                                            │"
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
@@ -22,7 +20,9 @@ expression: terminal.backend()
 "│                                                                              │"
 "│                                                                              │"
 "│                                                                              │"
-"└──────────────────────────────────────────────────────────────────────────────┘"
-"┌Input (Enter to send, Ctrl+C to quit)─────────────────────────────────────────┐"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
+"│                                                                              │"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
