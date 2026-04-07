@@ -7,13 +7,34 @@ pub struct ContextFile {
     pub content: String,
 }
 
+/// Discover context files from standard environment locations.
+///
+/// Uses the current working directory and home directory from the environment.
+/// Skips home directory locations if home directory cannot be determined.
 pub fn discover_context_files_from_env() -> Result<Vec<ContextFile>> {
     let pwd = std::env::current_dir()?;
-    let home = dirs::home_dir().unwrap_or_else(|| {
-        eprintln!("Warning: Could not determine home directory, skipping home context files");
-        pwd.clone()
-    });
-    discover_context_files(&pwd, &home)
+
+    match dirs::home_dir() {
+        Some(home) => discover_context_files(&pwd, &home),
+        None => {
+            let mut found = Vec::new();
+
+            let pwd_locations = vec![
+                pwd.join(".claude/CLAUDE.md"),
+                pwd.join("CLAUDE.md"),
+                pwd.join("AGENTS.md"),
+            ];
+
+            for path in pwd_locations {
+                if path.exists() {
+                    let content = std::fs::read_to_string(&path)?;
+                    found.push(ContextFile { path, content });
+                }
+            }
+
+            Ok(found)
+        }
+    }
 }
 
 pub fn discover_context_files(pwd: &Path, home: &Path) -> Result<Vec<ContextFile>> {
