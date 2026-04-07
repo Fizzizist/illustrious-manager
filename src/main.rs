@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod backend;
 pub mod config;
+pub mod context_files;
 pub mod frontend;
 pub mod logging;
 pub mod tools;
@@ -8,11 +9,13 @@ pub mod types;
 
 use anyhow::Result;
 use clap::Parser;
+use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use agent::Agent;
+use context_files::discover_context_files;
 use futures::channel::mpsc;
 use logging::Logger;
 use tools::ToolRegistry;
@@ -112,6 +115,12 @@ async fn main() -> Result<()> {
             .with_tools(registry)
             .with_tool_config(&app_config.tools),
     );
+
+    // Load context files from standard locations
+    let pwd = env::current_dir()?;
+    let home = env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let context_files = discover_context_files(&pwd, &home)?;
+    agent.load_context_files(context_files);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
