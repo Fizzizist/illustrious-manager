@@ -17,6 +17,8 @@ const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
     input_tokens: u32,
+    /// Buffer for events when multiple events appear in a single SSE chunk
+    pub event_buffer: Vec<StreamEvent>,
 }
 
 impl VertexSseParser {
@@ -25,6 +27,20 @@ impl VertexSseParser {
     }
 
     pub fn parse(&mut self, data: &str) -> Result<Option<StreamEvent>> {
+        // Always process incoming data into the buffer first so no SSE events are dropped.
+        // Empty string is used by tests to drain buffered events without consuming new data.
+        if !data.is_empty() {
+            self.fill_buffer(data)?;
+        }
+
+        if !self.event_buffer.is_empty() {
+            return Ok(Some(self.event_buffer.remove(0)));
+        }
+
+        Ok(None)
+    }
+
+    fn fill_buffer(&mut self, data: &str) -> Result<()> {
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
@@ -35,7 +51,6 @@ impl VertexSseParser {
                 self.input_tokens = json["message"]["usage"]["input_tokens"]
                     .as_u64()
                     .unwrap_or(0) as u32;
-                Ok(None)
             }
             "content_block_start" => {
                 let block_type = json["content_block"]["type"].as_str().unwrap_or("");
@@ -54,9 +69,7 @@ impl VertexSseParser {
                             anyhow::anyhow!("tool_use content_block_start missing 'name'")
                         })?
                         .to_string();
-                    Ok(Some(StreamEvent::ToolUseStart { id, name }))
-                } else {
-                    Ok(None)
+                    self.event_buffer.push(StreamEvent::ToolUseStart { id, name });
                 }
             }
             "content_block_delta" => {
@@ -66,18 +79,16 @@ impl VertexSseParser {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("input_json_delta missing 'partial_json'"))?
                         .to_string();
-                    Ok(Some(StreamEvent::ToolUseDelta(chunk)))
+                    self.event_buffer.push(StreamEvent::ToolUseDelta(chunk));
                 } else {
                     let text = json["delta"]["text"].as_str().unwrap_or("").to_string();
-                    Ok(Some(StreamEvent::TextDelta(text)))
+                    self.event_buffer.push(StreamEvent::TextDelta(text));
                 }
             }
             "content_block_stop" => {
                 let index = json["index"].as_u64().unwrap_or(0);
                 if self.tool_use_indices.remove(&index) {
-                    Ok(Some(StreamEvent::ToolUseDone))
-                } else {
-                    Ok(None)
+                    self.event_buffer.push(StreamEvent::ToolUseDone);
                 }
             }
             "message_delta" => {
@@ -87,22 +98,26 @@ impl VertexSseParser {
                     .to_string();
                 let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
                 if stop_reason == "max_tokens" {
-                    Err(anyhow::anyhow!(
+                    return Err(anyhow::anyhow!(
                         "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
                         self.input_tokens,
                         output_tokens,
-                    ))
+                    ));
                 } else {
-                    Ok(Some(StreamEvent::Usage {
+                    self.event_buffer.push(StreamEvent::Usage {
                         input_tokens: self.input_tokens,
                         output_tokens,
                         stop_reason,
-                    }))
+                    });
                 }
             }
-            "message_stop" => Ok(Some(StreamEvent::Done)),
-            _ => Ok(None),
+            "message_stop" => {
+                self.event_buffer.push(StreamEvent::Done);
+            }
+            _ => {}
         }
+
+        Ok(())
     }
 }
 
@@ -178,11 +193,8 @@ impl LlmBackend for VertexBackend {
         let byte_stream = response.bytes_stream();
         let mut sse_parser = VertexSseParser::new();
         let event_stream = create_sse_event_stream(byte_stream, move |data| {
-            // TODO support multiple event emission from Vertex AI backend
-            let events = match sse_parser.parse(data)? {
-                Some(event) => vec![event],
-                None => Vec::new(),
-            };
+            sse_parser.fill_buffer(data)?;
+            let events = std::mem::take(&mut sse_parser.event_buffer);
             Ok(events)
         });
         Ok(event_stream)
@@ -424,5 +436,31 @@ mod tests {
             result.is_none(),
             "text content_block_start should return None"
         );
+    }
+
+    #[test]
+    fn parser_fill_buffer_populates_event_buffer() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .fill_buffer(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
+            .expect("should fill buffer successfully");
+        assert_eq!(parser.event_buffer.len(), 1, "should have 1 event in buffer");
+    }
+
+    #[test]
+    fn parse_returns_buffered_events_one_at_a_time() {
+        let mut parser = VertexSseParser::new();
+        // Fill buffer with an event
+        parser
+            .fill_buffer(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
+            .expect("should fill buffer successfully");
+
+        // First parse should return the event
+        let result1 = parser.parse("").expect("should parse successfully");
+        assert!(result1.is_some(), "first parse should return Some(event)");
+
+        // Second parse should return None (buffer is now empty)
+        let result2 = parser.parse("").expect("should parse successfully");
+        assert!(result2.is_none(), "second parse should return None");
     }
 }
