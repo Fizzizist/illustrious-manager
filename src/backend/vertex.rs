@@ -177,7 +177,14 @@ impl LlmBackend for VertexBackend {
 
         let byte_stream = response.bytes_stream();
         let mut sse_parser = VertexSseParser::new();
-        let event_stream = create_sse_event_stream(byte_stream, move |data| sse_parser.parse(data));
+        let event_stream = create_sse_event_stream(byte_stream, move |data| {
+            // TODO support multiple event emission from Vertex AI backend
+            let events = match sse_parser.parse(data)? {
+                Some(event) => vec![event],
+                None => Vec::new(),
+            };
+            Ok(events)
+        });
         Ok(event_stream)
     }
 }

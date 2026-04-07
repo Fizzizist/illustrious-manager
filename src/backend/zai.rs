@@ -52,6 +52,7 @@ impl ZaiSseParser {
             match finish_reason {
                 "tool_calls" => {
                     self.tool_calls_by_index.clear();
+                    self.event_buffer.push(StreamEvent::ToolUseDone);
                     if input_tokens > 0 || output_tokens > 0 {
                         self.event_buffer.push(StreamEvent::Usage {
                             input_tokens,
@@ -59,7 +60,6 @@ impl ZaiSseParser {
                             stop_reason: finish_reason.to_string(),
                         });
                     }
-                    self.event_buffer.push(StreamEvent::ToolUseDone);
                     return Ok(());
                 }
                 "length" => {
@@ -303,7 +303,11 @@ impl LlmBackend for ZaiBackend {
 
         let byte_stream = response.bytes_stream();
         let mut parser = ZaiSseParser::new();
-        let event_stream = create_sse_event_stream(byte_stream, move |data| parser.parse(data));
+        let event_stream = create_sse_event_stream(byte_stream, move |data| {
+            parser.fill_buffer(data)?;
+            let events = std::mem::take(&mut parser.event_buffer);
+            Ok(events)
+        });
         Ok(event_stream)
     }
 }
