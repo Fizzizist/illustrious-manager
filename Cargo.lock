@@ -1152,6 +1152,7 @@ dependencies = [
  "insta",
  "pin-project-lite",
  "ratatui",
+ "ratatui-textarea",
  "reqwest",
  "rustls",
  "serde",
@@ -1159,6 +1160,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1945,6 +1947,19 @@ checksum = "0f76fe0bd0ed4295f0321b1676732e2454024c15a35d01904ddb315afd3d545c"
 dependencies = [
  "ratatui-core",
  "termwiz",
+]
+
+[[package]]
+name = "ratatui-textarea"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2f109a42d924f1fe4f4d521a1f473161f6c08eb53a2d9b862ca6efd14f6e51c"
+dependencies = [
+ "ratatui-core",
+ "ratatui-crossterm",
+ "ratatui-widgets",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
