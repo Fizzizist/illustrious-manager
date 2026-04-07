@@ -349,7 +349,9 @@ mod tests {
     fn log_config_does_nothing_when_no_log_file() {
         let mut logger = Logger::new(None).expect("logger creation should succeed");
         let config = vec!["backend", "vertex"];
-        logger.log_config(&config).expect("log_config should not error");
+        logger
+            .log_config(&config)
+            .expect("log_config should not error");
     }
 
     #[test]
