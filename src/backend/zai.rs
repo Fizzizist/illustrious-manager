@@ -308,22 +308,6 @@ impl LlmBackend for ZaiBackend {
     }
 }
 
-/// Deprecated: Use [`ZaiSseParser`] instead for full tool call support.
-///
-/// This is a simple stateless parser that only handles text deltas and done events.
-/// It does not support tool calls. For complete SSE parsing including tool calls,
-/// create a [`ZaiSseParser`] instance and call its [`parse`] method.
-///
-/// [`parse`]: ZaiSseParser::parse
-#[deprecated(
-    since = "0.1.0",
-    note = "Use ZaiSseParser instead for full tool call support"
-)]
-pub fn parse_sse_data(data: &str) -> Result<Option<StreamEvent>> {
-    let mut parser = ZaiSseParser::new();
-    parser.parse(data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
