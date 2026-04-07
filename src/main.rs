@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod backend;
 pub mod config;
+pub mod context_files;
 pub mod frontend;
 pub mod logging;
 pub mod tools;
@@ -110,7 +111,8 @@ async fn main() -> Result<()> {
     let agent = Arc::new(
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
-            .with_tool_config(&app_config.tools),
+            .with_tool_config(&app_config.tools)
+            .with_context_files()?,
     );
 
     let mut logger = if cli.debug {
