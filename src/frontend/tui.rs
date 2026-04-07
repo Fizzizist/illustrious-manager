@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::agent::Agent;
+use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
 use std::sync::Arc;
 
@@ -242,15 +243,80 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
     }
 }
 
+pub fn handle_agent_event(
+    app: &mut App,
+    event: AgentEvent,
+    logger: Option<&mut Logger>,
+) -> Result<()> {
+    if let Some(log) = logger {
+        log.log_event(&event)?;
+        log.flush()?;
+    }
+    match event {
+        AgentEvent::TokenReceived(text) => {
+            app.current_response.push_str(&text);
+            app.scroll_offset = 0;
+        }
+        AgentEvent::ResponseComplete(full) => {
+            app.conversation.push(ConversationEntry {
+                role: ConversationRole::Assistant,
+                content: full,
+            });
+            app.current_response.clear();
+            app.confirmation_tx = None;
+            app.state = AppState::Input;
+            app.scroll_offset = 0;
+        }
+        AgentEvent::Error(msg) => {
+            app.conversation.push(ConversationEntry {
+                role: ConversationRole::Error,
+                content: msg,
+            });
+            app.current_response.clear();
+            app.confirmation_tx = None;
+            app.state = AppState::Input;
+            app.scroll_offset = 0;
+        }
+        AgentEvent::ToolUseReceived { name, input, .. } => {
+            app.current_response.clear();
+            app.conversation.push(ConversationEntry {
+                role: ConversationRole::ToolUse,
+                content: tool_use_display_content(&name, &input),
+            });
+            app.scroll_offset = 0;
+        }
+        AgentEvent::ToolResult {
+            content, is_error, ..
+        } => {
+            let role = if is_error {
+                ConversationRole::Error
+            } else {
+                ConversationRole::ToolResult
+            };
+            app.conversation.push(ConversationEntry { role, content });
+            app.scroll_offset = 0;
+        }
+        AgentEvent::ToolConfirmationRequired { name, input, .. } => {
+            app.current_response.clear();
+            app.state = AppState::ToolConfirmation { name, input };
+        }
+    }
+    Ok(())
+}
+
 /// Run the TUI REPL. If `initial_prompt` is provided, it's sent immediately.
-pub async fn run(agent: Arc<Agent>, initial_prompt: Option<String>) -> Result<()> {
+pub async fn run(
+    agent: Arc<Agent>,
+    initial_prompt: Option<String>,
+    logger: Option<Logger>,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt).await;
+    let result = run_app(&mut terminal, agent, initial_prompt, logger).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -263,12 +329,16 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
+    mut logger: Option<Logger>,
 ) -> Result<()> {
     let mut app = App::new();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 
     if let Some(prompt) = initial_prompt {
+        if let Some(ref mut log) = logger {
+            log.log_user_input(&prompt)?;
+        }
         app.input = prompt;
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
@@ -296,6 +366,9 @@ async fn run_app(
                         ..
                     } => {
                         if !app.input.trim().is_empty() {
+                            if let Some(ref mut log) = logger {
+                                log.log_user_input(&app.input)?;
+                            }
                             stream_task =
                                 Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                         }
@@ -368,56 +441,7 @@ async fn run_app(
         } else {
             tokio::select! {
                 Some(agent_event) = event_rx.recv() => {
-                    match agent_event {
-                        AgentEvent::TokenReceived(text) => {
-                            app.current_response.push_str(&text);
-                            app.scroll_offset = 0;
-                        }
-                        AgentEvent::ResponseComplete(full) => {
-                            app.conversation.push(ConversationEntry {
-                                role: ConversationRole::Assistant,
-                                content: full,
-                            });
-                            app.current_response.clear();
-                            app.confirmation_tx = None;
-                            app.state = AppState::Input;
-                            app.scroll_offset = 0;
-                        }
-                        AgentEvent::Error(msg) => {
-                            app.conversation.push(ConversationEntry {
-                                role: ConversationRole::Error,
-                                content: msg,
-                            });
-                            app.current_response.clear();
-                            app.confirmation_tx = None;
-                            app.state = AppState::Input;
-                            app.scroll_offset = 0;
-                        }
-                        AgentEvent::ToolUseReceived { name, input, .. } => {
-                            app.current_response.clear();
-                            app.conversation.push(ConversationEntry {
-                                role: ConversationRole::ToolUse,
-                                content: tool_use_display_content(&name, &input),
-                            });
-                            app.scroll_offset = 0;
-                        }
-                        AgentEvent::ToolResult { content, is_error, .. } => {
-                            let role = if is_error {
-                                ConversationRole::Error
-                            } else {
-                                ConversationRole::ToolResult
-                            };
-                            app.conversation.push(ConversationEntry {
-                                role,
-                                content,
-                            });
-                            app.scroll_offset = 0;
-                        }
-                        AgentEvent::ToolConfirmationRequired { name, input, .. } => {
-                            app.current_response.clear();
-                            app.state = AppState::ToolConfirmation { name, input };
-                        }
-                    }
+                    handle_agent_event(&mut app, agent_event, logger.as_mut())?;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
                     if event::poll(std::time::Duration::from_millis(0))?
@@ -621,5 +645,62 @@ mod tests {
         let content = "é".repeat(300);
         let result = maybe_truncate(&content, ConversationRole::ToolResult);
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn handle_agent_event_logs_tool_use_to_logger() {
+        use crate::logging::Logger;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let log_path = temp_dir.path().join("test.log");
+        let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
+        let mut app = App::new();
+
+        let event = AgentEvent::ToolUseReceived {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+
+        handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
+        drop(logger);
+
+        let content = std::fs::read_to_string(&log_path).expect("read log");
+        assert!(content.contains("[TOOL CALL]"), "should log tool call");
+        assert!(content.contains("name: bash"), "should log tool name");
+    }
+
+    #[test]
+    fn handle_agent_event_logs_response_complete_to_logger() {
+        use crate::logging::Logger;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let log_path = temp_dir.path().join("test.log");
+        let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
+        let mut app = App::new();
+
+        let event = AgentEvent::ResponseComplete("hello world".to_string());
+
+        handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
+        drop(logger);
+
+        let content = std::fs::read_to_string(&log_path).expect("read log");
+        assert!(
+            content.contains("[ASSISTANT RESPONSE]"),
+            "should log response"
+        );
+        assert!(
+            content.contains("hello world"),
+            "should log response content"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_with_no_logger_does_not_panic() {
+        let mut app = App::new();
+        let event = AgentEvent::ResponseComplete("test".to_string());
+        handle_agent_event(&mut app, event, None).expect("should not error without logger");
     }
 }
