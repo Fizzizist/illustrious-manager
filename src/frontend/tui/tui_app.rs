@@ -218,7 +218,9 @@ impl Default for App {
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
-    let input_height = app.input.height_for_width(frame.area().width);
+    let input_height = app
+        .input
+        .height_for_width(frame.area().width, frame.area().height);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
