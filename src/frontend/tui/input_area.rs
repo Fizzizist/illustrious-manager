@@ -5,7 +5,7 @@ use ratatui_textarea::{TextArea, WrapMode};
 const INPUT_TITLE: &str = "Input (Enter to send, Ctrl+C to quit)";
 const STREAMING_TITLE: &str = "Streaming...";
 const MIN_HEIGHT: u16 = 3;
-const MAX_HEIGHT: u16 = 10;
+const MAX_INPUT_RATIO: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
@@ -87,19 +87,23 @@ impl<'a> InputArea<'a> {
         self.textarea.set_block(block);
     }
 
-    pub fn height_for_width(&self, width: u16) -> u16 {
+    pub fn height_for_width(&self, width: u16, available_height: u16) -> u16 {
+        let max_height = (available_height / MAX_INPUT_RATIO).max(MIN_HEIGHT);
         match &self.mode {
             InputMode::ToolConfirmation { name, input } => {
                 let confirmation_text = format!("Allow '{}' with input {}?", name, input);
                 let lines_needed = confirmation_text.lines().count() as u16;
-                lines_needed.saturating_add(2).max(MIN_HEIGHT)
+                lines_needed
+                    .saturating_add(2)
+                    .max(MIN_HEIGHT)
+                    .min(max_height)
             }
             InputMode::Streaming => MIN_HEIGHT,
-            InputMode::Input => self.text_height_for_width(width),
+            InputMode::Input => self.text_height_for_width(width, max_height),
         }
     }
 
-    fn text_height_for_width(&self, width: u16) -> u16 {
+    fn text_height_for_width(&self, width: u16, max_height: u16) -> u16 {
         if width == 0 {
             return MIN_HEIGHT;
         }
@@ -123,7 +127,7 @@ impl<'a> InputArea<'a> {
             })
             .sum();
         let needed = (total_visual_lines as u16).saturating_add(2);
-        needed.clamp(MIN_HEIGHT, MAX_HEIGHT)
+        needed.clamp(MIN_HEIGHT, max_height)
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -220,7 +224,7 @@ mod tests {
     #[test]
     fn height_for_width_minimum_when_empty() {
         let input = InputArea::new();
-        assert_eq!(input.height_for_width(60), MIN_HEIGHT);
+        assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 
     #[test]
@@ -228,7 +232,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.input(char_key('i'));
-        assert_eq!(input.height_for_width(60), MIN_HEIGHT);
+        assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 
     #[test]
@@ -237,8 +241,8 @@ mod tests {
         for c in "abcdefghijklmnopqrstuvwxyz".chars() {
             input.input(char_key(c));
         }
-        let wide = input.height_for_width(60);
-        let narrow = input.height_for_width(10);
+        let wide = input.height_for_width(60, 24);
+        let narrow = input.height_for_width(10, 24);
         assert!(
             narrow > wide,
             "narrow={narrow} should be > wide={wide} for wrapping text"
@@ -246,22 +250,24 @@ mod tests {
     }
 
     #[test]
-    fn height_for_width_respects_max() {
+    fn height_for_width_respects_available_height() {
         let mut input = InputArea::new();
         for c in "abcdefghijklmnopqrstuvwxyz".chars() {
             input.input(char_key(c));
         }
-        let height = input.height_for_width(4);
+        let available = 24u16;
+        let height = input.height_for_width(4, available);
         assert!(
-            height <= MAX_HEIGHT,
-            "height {height} should be <= {MAX_HEIGHT}"
+            height <= available / MAX_INPUT_RATIO,
+            "height {height} should be <= available/{MAX_INPUT_RATIO} = {}",
+            available / MAX_INPUT_RATIO
         );
     }
 
     #[test]
     fn height_for_width_respects_min() {
         let input = InputArea::new();
-        let height = input.height_for_width(4);
+        let height = input.height_for_width(4, 24);
         assert!(
             height >= MIN_HEIGHT,
             "height {height} should be >= {MIN_HEIGHT}"
@@ -271,7 +277,7 @@ mod tests {
     #[test]
     fn height_for_width_zero_width_returns_min() {
         let input = InputArea::new();
-        assert_eq!(input.height_for_width(0), MIN_HEIGHT);
+        assert_eq!(input.height_for_width(0, 24), MIN_HEIGHT);
     }
 
     #[test]
@@ -311,9 +317,9 @@ mod tests {
             input.input(char_key(c));
         }
 
-        let backend = ratatui::backend::TestBackend::new(20, MAX_HEIGHT + 5);
+        let backend = ratatui::backend::TestBackend::new(20, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
-        let height = input.height_for_width(20);
+        let height = input.height_for_width(20, 24);
         assert!(height > MIN_HEIGHT, "should need more than min height");
 
         terminal
@@ -348,7 +354,7 @@ mod tests {
     fn height_for_width_grows_with_multiline_input() {
         let mut input = InputArea::new();
         input.set_text("line1\nline2\nline3\nline4\nline5");
-        let height = input.height_for_width(60);
+        let height = input.height_for_width(60, 24);
         assert!(
             height > MIN_HEIGHT,
             "multiline input should need more than {MIN_HEIGHT} height, got {height}"
@@ -359,8 +365,8 @@ mod tests {
     fn height_for_width_grows_with_multiline_and_wrapping() {
         let mut input = InputArea::new();
         input.set_text("a very long line that needs to wrap\nanother long line that wraps");
-        let narrow_height = input.height_for_width(20);
-        let wide_height = input.height_for_width(80);
+        let narrow_height = input.height_for_width(20, 24);
+        let wide_height = input.height_for_width(80, 24);
         assert!(
             narrow_height > wide_height,
             "narrow={narrow_height} should be > wide={wide_height}"
@@ -394,7 +400,7 @@ mod tests {
 
         let backend = ratatui::backend::TestBackend::new(60, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
-        let height = input.height_for_width(60);
+        let height = input.height_for_width(60, 24);
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, height);
@@ -434,7 +440,7 @@ mod tests {
     fn height_for_width_streaming_returns_min() {
         let mut input = InputArea::new();
         input.set_mode(InputMode::Streaming);
-        assert_eq!(input.height_for_width(60), MIN_HEIGHT);
+        assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 
     #[test]
@@ -444,7 +450,7 @@ mod tests {
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls -la /some/long/path"}),
         });
-        let height = input.height_for_width(60);
+        let height = input.height_for_width(60, 24);
         assert!(height >= MIN_HEIGHT);
     }
 }
