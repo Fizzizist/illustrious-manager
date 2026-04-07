@@ -6,7 +6,7 @@ use futures::channel::mpsc;
 
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
-use crate::context_files::ContextFile;
+use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -56,6 +56,12 @@ impl Agent {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
         self
+    }
+
+    pub fn with_context_files(self) -> Result<Self> {
+        let files = discover_context_files_from_env()?;
+        self.load_context_files(files);
+        Ok(self)
     }
 
     pub fn history(&self) -> Vec<Message> {
