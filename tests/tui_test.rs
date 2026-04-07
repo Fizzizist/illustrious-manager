@@ -69,10 +69,10 @@ fn test_tui_confirmation_prompt_state_renders() {
         role: ConversationRole::User,
         content: "Write a file".to_string(),
     });
-    app.state = AppState::ToolConfirmation {
+    app.set_state(AppState::ToolConfirmation {
         name: "write_file".to_string(),
         input: serde_json::json!({"path": "/tmp/test.txt", "content": "hello"}),
-    };
+    });
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -123,7 +123,7 @@ fn test_tui_streaming_state() {
         content: "Tell me a story".to_string(),
     });
     app.current_response = "Once upon a time".to_string();
-    app.state = AppState::Streaming;
+    app.set_state(AppState::Streaming);
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");

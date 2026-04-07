@@ -82,7 +82,7 @@ pub struct App {
 }
 
 impl App {
-    fn set_state(&mut self, state: AppState) {
+    pub fn set_state(&mut self, state: AppState) {
         self.state = state;
         match &self.state {
             AppState::Input => self.input.set_mode(InputMode::Input),
