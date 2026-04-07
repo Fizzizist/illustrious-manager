@@ -1,7 +1,7 @@
 // Discovery and loading of context files (CLAUDE.md, AGENTS.md)
 
-use std::path::{Path, PathBuf};
 use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 /// Context files that should be loaded on startup
 #[derive(Debug, Clone, PartialEq)]
@@ -148,7 +148,10 @@ mod tests {
         let found = discover_context_files(temp_pwd.path(), temp_home.path())
             .expect("discover should succeed");
 
-        assert!(found.is_empty(), "should return empty vec when no files exist");
+        assert!(
+            found.is_empty(),
+            "should return empty vec when no files exist"
+        );
     }
 
     #[test]

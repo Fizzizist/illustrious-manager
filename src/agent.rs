@@ -69,7 +69,11 @@ impl Agent {
 
         let mut content = String::from("The following context files were loaded:\n\n");
         for file in files {
-            content.push_str(&format!("## File: {}\n\n{}\n\n", file.path.display(), file.content));
+            content.push_str(&format!(
+                "## File: {}\n\n{}\n\n",
+                file.path.display(),
+                file.content
+            ));
         }
 
         lock(&self.history).push(Message::text(Role::User, content));
