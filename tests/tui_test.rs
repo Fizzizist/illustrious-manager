@@ -190,7 +190,7 @@ async fn user_message_appears_immediately() {
 
     // Create app with user input
     let mut app = App::new();
-    app.input = "Hello, world!".to_string();
+    app.set_input("Hello, world!");
 
     // Submit the message - this should return QUICKLY (< 100ms) without
     // waiting for the backend, because the backend request is spawned
@@ -221,7 +221,7 @@ async fn user_message_appears_immediately() {
     assert_eq!(app.state, AppState::Streaming);
 
     // Verify input was cleared
-    assert_eq!(app.input, "");
+    assert!(app.input_text().is_empty());
 
     // Give the background task a moment to start and call the backend
     tokio::time::sleep(Duration::from_millis(50)).await;

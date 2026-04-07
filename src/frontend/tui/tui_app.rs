@@ -8,7 +8,7 @@ use futures::StreamExt;
 use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -17,6 +17,7 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::input_area::InputArea;
 use crate::agent::Agent;
 use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
@@ -71,7 +72,7 @@ pub struct ConversationEntry {
 }
 
 pub struct App {
-    pub input: String,
+    pub input: InputArea<'static>,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub state: AppState,
@@ -83,13 +84,24 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         Self {
-            input: String::new(),
+            input: InputArea::new(),
             conversation: Vec::new(),
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+        }
+    }
+
+    pub fn input_text(&self) -> String {
+        self.input.text()
+    }
+
+    pub fn set_input(&mut self, text: &str) {
+        self.input.clear();
+        if !text.is_empty() {
+            self.input.set_text(text);
         }
     }
 
@@ -190,11 +202,34 @@ impl Default for App {
     }
 }
 
+fn input_block_for_state(state: &AppState) -> Block<'_> {
+    let title = match state {
+        AppState::Input => "Input (Enter to send, Ctrl+C to quit)",
+        AppState::Streaming => "Streaming...",
+        AppState::ToolConfirmation { name, .. } => {
+            return Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Allow '{name}'? [y/n]"));
+        }
+    };
+    Block::default().borders(Borders::ALL).title(title)
+}
+
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+    let input_height = match &app.state {
+        AppState::ToolConfirmation { name, input } => {
+            let confirmation_text = format!("Allow '{}' with input {}?", name, input);
+            let lines_needed = confirmation_text.lines().count() as u16;
+            lines_needed.saturating_add(2).max(3)
+        }
+        AppState::Streaming => 3,
+        AppState::Input => app.input.height_for_width(frame.area().width),
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
         .split(frame.area());
 
     let visible_height = chunks[0].height.saturating_sub(2);
@@ -220,27 +255,26 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .scroll((scroll_row, 0));
     frame.render_widget(conversation, chunks[0]);
 
-    let input_title = match &app.state {
-        AppState::Input => "Input (Enter to send, Ctrl+C to quit)".to_string(),
-        AppState::Streaming => "Streaming...".to_string(),
-        AppState::ToolConfirmation { name, .. } => format!("Allow '{name}'? [y/n]"),
-    };
-
-    let input_content = match &app.state {
-        AppState::ToolConfirmation { name, input } => {
-            format!("Allow '{}' with input {}?", name, input)
+    match &app.state {
+        AppState::Input => {
+            render_input_area(app, frame, chunks[1]);
         }
-        _ => app.input.clone(),
-    };
-
-    let input = Paragraph::new(input_content.as_str())
-        .block(Block::default().borders(Borders::ALL).title(input_title));
-    frame.render_widget(input, chunks[1]);
-
-    if matches!(app.state, AppState::Input) {
-        let cursor_x = chunks[1].x + u16::try_from(app.input.len()).unwrap_or(u16::MAX) + 1;
-        frame.set_cursor_position((cursor_x, chunks[1].y + 1));
+        AppState::Streaming => {
+            let block = input_block_for_state(&app.state);
+            let input = Paragraph::new("").block(block);
+            frame.render_widget(input, chunks[1]);
+        }
+        AppState::ToolConfirmation { name, input } => {
+            let confirmation_text = format!("Allow '{}' with input {}?", name, input);
+            let block = input_block_for_state(&app.state);
+            let para = Paragraph::new(confirmation_text).block(block);
+            frame.render_widget(para, chunks[1]);
+        }
     }
+}
+
+fn render_input_area(app: &App, frame: &mut ratatui::Frame, area: Rect) {
+    app.input.render(frame, area);
 }
 
 pub fn handle_agent_event(
@@ -340,7 +374,7 @@ async fn run_app(
         if let Some(ref mut log) = logger {
             log.log_user_input(&prompt)?;
         }
-        app.input = prompt;
+        app.set_input(&prompt);
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
 
@@ -364,29 +398,21 @@ async fn run_app(
                     } => break,
                     KeyEvent {
                         code: KeyCode::Enter,
+                        modifiers: KeyModifiers::NONE,
                         ..
                     } => {
-                        if !app.input.trim().is_empty() {
+                        let text = app.input_text();
+                        if !text.trim().is_empty() {
                             if let Some(ref mut log) = logger {
-                                log.log_user_input(&app.input)?;
+                                log.log_user_input(&text)?;
                             }
                             stream_task =
                                 Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                         }
                     }
-                    KeyEvent {
-                        code: KeyCode::Char(c),
-                        ..
-                    } => {
-                        app.input.push(c);
+                    _ => {
+                        app.input.input(key);
                     }
-                    KeyEvent {
-                        code: KeyCode::Backspace,
-                        ..
-                    } => {
-                        app.input.pop();
-                    }
-                    _ => {}
                 }
             }
         } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
@@ -472,7 +498,8 @@ pub async fn submit_message(
     agent: Arc<Agent>,
     event_tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<JoinHandle<()>> {
-    let input = app.input.drain(..).collect::<String>();
+    let input = app.input_text();
+    app.input.clear();
 
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
@@ -593,7 +620,7 @@ mod tests {
 
         let mut app = app_with_content(10);
         app.scroll_offset = 15;
-        app.input = "hello".to_string();
+        app.set_input("hello");
 
         let (tx, _rx) = mpsc::channel(10);
         submit_message(&mut app, agent, &tx)
