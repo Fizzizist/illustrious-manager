@@ -115,20 +115,11 @@ async fn main() -> Result<()> {
             .with_tool_config(&app_config.tools),
     );
 
-    // Load context files from standard locations
     let pwd = std::env::current_dir()?;
-
-    // Use dirs crate for cross-platform home directory detection.
-    // If home directory cannot be determined, we skip home directory lookups
-    // and only search in the current working directory.
-    let home = match dirs::home_dir() {
-        Some(h) => h,
-        None => {
-            // Log a warning and skip home directory context files
-            eprintln!("Warning: Could not determine home directory, skipping home context files");
-            pwd.clone() // Use pwd as fallback, which effectively skips home lookups
-        }
-    };
+    let home = dirs::home_dir().unwrap_or_else(|| {
+        eprintln!("Warning: Could not determine home directory, skipping home context files");
+        pwd.clone()
+    });
 
     let context_files = discover_context_files(&pwd, &home)?;
     agent.load_context_files(context_files);
