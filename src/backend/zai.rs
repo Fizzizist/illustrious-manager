@@ -46,12 +46,39 @@ impl ZaiSseParser {
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
-        if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str()
-            && finish_reason == "tool_calls"
-        {
-            self.tool_calls_by_index.clear();
-            self.event_buffer.push(StreamEvent::ToolUseDone);
-            return Ok(());
+        if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
+            let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+            let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            match finish_reason {
+                "tool_calls" => {
+                    self.tool_calls_by_index.clear();
+                    if input_tokens > 0 || output_tokens > 0 {
+                        self.event_buffer.push(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            stop_reason: finish_reason.to_string(),
+                        });
+                    }
+                    self.event_buffer.push(StreamEvent::ToolUseDone);
+                    return Ok(());
+                }
+                "length" => {
+                    return Err(anyhow::anyhow!(
+                        "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
+                        input_tokens,
+                        output_tokens,
+                    ));
+                }
+                _ => {
+                    if input_tokens > 0 || output_tokens > 0 {
+                        self.event_buffer.push(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            stop_reason: finish_reason.to_string(),
+                        });
+                    }
+                }
+            }
         }
 
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
