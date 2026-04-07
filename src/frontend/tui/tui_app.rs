@@ -8,7 +8,7 @@ use futures::StreamExt;
 use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -17,7 +17,7 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::input_area::InputArea;
+use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
@@ -82,6 +82,20 @@ pub struct App {
 }
 
 impl App {
+    fn set_state(&mut self, state: AppState) {
+        self.state = state;
+        match &self.state {
+            AppState::Input => self.input.set_mode(InputMode::Input),
+            AppState::Streaming => self.input.set_mode(InputMode::Streaming),
+            AppState::ToolConfirmation { name, input } => {
+                self.input.set_mode(InputMode::ToolConfirmation {
+                    name: name.clone(),
+                    input: input.clone(),
+                });
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             input: InputArea::new(),
@@ -202,30 +216,9 @@ impl Default for App {
     }
 }
 
-fn input_block_for_state(state: &AppState) -> Block<'_> {
-    let title = match state {
-        AppState::Input => "Input (Enter to send, Ctrl+C to quit)",
-        AppState::Streaming => "Streaming...",
-        AppState::ToolConfirmation { name, .. } => {
-            return Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Allow '{name}'? [y/n]"));
-        }
-    };
-    Block::default().borders(Borders::ALL).title(title)
-}
-
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
-    let input_height = match &app.state {
-        AppState::ToolConfirmation { name, input } => {
-            let confirmation_text = format!("Allow '{}' with input {}?", name, input);
-            let lines_needed = confirmation_text.lines().count() as u16;
-            lines_needed.saturating_add(2).max(3)
-        }
-        AppState::Streaming => 3,
-        AppState::Input => app.input.height_for_width(frame.area().width),
-    };
+    let input_height = app.input.height_for_width(frame.area().width);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -255,26 +248,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .scroll((scroll_row, 0));
     frame.render_widget(conversation, chunks[0]);
 
-    match &app.state {
-        AppState::Input => {
-            render_input_area(app, frame, chunks[1]);
-        }
-        AppState::Streaming => {
-            let block = input_block_for_state(&app.state);
-            let input = Paragraph::new("").block(block);
-            frame.render_widget(input, chunks[1]);
-        }
-        AppState::ToolConfirmation { name, input } => {
-            let confirmation_text = format!("Allow '{}' with input {}?", name, input);
-            let block = input_block_for_state(&app.state);
-            let para = Paragraph::new(confirmation_text).block(block);
-            frame.render_widget(para, chunks[1]);
-        }
-    }
-}
-
-fn render_input_area(app: &App, frame: &mut ratatui::Frame, area: Rect) {
-    app.input.render(frame, area);
+    app.input.render(frame, chunks[1]);
 }
 
 pub fn handle_agent_event(
@@ -298,7 +272,7 @@ pub fn handle_agent_event(
             });
             app.current_response.clear();
             app.confirmation_tx = None;
-            app.state = AppState::Input;
+            app.set_state(AppState::Input);
             app.scroll_offset = 0;
         }
         AgentEvent::Error(msg) => {
@@ -308,7 +282,7 @@ pub fn handle_agent_event(
             });
             app.current_response.clear();
             app.confirmation_tx = None;
-            app.state = AppState::Input;
+            app.set_state(AppState::Input);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
@@ -332,7 +306,7 @@ pub fn handle_agent_event(
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             app.current_response.clear();
-            app.state = AppState::ToolConfirmation { name, input };
+            app.set_state(AppState::ToolConfirmation { name, input });
         }
         AgentEvent::Usage { .. } => {}
     }
@@ -454,14 +428,14 @@ async fn run_app(
                         .as_ref()
                         .is_some_and(|tx| tx.unbounded_send(response).is_ok());
                     if sent {
-                        app.state = AppState::Streaming;
+                        app.set_state(AppState::Streaming);
                     } else {
                         app.conversation.push(ConversationEntry {
                             role: ConversationRole::Error,
                             content: "Confirmation channel closed unexpectedly.".to_string(),
                         });
                         app.confirmation_tx = None;
-                        app.state = AppState::Input;
+                        app.set_state(AppState::Input);
                     }
                 }
             }
@@ -507,7 +481,7 @@ pub async fn submit_message(
     });
 
     app.scroll_offset = 0;
-    app.state = AppState::Streaming;
+    app.set_state(AppState::Streaming);
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
     app.confirmation_tx = Some(confirm_tx);

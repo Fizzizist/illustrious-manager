@@ -3,19 +3,35 @@ use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{TextArea, WrapMode};
 
 const INPUT_TITLE: &str = "Input (Enter to send, Ctrl+C to quit)";
+const STREAMING_TITLE: &str = "Streaming...";
 const MIN_HEIGHT: u16 = 3;
 const MAX_HEIGHT: u16 = 10;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputMode {
+    Input,
+    Streaming,
+    ToolConfirmation {
+        name: String,
+        input: serde_json::Value,
+    },
+}
+
 pub struct InputArea<'a> {
     textarea: TextArea<'a>,
+    mode: InputMode,
 }
 
 impl<'a> InputArea<'a> {
     pub fn new() -> Self {
-        let mut textarea = TextArea::default();
-        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        textarea.set_block(Block::default().borders(Borders::ALL).title(INPUT_TITLE));
-        Self { textarea }
+        let textarea = TextArea::default();
+        let mut input = Self {
+            textarea,
+            mode: InputMode::Input,
+        };
+        input.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        input.apply_block();
+        input
     }
 
     pub fn input(&mut self, event: crossterm::event::KeyEvent) -> bool {
@@ -40,17 +56,50 @@ impl<'a> InputArea<'a> {
         } else {
             text.lines().map(String::from).collect()
         };
-        let block = Block::default().borders(Borders::ALL).title(INPUT_TITLE);
         self.textarea = TextArea::new(lines);
         self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        self.textarea.set_block(block);
+        self.apply_block();
     }
 
     pub fn clear(&mut self) {
         self.textarea.clear();
     }
 
+    pub fn set_mode(&mut self, mode: InputMode) {
+        self.mode = mode;
+        self.apply_block();
+    }
+
+    pub fn mode(&self) -> &InputMode {
+        &self.mode
+    }
+
+    fn apply_block(&mut self) {
+        let block = match &self.mode {
+            InputMode::Input => Block::default().borders(Borders::ALL).title(INPUT_TITLE),
+            InputMode::Streaming => Block::default()
+                .borders(Borders::ALL)
+                .title(STREAMING_TITLE),
+            InputMode::ToolConfirmation { name, .. } => Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Allow '{name}'? [y/n]")),
+        };
+        self.textarea.set_block(block);
+    }
+
     pub fn height_for_width(&self, width: u16) -> u16 {
+        match &self.mode {
+            InputMode::ToolConfirmation { name, input } => {
+                let confirmation_text = format!("Allow '{}' with input {}?", name, input);
+                let lines_needed = confirmation_text.lines().count() as u16;
+                lines_needed.saturating_add(2).max(MIN_HEIGHT)
+            }
+            InputMode::Streaming => MIN_HEIGHT,
+            InputMode::Input => self.text_height_for_width(width),
+        }
+    }
+
+    fn text_height_for_width(&self, width: u16) -> u16 {
         if width == 0 {
             return MIN_HEIGHT;
         }
@@ -316,5 +365,86 @@ mod tests {
             narrow_height > wide_height,
             "narrow={narrow_height} should be > wide={wide_height}"
         );
+    }
+
+    #[test]
+    fn set_mode_streaming_updates_title() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Streaming);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_streaming", terminal.backend());
+    }
+
+    #[test]
+    fn set_mode_tool_confirmation_updates_title() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::ToolConfirmation {
+            name: "write_file".to_string(),
+            input: serde_json::json!({"path": "/tmp/test.txt"}),
+        });
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let height = input.height_for_width(60);
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, height);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_tool_confirmation", terminal.backend());
+    }
+
+    #[test]
+    fn set_mode_back_to_input_restores_input_title() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.set_mode(InputMode::Streaming);
+        input.set_mode(InputMode::Input);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_restored_input", terminal.backend());
+    }
+
+    #[test]
+    fn mode_defaults_to_input() {
+        let input = InputArea::new();
+        assert_eq!(input.mode(), &InputMode::Input);
+    }
+
+    #[test]
+    fn height_for_width_streaming_returns_min() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Streaming);
+        assert_eq!(input.height_for_width(60), MIN_HEIGHT);
+    }
+
+    #[test]
+    fn height_for_width_tool_confirmation_scales_with_content() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::ToolConfirmation {
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls -la /some/long/path"}),
+        });
+        let height = input.height_for_width(60);
+        assert!(height >= MIN_HEIGHT);
     }
 }
