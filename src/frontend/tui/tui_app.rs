@@ -17,6 +17,7 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
@@ -71,7 +72,7 @@ pub struct ConversationEntry {
 }
 
 pub struct App {
-    pub input: String,
+    pub input: InputArea<'static>,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub state: AppState,
@@ -81,15 +82,40 @@ pub struct App {
 }
 
 impl App {
+    pub fn set_state(&mut self, state: AppState) {
+        self.state = state;
+        match &self.state {
+            AppState::Input => self.input.set_mode(InputMode::Input),
+            AppState::Streaming => self.input.set_mode(InputMode::Streaming),
+            AppState::ToolConfirmation { name, input } => {
+                self.input.set_mode(InputMode::ToolConfirmation {
+                    name: name.clone(),
+                    input: input.clone(),
+                });
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Self {
-            input: String::new(),
+            input: InputArea::new(),
             conversation: Vec::new(),
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+        }
+    }
+
+    pub fn input_text(&self) -> String {
+        self.input.text()
+    }
+
+    pub fn set_input(&mut self, text: &str) {
+        self.input.clear();
+        if !text.is_empty() {
+            self.input.set_text(text);
         }
     }
 
@@ -192,9 +218,13 @@ impl Default for App {
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+    let input_height = app
+        .input
+        .height_for_width(frame.area().width, frame.area().height);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
         .split(frame.area());
 
     let visible_height = chunks[0].height.saturating_sub(2);
@@ -220,27 +250,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .scroll((scroll_row, 0));
     frame.render_widget(conversation, chunks[0]);
 
-    let input_title = match &app.state {
-        AppState::Input => "Input (Enter to send, Ctrl+C to quit)".to_string(),
-        AppState::Streaming => "Streaming...".to_string(),
-        AppState::ToolConfirmation { name, .. } => format!("Allow '{name}'? [y/n]"),
-    };
-
-    let input_content = match &app.state {
-        AppState::ToolConfirmation { name, input } => {
-            format!("Allow '{}' with input {}?", name, input)
-        }
-        _ => app.input.clone(),
-    };
-
-    let input = Paragraph::new(input_content.as_str())
-        .block(Block::default().borders(Borders::ALL).title(input_title));
-    frame.render_widget(input, chunks[1]);
-
-    if matches!(app.state, AppState::Input) {
-        let cursor_x = chunks[1].x + u16::try_from(app.input.len()).unwrap_or(u16::MAX) + 1;
-        frame.set_cursor_position((cursor_x, chunks[1].y + 1));
-    }
+    app.input.render(frame, chunks[1]);
 }
 
 pub fn handle_agent_event(
@@ -264,7 +274,7 @@ pub fn handle_agent_event(
             });
             app.current_response.clear();
             app.confirmation_tx = None;
-            app.state = AppState::Input;
+            app.set_state(AppState::Input);
             app.scroll_offset = 0;
         }
         AgentEvent::Error(msg) => {
@@ -274,7 +284,7 @@ pub fn handle_agent_event(
             });
             app.current_response.clear();
             app.confirmation_tx = None;
-            app.state = AppState::Input;
+            app.set_state(AppState::Input);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
@@ -298,7 +308,7 @@ pub fn handle_agent_event(
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             app.current_response.clear();
-            app.state = AppState::ToolConfirmation { name, input };
+            app.set_state(AppState::ToolConfirmation { name, input });
         }
         AgentEvent::Usage { .. } => {}
     }
@@ -340,7 +350,7 @@ async fn run_app(
         if let Some(ref mut log) = logger {
             log.log_user_input(&prompt)?;
         }
-        app.input = prompt;
+        app.set_input(&prompt);
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
 
@@ -364,29 +374,21 @@ async fn run_app(
                     } => break,
                     KeyEvent {
                         code: KeyCode::Enter,
+                        modifiers: KeyModifiers::NONE,
                         ..
                     } => {
-                        if !app.input.trim().is_empty() {
+                        let text = app.input_text();
+                        if !text.trim().is_empty() {
                             if let Some(ref mut log) = logger {
-                                log.log_user_input(&app.input)?;
+                                log.log_user_input(&text)?;
                             }
                             stream_task =
                                 Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                         }
                     }
-                    KeyEvent {
-                        code: KeyCode::Char(c),
-                        ..
-                    } => {
-                        app.input.push(c);
+                    _ => {
+                        app.input.input(key);
                     }
-                    KeyEvent {
-                        code: KeyCode::Backspace,
-                        ..
-                    } => {
-                        app.input.pop();
-                    }
-                    _ => {}
                 }
             }
         } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
@@ -428,14 +430,14 @@ async fn run_app(
                         .as_ref()
                         .is_some_and(|tx| tx.unbounded_send(response).is_ok());
                     if sent {
-                        app.state = AppState::Streaming;
+                        app.set_state(AppState::Streaming);
                     } else {
                         app.conversation.push(ConversationEntry {
                             role: ConversationRole::Error,
                             content: "Confirmation channel closed unexpectedly.".to_string(),
                         });
                         app.confirmation_tx = None;
-                        app.state = AppState::Input;
+                        app.set_state(AppState::Input);
                     }
                 }
             }
@@ -472,7 +474,8 @@ pub async fn submit_message(
     agent: Arc<Agent>,
     event_tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<JoinHandle<()>> {
-    let input = app.input.drain(..).collect::<String>();
+    let input = app.input_text();
+    app.input.clear();
 
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
@@ -480,7 +483,7 @@ pub async fn submit_message(
     });
 
     app.scroll_offset = 0;
-    app.state = AppState::Streaming;
+    app.set_state(AppState::Streaming);
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
     app.confirmation_tx = Some(confirm_tx);
@@ -593,7 +596,7 @@ mod tests {
 
         let mut app = app_with_content(10);
         app.scroll_offset = 15;
-        app.input = "hello".to_string();
+        app.set_input("hello");
 
         let (tx, _rx) = mpsc::channel(10);
         submit_message(&mut app, agent, &tx)

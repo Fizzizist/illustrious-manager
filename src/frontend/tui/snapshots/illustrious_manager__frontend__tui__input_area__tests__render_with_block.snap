@@ -1,0 +1,14 @@
+---
+source: src/frontend/tui/input_area.rs
+expression: terminal.backend()
+---
+"┌Input (Enter to send, Ctrl+C to quit)─┐"
+"│hi                                    │"
+"└──────────────────────────────────────┘"
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
