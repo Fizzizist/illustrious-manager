@@ -1,19 +1,12 @@
-// Discovery and loading of context files (CLAUDE.md, AGENTS.md)
-
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-/// Context files that should be loaded on startup
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextFile {
     pub path: PathBuf,
     pub content: String,
 }
 
-/// Discover context files from standard environment locations.
-///
-/// Uses the current working directory and home directory from the environment.
-/// Logs a warning if home directory cannot be determined.
 pub fn discover_context_files_from_env() -> Result<Vec<ContextFile>> {
     let pwd = std::env::current_dir()?;
     let home = dirs::home_dir().unwrap_or_else(|| {
@@ -23,19 +16,6 @@ pub fn discover_context_files_from_env() -> Result<Vec<ContextFile>> {
     discover_context_files(&pwd, &home)
 }
 
-/// Discover all context files from the standard locations.
-///
-/// Searches the following locations in order:
-/// - `$PWD/.claude/CLAUDE.md`
-/// - `$PWD/CLAUDE.md`
-/// - `$PWD/AGENTS.md`
-/// - `$HOME/.claude/CLAUDE.md`
-/// - `$HOME/CLAUDE.md`
-/// - `$HOME/AGENTS.md`
-///
-/// Note: If the same filename exists in both pwd and home (e.g., `CLAUDE.md`),
-/// both files will be loaded. The files are identified by their full path,
-/// so the LLM will receive context from both locations with clear path labels.
 pub fn discover_context_files(pwd: &Path, home: &Path) -> Result<Vec<ContextFile>> {
     let mut found = Vec::new();
 
