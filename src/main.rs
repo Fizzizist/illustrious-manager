@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use agent::Agent;
-use context_files::discover_context_files;
 use futures::channel::mpsc;
 use logging::Logger;
 use tools::ToolRegistry;
@@ -112,17 +111,9 @@ async fn main() -> Result<()> {
     let agent = Arc::new(
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
-            .with_tool_config(&app_config.tools),
+            .with_tool_config(&app_config.tools)
+            .with_context_files()?,
     );
-
-    let pwd = std::env::current_dir()?;
-    let home = dirs::home_dir().unwrap_or_else(|| {
-        eprintln!("Warning: Could not determine home directory, skipping home context files");
-        pwd.clone()
-    });
-
-    let context_files = discover_context_files(&pwd, &home)?;
-    agent.load_context_files(context_files);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
