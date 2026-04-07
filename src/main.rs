@@ -120,6 +120,11 @@ async fn main() -> Result<()> {
         None
     };
 
+    if let Some(ref mut log) = logger {
+        log.log_config(&app_config)?;
+        log.flush()?;
+    }
+
     match mode {
         Mode::SingleShot { prompt } => {
             if let Some(ref mut log) = logger {

@@ -82,6 +82,15 @@ impl Logger {
         Ok(())
     }
 
+    pub fn log_config(&mut self, config: &dyn std::fmt::Debug) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[CONFIG]")?;
+            writeln!(writer, "{:#?}", config)?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
     pub fn log_error(&mut self, message: &str) -> Result<()> {
         if let Some(ref mut writer) = self.log_file {
             writeln!(writer, "[ERROR]")?;
@@ -317,6 +326,30 @@ mod tests {
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("[USER INPUT]"));
         assert!(content.contains("test input"));
+    }
+
+    #[test]
+    fn log_config_writes_pretty_debug_representation() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let log_path = temp_dir.path().join("test.log");
+
+        {
+            let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
+            let config = vec!["backend", "vertex"];
+            logger.log_config(&config).expect("Failed to log config");
+        }
+
+        let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
+        assert!(content.contains("[CONFIG]"));
+        assert!(content.contains(r#""backend""#));
+        assert!(content.contains(r#""vertex""#));
+    }
+
+    #[test]
+    fn log_config_does_nothing_when_no_log_file() {
+        let mut logger = Logger::new(None).expect("logger creation should succeed");
+        let config = vec!["backend", "vertex"];
+        logger.log_config(&config).expect("log_config should not error");
     }
 
     #[test]
