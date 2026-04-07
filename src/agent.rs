@@ -6,6 +6,7 @@ use futures::channel::mpsc;
 
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
+use crate::context_files::ContextFile;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -59,6 +60,19 @@ impl Agent {
 
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
+    }
+
+    pub fn load_context_files(&self, files: Vec<ContextFile>) {
+        if files.is_empty() {
+            return;
+        }
+
+        let mut content = String::from("The following context files were loaded:\n\n");
+        for file in files {
+            content.push_str(&format!("## File: {}\n\n{}\n\n", file.path.display(), file.content));
+        }
+
+        lock(&self.history).push(Message::text(Role::User, content));
     }
 
     pub async fn send(
