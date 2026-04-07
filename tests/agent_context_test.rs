@@ -56,7 +56,11 @@ fn load_context_files_adds_messages_to_history() {
     assert_eq!(history.len(), 1, "should add one message with all context");
 
     let msg = &history[0];
-    assert_eq!(msg.role, Role::User, "context should be added as user message");
+    assert_eq!(
+        msg.role,
+        Role::User,
+        "context should be added as user message"
+    );
     assert_eq!(msg.content.len(), 1, "should have single content block");
 
     let text = if let ContentBlock::Text(t) = &msg.content[0] {
@@ -66,9 +70,15 @@ fn load_context_files_adds_messages_to_history() {
     };
 
     assert!(text.contains("CLAUDE.md"), "should mention CLAUDE.md");
-    assert!(text.contains("Be helpful"), "should include CLAUDE.md content");
+    assert!(
+        text.contains("Be helpful"),
+        "should include CLAUDE.md content"
+    );
     assert!(text.contains("AGENTS.md"), "should mention AGENTS.md");
-    assert!(text.contains("Use tools carefully"), "should include AGENTS.md content");
+    assert!(
+        text.contains("Use tools carefully"),
+        "should include AGENTS.md content"
+    );
 }
 
 #[test]
@@ -84,7 +94,10 @@ fn load_context_files_with_empty_vec_does_not_modify_history() {
     agent.load_context_files(vec![]);
 
     let history = agent.history();
-    assert!(history.is_empty(), "should not add message for empty context files");
+    assert!(
+        history.is_empty(),
+        "should not add message for empty context files"
+    );
 }
 
 #[test]
@@ -111,7 +124,11 @@ fn load_context_files_can_be_called_multiple_times() {
     agent.load_context_files(files2);
 
     let history = agent.history();
-    assert_eq!(history.len(), 2, "should add separate message for each call");
+    assert_eq!(
+        history.len(),
+        2,
+        "should add separate message for each call"
+    );
 
     let text1 = if let ContentBlock::Text(t) = &history[0].content[0] {
         t

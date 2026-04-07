@@ -118,7 +118,9 @@ async fn main() -> Result<()> {
 
     // Load context files from standard locations
     let pwd = env::current_dir()?;
-    let home = env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("/"));
+    let home = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/"));
     let context_files = discover_context_files(&pwd, &home)?;
     agent.load_context_files(context_files);
 
