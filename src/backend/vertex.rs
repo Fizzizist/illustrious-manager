@@ -18,7 +18,7 @@ pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
     input_tokens: u32,
     /// Buffer for events when multiple events appear in a single SSE chunk
-    pub event_buffer: Vec<StreamEvent>,
+    pub(crate) event_buffer: Vec<StreamEvent>,
 }
 
 impl VertexSseParser {
@@ -44,18 +44,25 @@ impl VertexSseParser {
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
-        let event_type = json["type"].as_str().unwrap_or("");
+        let event_type = json["type"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("SSE event missing 'type' field"))?;
 
         match event_type {
             "message_start" => {
                 self.input_tokens = json["message"]["usage"]["input_tokens"]
                     .as_u64()
-                    .unwrap_or(0) as u32;
+                    .ok_or_else(|| anyhow::anyhow!("message_start missing 'input_tokens'"))?
+                    as u32;
             }
             "content_block_start" => {
-                let block_type = json["content_block"]["type"].as_str().unwrap_or("");
+                let block_type = json["content_block"]["type"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("content_block_start missing 'type'"))?;
                 if block_type == "tool_use" {
-                    let index = json["index"].as_u64().unwrap_or(0);
+                    let index = json["index"]
+                        .as_u64()
+                        .ok_or_else(|| anyhow::anyhow!("content_block_start missing 'index'"))?;
                     self.tool_use_indices.insert(index);
                     let id = json["content_block"]["id"]
                         .as_str()
@@ -74,7 +81,9 @@ impl VertexSseParser {
                 }
             }
             "content_block_delta" => {
-                let delta_type = json["delta"]["type"].as_str().unwrap_or("");
+                let delta_type = json["delta"]["type"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("content_block_delta missing 'type'"))?;
                 if delta_type == "input_json_delta" {
                     let chunk = json["delta"]["partial_json"]
                         .as_str()
@@ -87,7 +96,9 @@ impl VertexSseParser {
                 }
             }
             "content_block_stop" => {
-                let index = json["index"].as_u64().unwrap_or(0);
+                let index = json["index"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("content_block_stop missing 'index'"))?;
                 if self.tool_use_indices.remove(&index) {
                     self.event_buffer.push(StreamEvent::ToolUseDone);
                 }
@@ -95,9 +106,12 @@ impl VertexSseParser {
             "message_delta" => {
                 let stop_reason = json["delta"]["stop_reason"]
                     .as_str()
-                    .unwrap_or("")
+                    .ok_or_else(|| anyhow::anyhow!("message_delta missing 'stop_reason'"))?
                     .to_string();
-                let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                let output_tokens = json["usage"]["output_tokens"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("message_delta missing 'output_tokens'"))?
+                    as u32;
                 if stop_reason == "max_tokens" {
                     return Err(anyhow::anyhow!(
                         "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
@@ -467,5 +481,45 @@ mod tests {
         // Second parse should return None (buffer is now empty)
         let result2 = parser.parse("").expect("should parse successfully");
         assert!(result2.is_none(), "second parse should return None");
+    }
+
+    #[test]
+    fn fill_buffer_accumulates_multiple_events() {
+        let mut parser = VertexSseParser::new();
+
+        // Fill buffer with first event
+        parser
+            .fill_buffer(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
+            .expect("should fill first event");
+
+        // Fill buffer with second event
+        parser
+            .fill_buffer(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" World"}}"#)
+            .expect("should fill second event");
+
+        // Fill buffer with third event (message_stop)
+        parser
+            .fill_buffer(r#"{"type":"message_stop"}"#)
+            .expect("should fill third event");
+
+        // Buffer should have 3 events
+        assert_eq!(
+            parser.event_buffer.len(),
+            3,
+            "buffer should contain 3 events"
+        );
+
+        // Parse should return events one at a time
+        let event1 = parser.parse("").expect("first parse");
+        assert!(event1.is_some(), "should get first event");
+
+        let event2 = parser.parse("").expect("second parse");
+        assert!(event2.is_some(), "should get second event");
+
+        let event3 = parser.parse("").expect("third parse");
+        assert!(event3.is_some(), "should get third event");
+
+        let event4 = parser.parse("").expect("fourth parse");
+        assert!(event4.is_none(), "buffer should be empty after 3 events");
     }
 }
