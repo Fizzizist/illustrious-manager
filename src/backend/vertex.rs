@@ -16,6 +16,7 @@ const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 #[derive(Default)]
 pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
+    input_tokens: u32,
 }
 
 impl VertexSseParser {
@@ -30,6 +31,12 @@ impl VertexSseParser {
         let event_type = json["type"].as_str().unwrap_or("");
 
         match event_type {
+            "message_start" => {
+                self.input_tokens = json["message"]["usage"]["input_tokens"]
+                    .as_u64()
+                    .unwrap_or(0) as u32;
+                Ok(None)
+            }
             "content_block_start" => {
                 let block_type = json["content_block"]["type"].as_str().unwrap_or("");
                 if block_type == "tool_use" {
@@ -71,6 +78,26 @@ impl VertexSseParser {
                     Ok(Some(StreamEvent::ToolUseDone))
                 } else {
                     Ok(None)
+                }
+            }
+            "message_delta" => {
+                let stop_reason = json["delta"]["stop_reason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+                if stop_reason == "max_tokens" {
+                    Err(anyhow::anyhow!(
+                        "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
+                        self.input_tokens,
+                        output_tokens,
+                    ))
+                } else {
+                    Ok(Some(StreamEvent::Usage {
+                        input_tokens: self.input_tokens,
+                        output_tokens,
+                        stop_reason,
+                    }))
                 }
             }
             "message_stop" => Ok(Some(StreamEvent::Done)),

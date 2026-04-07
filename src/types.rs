@@ -194,9 +194,18 @@ pub struct RequestConfig {
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
-    ToolUseStart { id: String, name: String },
+    ToolUseStart {
+        id: String,
+        name: String,
+    },
     ToolUseDelta(String),
     ToolUseDone,
+    /// Token usage and stop reason reported by the backend at the end of a response.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+        stop_reason: String,
+    },
     Done,
 }
 
@@ -221,6 +230,11 @@ pub enum AgentEvent {
     },
     ResponseComplete(String),
     Error(String),
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+        stop_reason: String,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

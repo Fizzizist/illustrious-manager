@@ -58,6 +58,7 @@ async fn run_with_writer<W: Write, R: BufRead>(
                     writeln!(writer, "[result from {}]: {}", name, content)?;
                 }
             }
+            AgentEvent::Usage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                 if !is_tty {
                     eprintln!(

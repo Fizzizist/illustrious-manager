@@ -66,6 +66,31 @@ impl Logger {
         Ok(())
     }
 
+    pub fn log_usage(
+        &mut self,
+        input_tokens: u32,
+        output_tokens: u32,
+        stop_reason: &str,
+    ) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[USAGE]")?;
+            writeln!(writer, "input_tokens: {}", input_tokens)?;
+            writeln!(writer, "output_tokens: {}", output_tokens)?;
+            writeln!(writer, "stop_reason: {}", stop_reason)?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
+    pub fn log_error(&mut self, message: &str) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[ERROR]")?;
+            writeln!(writer, "{}", message)?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
     pub fn log_event(&mut self, event: &AgentEvent) -> Result<()> {
         match event {
             AgentEvent::ToolUseReceived { name, input, .. } => {
@@ -80,6 +105,16 @@ impl Logger {
             }
             AgentEvent::ResponseComplete(response) => {
                 self.log_assistant_response(response)?;
+            }
+            AgentEvent::Error(message) => {
+                self.log_error(message)?;
+            }
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                stop_reason,
+            } => {
+                self.log_usage(*input_tokens, *output_tokens, stop_reason)?;
             }
             _ => {}
         }

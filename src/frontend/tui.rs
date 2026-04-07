@@ -300,6 +300,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.state = AppState::ToolConfirmation { name, input };
         }
+        AgentEvent::Usage { .. } => {}
     }
     Ok(())
 }

@@ -129,6 +129,17 @@ impl Agent {
                                 tool_calls.push(t);
                             }
                         }
+                        Ok(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            stop_reason,
+                        }) => {
+                            let _ = event_tx.unbounded_send(AgentEvent::Usage {
+                                input_tokens,
+                                output_tokens,
+                                stop_reason,
+                            });
+                        }
                         Ok(StreamEvent::Done) => break,
                         Err(e) => {
                             lock(&history_arc).truncate(pre_send_len);
