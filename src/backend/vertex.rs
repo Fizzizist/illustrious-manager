@@ -69,7 +69,8 @@ impl VertexSseParser {
                             anyhow::anyhow!("tool_use content_block_start missing 'name'")
                         })?
                         .to_string();
-                    self.event_buffer.push(StreamEvent::ToolUseStart { id, name });
+                    self.event_buffer
+                        .push(StreamEvent::ToolUseStart { id, name });
                 }
             }
             "content_block_delta" => {
@@ -444,7 +445,11 @@ mod tests {
         parser
             .fill_buffer(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#)
             .expect("should fill buffer successfully");
-        assert_eq!(parser.event_buffer.len(), 1, "should have 1 event in buffer");
+        assert_eq!(
+            parser.event_buffer.len(),
+            1,
+            "should have 1 event in buffer"
+        );
     }
 
     #[test]
