@@ -46,49 +46,16 @@ impl ZaiSseParser {
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
-        if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
-            let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-            let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
-            match finish_reason {
-                "tool_calls" => {
-                    self.tool_calls_by_index.clear();
-                    if input_tokens > 0 || output_tokens > 0 {
-                        self.event_buffer.push(StreamEvent::Usage {
-                            input_tokens,
-                            output_tokens,
-                            stop_reason: finish_reason.to_string(),
-                        });
-                    }
-                    self.event_buffer.push(StreamEvent::ToolUseDone);
-                    return Ok(());
-                }
-                "length" => {
-                    return Err(anyhow::anyhow!(
-                        "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
-                        input_tokens,
-                        output_tokens,
-                    ));
-                }
-                _ => {
-                    if input_tokens > 0 || output_tokens > 0 {
-                        self.event_buffer.push(StreamEvent::Usage {
-                            input_tokens,
-                            output_tokens,
-                            stop_reason: finish_reason.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-
+        // Process text content deltas.
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
             && !content.is_empty()
         {
             self.event_buffer
                 .push(StreamEvent::TextDelta(content.to_string()));
-            return Ok(());
         }
 
+        // Process tool call deltas BEFORE finish_reason so that tool call data
+        // arriving in the same SSE chunk as finish_reason is not lost.
         if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
             for tool_call in tool_calls {
                 if let Some(index) = tool_call["index"].as_u64()
@@ -108,6 +75,41 @@ impl ZaiSseParser {
                     {
                         self.event_buffer
                             .push(StreamEvent::ToolUseDelta(arguments.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Process finish_reason after delta content has been buffered.
+        if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
+            let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+            let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+            match finish_reason {
+                "tool_calls" => {
+                    self.tool_calls_by_index.clear();
+                    if input_tokens > 0 || output_tokens > 0 {
+                        self.event_buffer.push(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            stop_reason: finish_reason.to_string(),
+                        });
+                    }
+                    self.event_buffer.push(StreamEvent::ToolUseDone);
+                }
+                "length" => {
+                    return Err(anyhow::anyhow!(
+                        "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
+                        input_tokens,
+                        output_tokens,
+                    ));
+                }
+                _ => {
+                    if input_tokens > 0 || output_tokens > 0 {
+                        self.event_buffer.push(StreamEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            stop_reason: finish_reason.to_string(),
+                        });
                     }
                 }
             }
@@ -758,6 +760,53 @@ mod tests {
         let result5 = parser.parse("");
         assert!(result5.is_ok());
         assert!(result5.unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_sse_data_handles_tool_call_and_finish_reason_in_same_chunk() {
+        let mut parser = ZaiSseParser::new();
+        // Some providers send tool call data and finish_reason in a single SSE chunk.
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{\"command\":\"ls\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":100,"completion_tokens":20}}"#;
+
+        let result1 = parser.parse(data);
+        assert!(result1.is_ok());
+        let event1 = result1.unwrap();
+        if let Some(StreamEvent::ToolUseStart { name, .. }) = event1 {
+            assert_eq!(name, "bash");
+        } else {
+            panic!("First event should be ToolUseStart, got: {:?}", event1);
+        }
+
+        let result2 = parser.parse("");
+        assert!(result2.is_ok());
+        let event2 = result2.unwrap();
+        if let Some(StreamEvent::ToolUseDelta(delta)) = event2 {
+            assert_eq!(delta, r#"{"command":"ls"}"#);
+        } else {
+            panic!("Second event should be ToolUseDelta, got: {:?}", event2);
+        }
+
+        let result3 = parser.parse("");
+        assert!(result3.is_ok());
+        let event3 = result3.unwrap();
+        assert!(
+            matches!(event3, Some(StreamEvent::Usage { .. })),
+            "Third event should be Usage, got: {:?}",
+            event3
+        );
+
+        let result4 = parser.parse("");
+        assert!(result4.is_ok());
+        let event4 = result4.unwrap();
+        assert!(
+            matches!(event4, Some(StreamEvent::ToolUseDone)),
+            "Fourth event should be ToolUseDone, got: {:?}",
+            event4
+        );
+
+        let result5 = parser.parse("");
+        assert!(result5.is_ok());
+        assert!(result5.unwrap().is_none(), "Buffer should be empty");
     }
 
     #[test]
