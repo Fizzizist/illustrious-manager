@@ -1,3 +1,6 @@
+mod input;
+mod output;
+
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
@@ -9,10 +12,7 @@ use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Style};
-use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
-use std::borrow::Cow;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -22,53 +22,11 @@ use crate::logging::Logger;
 use crate::types::{AgentEvent, ConfirmationResponse};
 use std::sync::Arc;
 
-const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AppState {
-    Input,
-    Streaming,
-    ToolConfirmation {
-        name: String,
-        input: serde_json::Value,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConversationRole {
-    User,
-    Assistant,
-    Error,
-    ToolUse,
-    ToolResult,
-}
-
-impl ConversationRole {
-    fn display_label(&self) -> &'static str {
-        match self {
-            ConversationRole::User => "You",
-            ConversationRole::Assistant => "Assistant",
-            ConversationRole::Error => "Error",
-            ConversationRole::ToolUse => "[Tool]",
-            ConversationRole::ToolResult => "[Result]",
-        }
-    }
-
-    fn color(&self) -> Color {
-        match self {
-            ConversationRole::User => Color::Green,
-            ConversationRole::Assistant => Color::Blue,
-            ConversationRole::Error => Color::Red,
-            ConversationRole::ToolUse => Color::Cyan,
-            ConversationRole::ToolResult => Color::Yellow,
-        }
-    }
-}
-
-pub struct ConversationEntry {
-    pub role: ConversationRole,
-    pub content: String,
-}
+pub use input::AppState;
+pub use output::{
+    ConversationEntry, ConversationRole, build_conversation_lines, maybe_truncate,
+    tool_use_display_content,
+};
 
 pub struct App {
     pub input: String,
@@ -131,57 +89,11 @@ impl App {
     }
 
     fn max_scroll(&self) -> u16 {
-        let total = self.conversation_lines().len() as u16;
+        let conv_lines =
+            output::build_conversation_lines(&self.conversation, &self.current_response);
+        let total = conv_lines.len() as u16;
         total.saturating_sub(self.viewport_height)
     }
-
-    fn conversation_lines(&self) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        for entry in &self.conversation {
-            lines.push(Line::from(Span::styled(
-                format!("{}:", entry.role.display_label()),
-                Style::default().fg(entry.role.color()),
-            )));
-            let display_content = maybe_truncate(&entry.content, entry.role);
-            for line in display_content.lines() {
-                lines.push(Line::from(format!("  {line}")));
-            }
-            lines.push(Line::from(""));
-        }
-
-        if !self.current_response.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Assistant:",
-                Style::default().fg(Color::Blue),
-            )));
-            for line in self.current_response.lines() {
-                lines.push(Line::from(format!("  {line}")));
-            }
-        }
-
-        lines
-    }
-}
-
-fn maybe_truncate(content: &str, role: ConversationRole) -> Cow<'_, str> {
-    if role != ConversationRole::ToolResult {
-        return Cow::Borrowed(content);
-    }
-    let mut chars = content.chars();
-    let head: String = (&mut chars).take(TOOL_RESULT_TRUNCATE_CHARS).collect();
-    if chars.next().is_some() {
-        Cow::Owned(format!("{head}...[truncated]"))
-    } else {
-        Cow::Borrowed(content)
-    }
-}
-
-fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String {
-    format!(
-        "{}\n  {}",
-        name,
-        serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
-    )
 }
 
 impl Default for App {
@@ -199,7 +111,7 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
 
     let visible_height = chunks[0].height.saturating_sub(2);
     let text_width = chunks[0].width.saturating_sub(2);
-    let conv_lines = app.conversation_lines();
+    let conv_lines = output::build_conversation_lines(&app.conversation, &app.current_response);
     let total_visual: u16 = conv_lines
         .iter()
         .map(|line| {
@@ -281,7 +193,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::ToolUse,
-                content: tool_use_display_content(&name, &input),
+                content: output::tool_use_display_content(&name, &input),
             });
             app.scroll_offset = 0;
         }
@@ -421,7 +333,7 @@ async fn run_app(
                     };
                     app.conversation.push(ConversationEntry {
                         role: ConversationRole::ToolUse,
-                        content: tool_use_display_content(&name, &input),
+                        content: output::tool_use_display_content(&name, &input),
                     });
                     let sent = app
                         .confirmation_tx
@@ -508,6 +420,8 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
     #[test]
     fn scroll_offset_starts_at_zero() {
@@ -607,7 +521,7 @@ mod tests {
     fn maybe_truncate_borrows_short_tool_result() {
         let content = "short output";
         let result = maybe_truncate(content, ConversationRole::ToolResult);
-        assert!(matches!(result, Cow::Borrowed(_)));
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
         assert_eq!(result, content);
     }
 
@@ -622,7 +536,7 @@ mod tests {
         ] {
             let result = maybe_truncate(&content, role);
             assert!(
-                matches!(result, Cow::Borrowed(_)),
+                matches!(result, std::borrow::Cow::Borrowed(_)),
                 "expected borrow for {role:?}"
             );
         }
