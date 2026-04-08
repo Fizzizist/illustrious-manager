@@ -20,6 +20,7 @@ use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
+use tools::skill::{SkillTool, discover_skills_from_env};
 use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
 
@@ -102,6 +103,9 @@ async fn main() -> Result<()> {
     registry.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
 
+    let skills = discover_skills_from_env();
+    registry.register(Box::new(SkillTool::new(&skills)))?;
+
     let request_config = RequestConfig {
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -114,6 +118,7 @@ async fn main() -> Result<()> {
             .with_tool_config(&app_config.tools)
             .with_context_files()?,
     );
+    agent.load_skills(&skills);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
