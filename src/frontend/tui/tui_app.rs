@@ -235,6 +235,7 @@ pub async fn run(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     logger: Option<Logger>,
+    session: Option<crate::session::Session>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -242,7 +243,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt, logger).await;
+    let result = run_app(&mut terminal, agent, initial_prompt, logger, session).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -256,6 +257,7 @@ async fn run_app(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
+    session: Option<crate::session::Session>,
 ) -> Result<()> {
     let mut app = App::new();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -276,7 +278,13 @@ async fn run_app(
         terminal.draw(|frame| render_app(&app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
+                let is_response_complete = matches!(&agent_event, AgentEvent::ResponseComplete(_));
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+                if is_response_complete
+                    && let Some(ref sess) = session
+                {
+                    agent.save_history_to_session(sess).await?;
+                }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
                 if let Event::Key(key) = terminal_event && !app.handle_scroll_key(&key) {

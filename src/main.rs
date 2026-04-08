@@ -4,6 +4,7 @@ pub mod config;
 pub mod context_files;
 pub mod frontend;
 pub mod logging;
+pub mod session;
 pub mod tools;
 pub mod types;
 
@@ -49,6 +50,9 @@ struct Cli {
 
     #[arg(long)]
     debug: bool,
+
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -120,6 +124,15 @@ async fn main() -> Result<()> {
     );
     agent.load_skills(&skills);
 
+    let session = if let Some(ref session_id) = cli.session_id {
+        let sess = session::Session::open_or_create(session_id).await?;
+        let history = sess.load_history().await?;
+        agent.load_history(history);
+        Some(sess)
+    } else {
+        None
+    };
+
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
         Some(Logger::new(Some(log_path))?)
@@ -140,9 +153,13 @@ async fn main() -> Result<()> {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
             frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
+
+            if let Some(ref sess) = session {
+                agent.save_history_to_session(sess).await?;
+            }
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger).await?;
+            frontend::tui::run(agent.clone(), initial_prompt, logger, session).await?;
         }
     }
 
@@ -213,5 +230,25 @@ mod tests {
     fn debug_flag_is_false_when_not_present() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert_eq!(cli.debug, false);
+    }
+
+    #[test]
+    fn session_id_flag_is_parsed_when_present() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--session-id",
+            "01944ab8-7a67-7000-9219-566f82fff672",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.session_id.as_deref(),
+            Some("01944ab8-7a67-7000-9219-566f82fff672")
+        );
+    }
+
+    #[test]
+    fn session_id_flag_is_none_when_not_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(cli.session_id.is_none());
     }
 }

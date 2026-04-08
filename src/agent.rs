@@ -107,6 +107,16 @@ impl Agent {
         lock(&self.history).push(Message::text(Role::User, content));
     }
 
+    pub fn load_history(&self, messages: Vec<Message>) {
+        let mut guard = lock(&self.history);
+        guard.extend(messages);
+    }
+
+    pub async fn save_history_to_session(&self, session: &crate::session::Session) -> Result<()> {
+        let history = self.history();
+        session.save_history(&history).await
+    }
+
     pub async fn send(
         &self,
         input: String,
