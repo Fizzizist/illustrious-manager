@@ -4,6 +4,7 @@ pub mod config;
 pub mod context_files;
 pub mod frontend;
 pub mod logging;
+pub mod skills;
 pub mod tools;
 pub mod types;
 
