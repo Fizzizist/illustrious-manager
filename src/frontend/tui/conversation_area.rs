@@ -191,7 +191,7 @@ pub fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String
     )
 }
 
-fn format_tool_use_as_diff(content: &str) -> Vec<Line<'_>> {
+fn format_tool_use_as_diff(content: &str) -> Vec<Line<'static>> {
     let (name, input_str) = content.split_once('\n').unwrap_or((content, ""));
     let input_str = input_str.trim();
 
@@ -203,6 +203,30 @@ fn format_tool_use_as_diff(content: &str) -> Vec<Line<'_>> {
             .map(|l| Line::from(format!("  {l}")))
             .collect(),
     }
+}
+
+fn format_diff_block(header: &str, removals: &[&str], additions: &[&str]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  {header}"),
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::raw("  ```diff")));
+    for line in removals.iter().flat_map(|s| s.lines()) {
+        lines.push(Line::from(Span::styled(
+            format!("  -{line}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    for line in additions.iter().flat_map(|s| s.lines()) {
+        lines.push(Line::from(Span::styled(
+            format!("  +{line}"),
+            Style::default().fg(Color::Green),
+        )));
+    }
+    lines.push(Line::from(Span::raw("  ```")));
+    lines
 }
 
 fn format_edit_file_diff(input_str: &str) -> Vec<Line<'static>> {
@@ -222,29 +246,7 @@ fn format_edit_file_diff(input_str: &str) -> Vec<Line<'static>> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("  edit_file: {path}"),
-        Style::default().fg(Color::Cyan),
-    )));
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::raw("  ```diff")));
-    for line in old_string.lines() {
-        lines.push(Line::from(Span::styled(
-            format!("  -{line}"),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    for line in new_string.lines() {
-        lines.push(Line::from(Span::styled(
-            format!("  +{line}"),
-            Style::default().fg(Color::Green),
-        )));
-    }
-    lines.push(Line::from(Span::raw("  ```")));
-
-    lines
+    format_diff_block(&format!("edit_file: {path}"), &[old_string], &[new_string])
 }
 
 fn format_write_file_diff(input_str: &str) -> Vec<Line<'static>> {
@@ -257,23 +259,7 @@ fn format_write_file_diff(input_str: &str) -> Vec<Line<'static>> {
         .unwrap_or("unknown");
     let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("  write_file: {path}"),
-        Style::default().fg(Color::Cyan),
-    )));
-    lines.push(Line::from(""));
-
-    lines.push(Line::from(Span::raw("  ```diff")));
-    for line in content.lines() {
-        lines.push(Line::from(Span::styled(
-            format!("  +{line}"),
-            Style::default().fg(Color::Green),
-        )));
-    }
-    lines.push(Line::from(Span::raw("  ```")));
-
-    lines
+    format_diff_block(&format!("write_file: {path}"), &[], &[content])
 }
 
 #[cfg(test)]
@@ -518,6 +504,92 @@ mod tests {
         assert!(
             text.contains("command"),
             "plain render should show input: {text}"
+        );
+    }
+
+    #[test]
+    fn format_tool_use_edit_file_malformed_json() {
+        let content = "edit_file\n  {{{not valid json}}}";
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("edit_file: unknown"),
+            "malformed JSON should fall back to unknown path: {text}"
+        );
+    }
+
+    #[test]
+    fn format_tool_use_write_file_malformed_json() {
+        let content = "write_file\n  {{{garbage}}}";
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("write_file: unknown"),
+            "malformed JSON should fall back to unknown path: {text}"
+        );
+    }
+
+    #[test]
+    fn format_tool_use_edit_file_empty_old_string() {
+        let content = r#"edit_file
+  {"path":"src/new.rs","old_string":"","new_string":"fn main() {}"}"#;
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("+fn main() {}"),
+            "should contain added line: {text}"
+        );
+        assert!(!text.contains("-"), "should have no removal lines: {text}");
+    }
+
+    #[test]
+    fn format_tool_use_write_file_empty_content() {
+        let content = r#"write_file
+  {"path":"src/empty.rs","content":""}"#;
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("write_file: src/empty.rs"),
+            "should show tool name and path: {text}"
+        );
+        assert!(
+            !text.contains("+"),
+            "should have no addition lines for empty content: {text}"
+        );
+    }
+
+    #[test]
+    fn lines_current_response_renders_markdown() {
+        let area = ConversationArea::new(&[], "**bold** and *italic*", 0, 10);
+        let lines = area.lines();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("**"),
+            "streaming response should render markdown, not raw syntax: {text}"
+        );
+        assert!(
+            !text.contains("*italic*"),
+            "streaming response should render italic markdown: {text}"
         );
     }
 

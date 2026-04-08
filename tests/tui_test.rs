@@ -84,7 +84,7 @@ fn test_tui_confirmation_prompt_state_renders() {
 
 #[test]
 fn test_tui_initial_state() {
-    let mut app = App::new();
+    let app = App::new();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
