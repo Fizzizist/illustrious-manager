@@ -9,6 +9,7 @@ use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
+use crate::skills;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -100,67 +101,7 @@ impl Agent {
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
 
-        let processed_input = {
-            let prompt = input.trim();
-            if let Some(skill_name_end) = prompt.find(' ').or_else(|| {
-                if prompt.starts_with('/') {
-                    Some(prompt.len())
-                } else {
-                    None
-                }
-            }) {
-                if prompt.starts_with('/') {
-                    let skill_name = &prompt[1..skill_name_end];
-                    if let Some(skill_path) = self.skills.get(skill_name) {
-                        let remaining_prompt = if skill_name_end < prompt.len() {
-                            prompt[skill_name_end..].trim()
-                        } else {
-                            ""
-                        };
-
-                        match std::fs::read_to_string(skill_path) {
-                            Ok(skill_content) => {
-                                if remaining_prompt.is_empty() {
-                                    skill_content
-                                } else {
-                                    format!("{}\n\n{}", skill_content, remaining_prompt)
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "Warning: failed to read skill file '{}': {}",
-                                    skill_path.display(),
-                                    e
-                                );
-                                input
-                            }
-                        }
-                    } else {
-                        input
-                    }
-                } else {
-                    input
-                }
-            } else if let Some(skill_name) = prompt.strip_prefix('/') {
-                if let Some(skill_path) = self.skills.get(skill_name) {
-                    match std::fs::read_to_string(skill_path) {
-                        Ok(skill_content) => skill_content,
-                        Err(e) => {
-                            eprintln!(
-                                "Warning: failed to read skill file '{}': {}",
-                                skill_path.display(),
-                                e
-                            );
-                            input
-                        }
-                    }
-                } else {
-                    input
-                }
-            } else {
-                input
-            }
-        };
+        let processed_input = skills::process_prompt(input, &self.skills);
 
         lock(&self.history).push(Message::text(Role::User, processed_input));
 
