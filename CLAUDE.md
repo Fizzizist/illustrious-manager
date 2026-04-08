@@ -35,6 +35,8 @@ Illustrious Manager is an experimental TUI agent application in Rust that connec
 cargo build                          # Build the project
 cargo run                            # Run in REPL mode
 cargo run -- --single-shot "prompt"  # Run in single-shot mode
+cargo run -- --debug                 # Run with file logging (illustrious-manager_<ts>.log)
+cargo run -- --config <path>         # Use a custom config file
 cargo test                           # Run all tests
 cargo test <test_name>               # Run a single test
 cargo insta review                   # Review/accept snapshot test changes
@@ -44,15 +46,19 @@ cargo fmt                            # Format
 
 ## Architecture
 
-Three-layer decoupled design:
+Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. First implementation: Vertex AI + Claude via SSE streaming. Emits `StreamEvent` (TextDelta | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
-2. **Agent Core** (`src/agent.rs`) — Owns conversation history, wraps backend streams into `AgentEvent` (TokenReceived | ResponseComplete | Error). Display-agnostic.
+2. **Agent Core** (`src/agent.rs`) — Owns conversation history and context files. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`.
 
-3. **Frontend Layer** (`src/frontend/`) — Two frontends consuming the same AgentEvent stream:
+3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`. File tools are sandboxed to `sandbox_root` via `SandboxPolicy`. `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
+
+4. **Frontend Layer** (`src/frontend/`) — Two frontends consuming the same AgentEvent stream:
    - `stdout.rs`: Single-shot mode, streams tokens to stdout, pipe-friendly
-   - `tui.rs`: Ratatui interactive REPL with input/response areas
+   - `tui`: Ratatui interactive REPL with input/response areas
+
+**Context files** (`src/context_files.rs`) — on startup, CLAUDE.md and AGENTS.md are auto-discovered from `~/.claude/` and the current working directory, then injected into the conversation as initial context.
 
 Key types live in `src/types.rs`. Configuration loading and CLI merge logic is in `src/config.rs`.
 
@@ -61,10 +67,23 @@ Key types live in `src/types.rs`. Configuration loading and CLI merge logic is i
 Config file at `~/.config/illustrious-manager/config.toml` (auto-created on first run):
 
 ```toml
+backend = "vertex"                    # "vertex" or "zai"
+
 [vertex]
 project = ""                          # GCP project ID (required)
 region = "us-east5"
 model = "claude-sonnet-4-20250514"
+
+[zai]
+api_key = ""                          # z.ai API key (required for zai backend)
+model = "glm-5.1"
+
+# [tools]
+# confirmation = "WriteOnly"          # Always | WriteOnly | Never
+# sandbox_root = "."                  # Directory tools are allowed to read/write
+# max_tool_iterations = 25
+# bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
+# bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 ```
 
 CLI flags (`--project`, `--region`, `--model`) override config file values.
