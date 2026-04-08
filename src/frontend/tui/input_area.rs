@@ -1,4 +1,5 @@
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{TextArea, WrapMode};
 
@@ -30,6 +31,9 @@ impl<'a> InputArea<'a> {
             mode: InputMode::Input,
         };
         input.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        input
+            .textarea
+            .set_cursor_line_style(Style::default().add_modifier(Modifier::empty()));
         input.apply_block();
         input
     }
@@ -58,6 +62,8 @@ impl<'a> InputArea<'a> {
         };
         self.textarea = TextArea::new(lines);
         self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        self.textarea
+            .set_cursor_line_style(Style::default().add_modifier(Modifier::empty()));
         self.apply_block();
     }
 
