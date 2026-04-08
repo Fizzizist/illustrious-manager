@@ -136,8 +136,7 @@ impl Agent {
                 } else {
                     input
                 }
-            } else if prompt.starts_with('/') {
-                let skill_name = &prompt[1..];
+            } else if let Some(skill_name) = prompt.strip_prefix('/') {
                 if let Some(skill_path) = self.skills.get(skill_name) {
                     if let Ok(skill_content) = std::fs::read_to_string(skill_path) {
                         skill_content
