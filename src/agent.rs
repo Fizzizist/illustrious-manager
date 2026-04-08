@@ -78,7 +78,7 @@ impl Agent {
             String::from("The following skills are available via the `skill` tool:\n\n");
         for name in names {
             let path = &skills[name];
-            let desc = crate::tools::skill::first_line(path)
+            let desc = crate::tools::skill::skill_description(path)
                 .unwrap_or_else(|| "(no description)".to_string());
             content.push_str(&format!("- {}: {}\n", name, desc));
         }
