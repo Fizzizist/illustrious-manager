@@ -154,7 +154,6 @@ mod tests {
         let dir = TestSkillDir::new();
         dir.add_skill("valid-skill", "# Valid");
 
-        // Create a directory without SKILL.md
         let empty_dir = dir.path().join("empty-skill");
         fs::create_dir(&empty_dir).expect("create empty dir");
 
@@ -189,7 +188,6 @@ mod tests {
         let dir = TestSkillDir::new();
         dir.add_skill("valid-skill", "# Valid");
 
-        // Create a file (not a directory)
         let file_path = dir.path().join("not-a-directory");
         fs::write(&file_path, "not a directory").expect("write file");
 
@@ -214,9 +212,6 @@ mod tests {
 
     #[test]
     fn discover_skills_handles_read_directory_errors_gracefully() {
-        // This test verifies that if we can't read a directory, we don't crash
-        // We'll create a directory and then make it unreadable (if permissions allow)
-        // For now, we'll just verify the function signature doesn't panic
         let temp_dir = tempfile::TempDir::new().expect("create temp dir");
         let skills = discover_skills_from_dir(temp_dir.path()).expect("should not panic");
         assert!(skills.is_empty(), "empty temp dir should have no skills");

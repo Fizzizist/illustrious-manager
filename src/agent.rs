@@ -142,7 +142,6 @@ impl Agent {
                             }
                         }
                     } else {
-                        // Unknown skill: pass through unchanged
                         input
                     }
                 } else {
@@ -162,7 +161,6 @@ impl Agent {
                         }
                     }
                 } else {
-                    // Unknown skill: pass through unchanged
                     input
                 }
             } else {
