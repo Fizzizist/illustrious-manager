@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -9,14 +7,12 @@ use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::skills;
+use crate::skills::{self, SkillMapping};
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
     StreamEvent,
 };
-
-type SkillMapping = HashMap<String, PathBuf>;
 
 struct PendingToolCall {
     id: String,
@@ -63,6 +59,9 @@ impl Agent {
     }
 
     pub fn with_skills(mut self, skills: SkillMapping) -> Self {
+        if let Some(ctx) = skills::format_skills_context(&skills) {
+            lock(&self.history).push(Message::text(Role::User, ctx));
+        }
         self.skills = skills;
         self
     }
@@ -902,7 +901,7 @@ mod tests {
             .send("normal prompt".to_string(), None)
             .await
             .expect("send should succeed");
-        let events = collect_events(stream).await;
+        let _events = collect_events(stream).await;
 
         assert!(
             agent.history().len() == 2,
@@ -940,9 +939,14 @@ mod tests {
             .send("/test-skill".to_string(), None)
             .await
             .expect("send should succeed");
-        let events = collect_events(stream).await;
+        let _events = collect_events(stream).await;
 
-        let user_msg = &agent.history()[0];
+        assert_eq!(
+            agent.history().len(),
+            3,
+            "should have skills context, user prompt, and assistant response"
+        );
+        let user_msg = &agent.history()[1];
         assert_eq!(user_msg.role, Role::User);
         let content = match &user_msg.content[0] {
             ContentBlock::Text(s) => s,
@@ -969,7 +973,7 @@ mod tests {
             .send("/unknown-skill arg".to_string(), None)
             .await
             .expect("send should succeed");
-        let events = collect_events(stream).await;
+        let _events = collect_events(stream).await;
 
         let user_msg = &agent.history()[0];
         assert_eq!(user_msg.role, Role::User);
@@ -1003,9 +1007,14 @@ mod tests {
             .send("/commit fix the bug".to_string(), None)
             .await
             .expect("send should succeed");
-        let events = collect_events(stream).await;
+        let _events = collect_events(stream).await;
 
-        let user_msg = &agent.history()[0];
+        assert_eq!(
+            agent.history().len(),
+            3,
+            "should have skills context, user prompt, and assistant response"
+        );
+        let user_msg = &agent.history()[1];
         assert_eq!(user_msg.role, Role::User);
         let content = match &user_msg.content[0] {
             ContentBlock::Text(s) => s,
@@ -1014,5 +1023,39 @@ mod tests {
         assert!(content.contains("# Commit"));
         assert!(content.contains("Write a commit message"));
         assert!(content.contains("fix the bug"));
+    }
+
+    #[tokio::test]
+    async fn agent_with_skills_injects_skills_context_into_history() {
+        let backend = SequencedBackend::new(vec![text_response("response")]);
+
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let skill_path = temp_dir.path().join("review").join("SKILL.md");
+        std::fs::create_dir(skill_path.parent().unwrap()).expect("create skill dir");
+        std::fs::write(&skill_path, "# Review\n\nReview the code").expect("write skill");
+
+        let mut skills = SkillMapping::new();
+        skills.insert("review".to_string(), skill_path);
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let agent = Agent::new(Box::new(backend), config).with_skills(skills);
+
+        let history = agent.history();
+        assert_eq!(history.len(), 1, "should have skills context message");
+        assert_eq!(history[0].role, Role::User);
+        let ctx = match &history[0].content[0] {
+            ContentBlock::Text(s) => s,
+            _ => panic!("expected Text content block"),
+        };
+        assert!(ctx.contains("/review"), "context should list skill names");
+        assert!(
+            !ctx.contains("# Review"),
+            "context should not contain full skill content"
+        );
     }
 }
