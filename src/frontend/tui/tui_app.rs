@@ -9,12 +9,11 @@ use futures::channel::mpsc as fmpsc;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Color;
 use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::conversation_area::ConversationArea;
+use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
@@ -29,42 +28,6 @@ pub enum AppState {
         name: String,
         input: serde_json::Value,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConversationRole {
-    User,
-    Assistant,
-    Error,
-    ToolUse,
-    ToolResult,
-}
-
-impl ConversationRole {
-    pub fn display_label(&self) -> &'static str {
-        match self {
-            ConversationRole::User => "You",
-            ConversationRole::Assistant => "Assistant",
-            ConversationRole::Error => "Error",
-            ConversationRole::ToolUse => "[Tool]",
-            ConversationRole::ToolResult => "[Result]",
-        }
-    }
-
-    pub fn color(&self) -> Color {
-        match self {
-            ConversationRole::User => Color::Green,
-            ConversationRole::Assistant => Color::Blue,
-            ConversationRole::Error => Color::Red,
-            ConversationRole::ToolUse => Color::Cyan,
-            ConversationRole::ToolResult => Color::Yellow,
-        }
-    }
-}
-
-pub struct ConversationEntry {
-    pub role: ConversationRole,
-    pub content: String,
 }
 
 pub struct App {
@@ -156,7 +119,7 @@ impl Default for App {
 }
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
-pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let input_height = app
         .input
         .height_for_width(frame.area().width, frame.area().height);
@@ -273,7 +236,7 @@ async fn run_app(
     }
 
     loop {
-        terminal.draw(|frame| render_app(&app, frame))?;
+        terminal.draw(|frame| render_app(&mut app, frame))?;
 
         if matches!(app.state, AppState::Input) {
             if event::poll(std::time::Duration::from_millis(50))?
@@ -456,8 +419,8 @@ mod tests {
             content: "Hello".to_string(),
         });
         app.refresh_conversation();
-        let lines = app.conversation_area.textarea.lines();
-        assert!(lines.iter().any(|l| l.contains("Hello")));
+        let text = app.conversation_area.content_text();
+        assert!(text.contains("Hello"));
     }
 
     #[test]

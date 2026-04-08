@@ -1,78 +1,130 @@
 use ratatui::layout::Rect;
-use ratatui::style::Style;
-use ratatui::widgets::{Block, Borders};
-use ratatui_textarea::{Scrolling, TextArea, WrapMode};
-
-use super::tui_app::{ConversationEntry, ConversationRole};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 
 const CONVERSATION_TITLE: &str = "Conversation";
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationRole {
+    User,
+    Assistant,
+    Error,
+    ToolUse,
+    ToolResult,
+}
+
+impl ConversationRole {
+    pub fn display_label(&self) -> &'static str {
+        match self {
+            ConversationRole::User => "You",
+            ConversationRole::Assistant => "Assistant",
+            ConversationRole::Error => "Error",
+            ConversationRole::ToolUse => "[Tool]",
+            ConversationRole::ToolResult => "[Result]",
+        }
+    }
+
+    pub fn color(&self) -> Color {
+        match self {
+            ConversationRole::User => Color::Green,
+            ConversationRole::Assistant => Color::Blue,
+            ConversationRole::Error => Color::Red,
+            ConversationRole::ToolUse => Color::Cyan,
+            ConversationRole::ToolResult => Color::Yellow,
+        }
+    }
+}
+
+pub struct ConversationEntry {
+    pub role: ConversationRole,
+    pub content: String,
+}
+
+fn conversation_block() -> Block<'static> {
+    Block::bordered().title(CONVERSATION_TITLE)
+}
+
 pub struct ConversationArea<'a> {
-    pub(crate) textarea: TextArea<'a>,
+    paragraph: Paragraph<'a>,
+    raw_lines: Vec<Line<'a>>,
+    scroll_offset: u16,
 }
 
 impl<'a> ConversationArea<'a> {
     pub fn new() -> Self {
-        let mut textarea = TextArea::new(vec![String::new()]);
-        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(CONVERSATION_TITLE),
-        );
-        textarea.set_cursor_line_style(Style::default());
-        textarea.set_cursor_style(Style::default());
-        Self { textarea }
+        let lines = vec![Line::raw("")];
+        let paragraph = Paragraph::new(lines.clone())
+            .block(conversation_block())
+            .wrap(Wrap { trim: false });
+        Self {
+            paragraph,
+            raw_lines: lines,
+            scroll_offset: 0,
+        }
     }
 
     pub fn update_content(&mut self, conversation: &[ConversationEntry], current_response: &str) {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<Line<'a>> = Vec::new();
 
         for entry in conversation {
-            lines.push(format!("{}:", entry.role.display_label()));
+            let label_style = Style::default().fg(entry.role.color());
+            lines.push(Line::from(Span::styled(
+                format!("{}:", entry.role.display_label()),
+                label_style,
+            )));
             let display_content = maybe_truncate(&entry.content, entry.role);
+            let content_style = Style::default().fg(entry.role.color());
             for line in display_content.lines() {
-                lines.push(format!("  {line}"));
+                lines.push(Line::from(Span::styled(format!("  {line}"), content_style)));
             }
-            lines.push(String::new());
+            lines.push(Line::raw(""));
         }
 
         if !current_response.is_empty() {
-            lines.push("Assistant:".to_string());
+            let style = Style::default().fg(ConversationRole::Assistant.color());
+            lines.push(Line::from(Span::styled("Assistant:", style)));
             for line in current_response.lines() {
-                lines.push(format!("  {line}"));
+                lines.push(Line::from(Span::styled(format!("  {line}"), style)));
             }
         }
 
         if lines.is_empty() {
-            lines.push(String::new());
+            lines.push(Line::raw(""));
         }
 
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        self.textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(CONVERSATION_TITLE),
-        );
-        self.textarea.set_cursor_line_style(Style::default());
-        self.textarea.set_cursor_style(Style::default());
-        self.textarea
-            .move_cursor(ratatui_textarea::CursorMove::Bottom);
-        self.textarea.move_cursor(ratatui_textarea::CursorMove::End);
+        self.raw_lines = lines.clone();
+        self.paragraph = Paragraph::new(lines)
+            .block(conversation_block())
+            .wrap(Wrap { trim: false });
+        self.scroll_offset = u16::MAX;
     }
 
     pub fn scroll_half_page_up(&mut self) {
-        self.textarea.scroll(Scrolling::HalfPageUp);
+        self.scroll_offset = self.scroll_offset.saturating_sub(half_page_size());
     }
 
     pub fn scroll_half_page_down(&mut self) {
-        self.textarea.scroll(Scrolling::HalfPageDown);
+        let half = half_page_size();
+        self.scroll_offset = self.scroll_offset.saturating_add(half);
     }
 
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
-        frame.render_widget(&self.textarea, area);
+    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        let inner = conversation_block().inner(area);
+        let total_visual = visual_line_count(&self.raw_lines, inner.width);
+        let max_scroll = max_scroll_for(total_visual, inner.height);
+        self.scroll_offset = std::cmp::min(self.scroll_offset, max_scroll);
+        let scrolled = self.paragraph.clone().scroll((self.scroll_offset, 0));
+        frame.render_widget(scrolled, area);
+    }
+
+    pub fn content_text(&self) -> String {
+        self.raw_lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -80,6 +132,29 @@ impl Default for ConversationArea<'_> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn visual_line_count(lines: &[Line<'_>], width: u16) -> usize {
+    let inner_width = width as usize;
+    if inner_width == 0 {
+        return lines.len();
+    }
+    lines
+        .iter()
+        .map(|line| {
+            let w = line.width();
+            if w == 0 { 1 } else { w.div_ceil(inner_width) }
+        })
+        .sum()
+}
+
+fn half_page_size() -> u16 {
+    11u16
+}
+
+fn max_scroll_for(total_visual_lines: usize, viewport_height: u16) -> u16 {
+    let total: u16 = total_visual_lines.try_into().unwrap_or(u16::MAX);
+    total.saturating_sub(viewport_height).saturating_sub(1)
 }
 
 fn maybe_truncate(content: &str, role: ConversationRole) -> std::borrow::Cow<'_, str> {
@@ -123,7 +198,7 @@ mod tests {
     #[test]
     fn new_conversation_area_is_empty() {
         let area = ConversationArea::new();
-        assert_eq!(area.textarea.lines().len(), 1);
+        assert_eq!(area.scroll_offset, 0);
     }
 
     #[test]
@@ -131,9 +206,7 @@ mod tests {
         let mut area = ConversationArea::new();
         let entries = vec![user_entry("Hello!")];
         area.update_content(&entries, "");
-        let lines = area.textarea.lines();
-        assert!(lines.iter().any(|l| l.contains("You:")));
-        assert!(lines.iter().any(|l| l.contains("Hello!")));
+        assert_eq!(area.scroll_offset, u16::MAX);
     }
 
     #[test]
@@ -144,9 +217,6 @@ mod tests {
             assistant_entry("Hello! How can I help you?"),
         ];
         area.update_content(&entries, "");
-        let lines = area.textarea.lines();
-        assert!(lines.iter().any(|l| l.contains("You:")));
-        assert!(lines.iter().any(|l| l.contains("Assistant:")));
     }
 
     #[test]
@@ -154,16 +224,12 @@ mod tests {
         let mut area = ConversationArea::new();
         let entries = vec![user_entry("Tell me a story")];
         area.update_content(&entries, "Once upon a time");
-        let lines = area.textarea.lines();
-        assert!(lines.iter().any(|l| l.contains("Once upon a time")));
     }
 
     #[test]
     fn update_content_without_entries_but_current_response() {
         let mut area = ConversationArea::new();
         area.update_content(&[], "Streaming text");
-        let lines = area.textarea.lines();
-        assert!(lines.iter().any(|l| l.contains("Streaming text")));
     }
 
     #[test]
@@ -172,13 +238,11 @@ mod tests {
         let entries = vec![user_entry("Hello")];
         area.update_content(&entries, "");
         area.update_content(&[], "");
-        let lines = area.textarea.lines();
-        assert_eq!(lines.len(), 1);
     }
 
     #[test]
     fn render_empty_conversation() {
-        let area = ConversationArea::new();
+        let mut area = ConversationArea::new();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
@@ -285,5 +349,67 @@ mod tests {
         let content = "é".repeat(300);
         let result = maybe_truncate(&content, ConversationRole::ToolResult);
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn scroll_half_page_up_does_not_underflow() {
+        let mut area = ConversationArea::new();
+        assert_eq!(area.scroll_offset, 0);
+        area.scroll_half_page_up();
+        assert_eq!(area.scroll_offset, 0);
+    }
+
+    #[test]
+    fn scroll_half_page_down_increases_offset() {
+        let mut area = ConversationArea::new();
+        let entries: Vec<ConversationEntry> =
+            (0..100).map(|i| user_entry(&format!("line {i}"))).collect();
+        area.update_content(&entries, "");
+        area.scroll_half_page_down();
+        assert!(area.scroll_offset > 0);
+    }
+
+    #[test]
+    fn render_with_colored_roles() {
+        let mut area = ConversationArea::new();
+        let entries = vec![user_entry("Hello!"), assistant_entry("Hi there!")];
+        area.update_content(&entries, "");
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 80, 24);
+                area.render(frame, rect);
+            })
+            .expect("draw");
+        insta::assert_snapshot!("conversation_colored_roles", terminal.backend());
+    }
+
+    #[test]
+    fn visual_line_count_single_line_fits() {
+        let lines = vec![Line::raw("hello")];
+        assert_eq!(visual_line_count(&lines, 80), 1);
+    }
+
+    #[test]
+    fn visual_line_count_wraps_long_line() {
+        let lines = vec![Line::raw("abcdefghijklmnopqrstuvwxyz")];
+        assert_eq!(visual_line_count(&lines, 10), 3);
+    }
+
+    #[test]
+    fn visual_line_count_empty_line_counts_as_one() {
+        let lines = vec![Line::raw("")];
+        assert_eq!(visual_line_count(&lines, 80), 1);
+    }
+
+    #[test]
+    fn max_scroll_for_large_content() {
+        assert_eq!(max_scroll_for(100, 22), 77);
+    }
+
+    #[test]
+    fn max_scroll_for_small_content() {
+        assert_eq!(max_scroll_for(10, 22), 0);
     }
 }
