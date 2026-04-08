@@ -13,7 +13,7 @@ use std::io;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::conversation_area::ConversationArea;
+use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
@@ -30,27 +30,13 @@ pub enum AppState {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConversationRole {
-    User,
-    Assistant,
-    Error,
-    ToolUse,
-    ToolResult,
-}
-
-pub struct ConversationEntry {
-    pub role: ConversationRole,
-    pub content: String,
-}
-
 pub struct App {
     pub input: InputArea<'static>,
+    pub conversation_area: ConversationArea<'static>,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
-    pub conversation_area: ConversationArea<'static>,
 }
 
 impl App {
@@ -71,11 +57,11 @@ impl App {
     pub fn new() -> Self {
         Self {
             input: InputArea::new(),
+            conversation_area: ConversationArea::new(),
             conversation: Vec::new(),
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
-            conversation_area: ConversationArea::new(),
         }
     }
 
@@ -90,6 +76,11 @@ impl App {
         }
     }
 
+    pub fn refresh_conversation(&mut self) {
+        self.conversation_area
+            .update_content(&self.conversation, &self.current_response);
+    }
+
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
         match key {
             KeyEvent {
@@ -97,7 +88,7 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.conversation_area.scroll_up_half();
+                self.conversation_area.scroll_half_page_up();
                 true
             }
             KeyEvent {
@@ -105,16 +96,11 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             } => {
-                self.conversation_area.scroll_down_half();
+                self.conversation_area.scroll_half_page_down();
                 true
             }
             _ => false,
         }
-    }
-
-    pub fn sync_conversation_area(&mut self) {
-        self.conversation_area
-            .update(&self.conversation, &self.current_response);
     }
 }
 
@@ -132,7 +118,7 @@ impl Default for App {
     }
 }
 
-pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let input_height = app
         .input
         .height_for_width(frame.area().width, frame.area().height);
@@ -158,7 +144,7 @@ pub fn handle_agent_event(
     match event {
         AgentEvent::TokenReceived(text) => {
             app.current_response.push_str(&text);
-            app.sync_conversation_area();
+            app.refresh_conversation();
         }
         AgentEvent::ResponseComplete(full) => {
             app.conversation.push(ConversationEntry {
@@ -168,7 +154,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
-            app.sync_conversation_area();
+            app.refresh_conversation();
         }
         AgentEvent::Error(msg) => {
             app.conversation.push(ConversationEntry {
@@ -178,7 +164,7 @@ pub fn handle_agent_event(
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
-            app.sync_conversation_area();
+            app.refresh_conversation();
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
             app.current_response.clear();
@@ -186,7 +172,7 @@ pub fn handle_agent_event(
                 role: ConversationRole::ToolUse,
                 content: tool_use_display_content(&name, &input),
             });
-            app.sync_conversation_area();
+            app.refresh_conversation();
         }
         AgentEvent::ToolResult {
             content, is_error, ..
@@ -197,7 +183,7 @@ pub fn handle_agent_event(
                 ConversationRole::ToolResult
             };
             app.conversation.push(ConversationEntry { role, content });
-            app.sync_conversation_area();
+            app.refresh_conversation();
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             app.current_response.clear();
@@ -250,7 +236,7 @@ async fn run_app(
     let mut terminal_events = EventStream::new();
 
     loop {
-        terminal.draw(|frame| render_app(&app, frame))?;
+        terminal.draw(|frame| render_app(&mut app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
@@ -286,7 +272,7 @@ async fn run_app(
                                     app.input.input(key);
                                 }
                             }
-                        },
+                        }
                         AppState::ToolConfirmation { .. } => {
                             let response = match key {
                                 KeyEvent {
@@ -306,7 +292,9 @@ async fn run_app(
                             };
                             if let Some(response) = response {
                                 let (name, input) = match &app.state {
-                                    AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
+                                    AppState::ToolConfirmation { name, input } => {
+                                        (name.clone(), input.clone())
+                                    }
                                     _ => unreachable!(),
                                 };
                                 app.conversation.push(ConversationEntry {
@@ -322,23 +310,24 @@ async fn run_app(
                                 } else {
                                     app.conversation.push(ConversationEntry {
                                         role: ConversationRole::Error,
-                                        content: "Confirmation channel closed unexpectedly.".to_string(),
+                                        content: "Confirmation channel closed unexpectedly."
+                                            .to_string(),
                                     });
                                     app.confirmation_tx = None;
                                     app.set_state(AppState::Input);
                                 }
-                                app.sync_conversation_area();
+                                app.refresh_conversation();
                             }
-                        },
+                        }
                         _ => {
-                            if let
-                                KeyEvent {
-                                    code: KeyCode::Char('c'),
-                                    modifiers: KeyModifiers::CONTROL,
-                                    ..
-                                } = key {
-                                    break;
-                                }
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key
+                            {
+                                break;
+                            }
                         }
                     }
                 }
@@ -367,7 +356,7 @@ pub async fn submit_message(
     });
 
     app.set_state(AppState::Streaming);
-    app.sync_conversation_area();
+    app.refresh_conversation();
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
     app.confirmation_tx = Some(confirm_tx);
@@ -404,7 +393,7 @@ mod tests {
                 content: format!("line {i}"),
             });
         }
-        app.sync_conversation_area();
+        app.refresh_conversation();
         app
     }
 
