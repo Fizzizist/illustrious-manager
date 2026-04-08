@@ -235,7 +235,7 @@ pub async fn run(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     logger: Option<Logger>,
-    session: Option<crate::session::Session>,
+    session: crate::session::Session,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -257,7 +257,7 @@ async fn run_app(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
-    session: Option<crate::session::Session>,
+    session: crate::session::Session,
 ) -> Result<()> {
     let mut app = App::new();
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -280,10 +280,8 @@ async fn run_app(
             Some(agent_event) = event_rx.recv() => {
                 let is_response_complete = matches!(&agent_event, AgentEvent::ResponseComplete(_));
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
-                if is_response_complete
-                    && let Some(ref sess) = session
-                {
-                    agent.save_history_to_session(sess).await?;
+                if is_response_complete {
+                    agent.save_history_to_session(&session).await?;
                 }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {

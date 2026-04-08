@@ -124,14 +124,12 @@ async fn main() -> Result<()> {
     );
     agent.load_skills(&skills);
 
-    let session = if let Some(ref session_id) = cli.session_id {
-        let sess = session::Session::open_or_create(session_id).await?;
-        let history = sess.load_history().await?;
-        agent.load_history(history);
-        Some(sess)
-    } else {
-        None
-    };
+    let session_id = cli
+        .session_id
+        .unwrap_or_else(session::generate_session_id);
+    let session = session::Session::open_or_create(&session_id).await?;
+    let history = session.load_history().await?;
+    agent.load_history(history);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
@@ -153,10 +151,7 @@ async fn main() -> Result<()> {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
             frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
-
-            if let Some(ref sess) = session {
-                agent.save_history_to_session(sess).await?;
-            }
+            agent.save_history_to_session(&session).await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt, logger, session).await?;
