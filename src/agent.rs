@@ -1,4 +1,6 @@
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -13,6 +15,8 @@ use crate::types::{
     StreamEvent,
 };
 
+type SkillMapping = HashMap<String, PathBuf>;
+
 struct PendingToolCall {
     id: String,
     name: String,
@@ -26,6 +30,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
+    skills: SkillMapping,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -44,6 +49,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
+            skills: SkillMapping::new(),
         }
     }
 
@@ -55,6 +61,11 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self
+    }
+
+    pub fn with_skills(mut self, skills: SkillMapping) -> Self {
+        self.skills = skills;
         self
     }
 
@@ -91,7 +102,51 @@ impl Agent {
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
-        lock(&self.history).push(Message::text(Role::User, input));
+
+        let processed_input = {
+            let prompt = input.trim();
+            if let Some(skill_name_end) = prompt.find(' ').or_else(|| if prompt.starts_with('/') { Some(prompt.len()) } else { None }) {
+                if prompt.starts_with('/') {
+                    let skill_name = &prompt[1..skill_name_end];
+                    if let Some(skill_path) = self.skills.get(skill_name) {
+                        let remaining_prompt = if skill_name_end < prompt.len() {
+                            prompt[skill_name_end..].trim()
+                        } else {
+                            ""
+                        };
+
+                        if let Ok(skill_content) = std::fs::read_to_string(skill_path) {
+                            if remaining_prompt.is_empty() {
+                                skill_content
+                            } else {
+                                format!("{}\n\n{}", skill_content, remaining_prompt)
+                            }
+                        } else {
+                            input
+                        }
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                }
+            } else if prompt.starts_with('/') {
+                let skill_name = &prompt[1..];
+                if let Some(skill_path) = self.skills.get(skill_name) {
+                    if let Ok(skill_content) = std::fs::read_to_string(skill_path) {
+                        skill_content
+                    } else {
+                        input
+                    }
+                } else {
+                    input
+                }
+            } else {
+                input
+            }
+        };
+
+        lock(&self.history).push(Message::text(Role::User, processed_input));
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         let history_arc = Arc::clone(&self.history);
@@ -879,5 +934,131 @@ mod tests {
             )),
             "tool should execute after approval"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_with_no_skills_passthrough_normal_prompt() {
+        let backend = SequencedBackend::new(vec![text_response("hello")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never);
+
+        let stream = agent
+            .send("normal prompt".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            agent.history().len() == 2,
+            "should have user message and assistant response"
+        );
+        let user_msg = &agent.history()[0];
+        assert_eq!(user_msg.role, Role::User);
+        assert_eq!(
+            user_msg.content[0],
+            ContentBlock::Text("normal prompt".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_with_skill_processes_slash_command() {
+        let backend = SequencedBackend::new(vec![text_response("skill response")]);
+
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let skill_path = temp_dir.path().join("test-skill").join("SKILL.md");
+        std::fs::create_dir(skill_path.parent().unwrap()).expect("create skill dir");
+        std::fs::write(&skill_path, "# Test Skill\n\nSkill content here").expect("write skill");
+
+        let mut skills = SkillMapping::new();
+        skills.insert("test-skill".to_string(), skill_path);
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let agent = Agent::new(Box::new(backend), config)
+            .with_skills(skills);
+
+        let stream = agent
+            .send("/test-skill".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let user_msg = &agent.history()[0];
+        assert_eq!(user_msg.role, Role::User);
+        let content = match &user_msg.content[0] {
+            ContentBlock::Text(s) => s,
+            _ => panic!("expected Text content block"),
+        };
+        assert!(content.contains("# Test Skill"));
+        assert!(content.contains("Skill content here"));
+    }
+
+    #[tokio::test]
+    async fn agent_with_unknown_skill_passthrough_unchanged() {
+        let backend = SequencedBackend::new(vec![text_response("response")]);
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let skills = SkillMapping::new();
+
+        let agent = Agent::new(Box::new(backend), config)
+            .with_skills(skills);
+
+        let stream = agent
+            .send("/unknown-skill arg".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let user_msg = &agent.history()[0];
+        assert_eq!(user_msg.role, Role::User);
+        assert_eq!(
+            user_msg.content[0],
+            ContentBlock::Text("/unknown-skill arg".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_skill_command_with_args_appends_args_to_skill_content() {
+        let backend = SequencedBackend::new(vec![text_response("response")]);
+
+        let temp_dir = tempfile::TempDir::new().expect("create temp dir");
+        let skill_path = temp_dir.path().join("commit").join("SKILL.md");
+        std::fs::create_dir(skill_path.parent().unwrap()).expect("create skill dir");
+        std::fs::write(&skill_path, "# Commit\n\nWrite a commit message").expect("write skill");
+
+        let mut skills = SkillMapping::new();
+        skills.insert("commit".to_string(), skill_path);
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let agent = Agent::new(Box::new(backend), config)
+            .with_skills(skills);
+
+        let stream = agent
+            .send("/commit fix the bug".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let user_msg = &agent.history()[0];
+        assert_eq!(user_msg.role, Role::User);
+        let content = match &user_msg.content[0] {
+            ContentBlock::Text(s) => s,
+            _ => panic!("expected Text content block"),
+        };
+        assert!(content.contains("# Commit"));
+        assert!(content.contains("Write a commit message"));
+        assert!(content.contains("fix the bug"));
     }
 }

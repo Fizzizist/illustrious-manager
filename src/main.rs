@@ -23,6 +23,8 @@ use tools::sandbox::SandboxPolicy;
 use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
 
+use illustrious_manager::skills::discover_skills;
+
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 #[derive(Parser)]
@@ -108,10 +110,13 @@ async fn main() -> Result<()> {
         tools: registry.definitions(),
     };
 
+    let skills = discover_skills().unwrap_or_default();
+
     let agent = Arc::new(
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
+            .with_skills(skills)
             .with_context_files()?,
     );
 

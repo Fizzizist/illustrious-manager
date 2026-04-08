@@ -1,3 +1,4 @@
+pub mod skills;
 pub mod agent;
 pub mod backend;
 pub mod config;
