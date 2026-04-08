@@ -33,9 +33,6 @@ pub struct Agent {
     skills: SkillMapping,
 }
 
-// Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
-// history in an unknown state. Panicking here would crash the app; accepting partial
-// corruption is the lesser evil for a long-running interactive process.
 fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -103,9 +100,6 @@ impl Agent {
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
 
-        // Process skill commands: if input starts with /skill-name, load the skill content.
-        // Unknown skill names are passed through unchanged to support forward compatibility
-        // and collaborative workflows where users may share prompts with different skill sets.
         let processed_input = {
             let prompt = input.trim();
             if let Some(skill_name_end) = prompt.find(' ').or_else(|| {

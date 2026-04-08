@@ -9,17 +9,8 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Mapping of skill names to their SKILL.md file paths
 pub type SkillMapping = HashMap<String, PathBuf>;
 
-/// Discover skills from the standard locations.
-///
-/// Searches for skills in:
-/// 1. `$PWD/.claude/skills`
-/// 2. `$HOME/.claude/skills`
-///
-/// Each skill is a directory containing a `SKILL.md` file.
-/// The skill name is derived from the directory name.
 pub fn discover_skills() -> Result<SkillMapping> {
     let mut skills = SkillMapping::new();
 
@@ -40,10 +31,6 @@ pub fn discover_skills() -> Result<SkillMapping> {
     Ok(skills)
 }
 
-/// Discover skills from a specific directory.
-///
-/// Scans the directory for subdirectories containing `SKILL.md` files.
-/// Returns a mapping of directory names to SKILL.md paths.
 fn discover_skills_from_dir(dir: &Path) -> Result<SkillMapping> {
     let mut skills = SkillMapping::new();
 
@@ -76,7 +63,6 @@ fn discover_skills_from_dir(dir: &Path) -> Result<SkillMapping> {
     Ok(skills)
 }
 
-/// Load the content of a skill's SKILL.md file.
 pub fn load_skill_content(path: &Path) -> Result<String> {
     std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read skill file: {}", path.display()))
