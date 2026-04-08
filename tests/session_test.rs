@@ -6,8 +6,7 @@ fn generated_session_ids_are_unique() {
     let ids: Vec<String> = (0..100).map(|_| generate_session_id()).collect();
     let unique_count = ids.iter().collect::<std::collections::HashSet<_>>().len();
     assert_eq!(
-        unique_count,
-        100,
+        unique_count, 100,
         "all generated session IDs should be unique"
     );
 }
@@ -47,7 +46,10 @@ fn session_id_validation_accepts_no_hyphen_format() {
 fn generated_session_id_passes_validation() {
     for _ in 0..50 {
         let id = generate_session_id();
-        assert!(validate_session_id(&id).is_ok(), "generated ID {id} should be valid");
+        assert!(
+            validate_session_id(&id).is_ok(),
+            "generated ID {id} should be valid"
+        );
     }
 }
 
