@@ -33,41 +33,9 @@ pub fn validate_session_id(id: &str) -> Result<()> {
         bail!("session ID must not be empty");
     }
 
-    let without_hyphens = id.replace('-', "");
-    if without_hyphens.len() != 32 {
-        bail!(
-            "session ID '{}' is not a valid UUIDv7: expected 32 hex characters (excluding hyphens), found {}",
-            id,
-            without_hyphens.len()
-        );
-    }
-
-    for ch in without_hyphens.chars() {
-        if !ch.is_ascii_hexdigit() {
-            bail!(
-                "session ID '{}' is not a valid UUIDv7: contains non-hex character '{}'",
-                id,
-                ch
-            );
-        }
-    }
-
-    if id.len() == 36 && id.chars().filter(|&c| c == '-').count() == 4 {
-        let bytes = id.as_bytes();
-        if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
-            bail!(
-                "session ID '{}' is not a valid UUIDv7: hyphens must be at positions 8, 13, 18, 23",
-                id
-            );
-        }
-    } else if id.len() != 32 {
-        bail!(
-            "session ID '{}' is not a valid UUIDv7: expected 36 characters with hyphens or 32 without",
-            id
-        );
-    }
-
-    Ok(())
+    id.parse::<uuid7::Uuid>()
+        .map(|_| ())
+        .with_context(|| format!("session ID '{id}' is not a valid UUID"))
 }
 
 pub fn generate_session_id() -> String {
@@ -98,10 +66,12 @@ impl Session {
             .await
             .with_context(|| format!("Failed to create session DB at {}", db_path.display()))?;
 
-        let conn = db.connect().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let conn = db
+            .connect()
+            .context("Failed to connect to new session DB")?;
         conn.execute(CREATE_TABLE_SQL, ())
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .context("Failed to create conversation table")?;
 
         Ok(Self { db })
     }
@@ -126,6 +96,8 @@ impl Session {
     }
 
     pub async fn open_or_create(session_id: &str) -> Result<Self> {
+        validate_session_id(session_id)?;
+
         let db_path = session_db_path(session_id)?;
         if db_path.exists() {
             Self::open(session_id).await
@@ -134,42 +106,77 @@ impl Session {
         }
     }
 
-    pub async fn save_message(&self, message: &Message) -> Result<()> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("{e}"))?;
+    #[cfg(test)]
+    async fn create_in_dir(session_id: &str, dir: &std::path::Path) -> Result<Self> {
+        validate_session_id(session_id)?;
 
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
+        let db_path = dir.join(format!("{session_id}.db"));
 
-        let content_json = serde_json::to_string(&message.content)
-            .context("Failed to serialize message content")?;
+        if db_path.exists() {
+            bail!("session DB file already exists: {}", db_path.display());
+        }
 
-        conn.execute(
-            INSERT_SQL,
-            turso::params::Params::Positional(vec![
-                Value::Text(role_str.to_string()),
-                Value::Text(content_json),
-            ]),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let db = Builder::new_local(db_path.to_string_lossy().as_ref())
+            .build()
+            .await
+            .with_context(|| format!("Failed to create session DB at {}", db_path.display()))?;
 
-        Ok(())
+        let conn = db
+            .connect()
+            .context("Failed to connect to new session DB")?;
+        conn.execute(CREATE_TABLE_SQL, ())
+            .await
+            .context("Failed to create conversation table")?;
+
+        Ok(Self { db })
+    }
+
+    #[cfg(test)]
+    async fn open_in_dir(session_id: &str, dir: &std::path::Path) -> Result<Self> {
+        validate_session_id(session_id)?;
+
+        let db_path = dir.join(format!("{session_id}.db"));
+        if !db_path.exists() {
+            bail!("session DB file not found: {}", db_path.display());
+        }
+
+        let db = Builder::new_local(db_path.to_string_lossy().as_ref())
+            .build()
+            .await
+            .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
+
+        Ok(Self { db })
+    }
+
+    #[cfg(test)]
+    async fn open_or_create_in_dir(session_id: &str, dir: &std::path::Path) -> Result<Self> {
+        let db_path = dir.join(format!("{session_id}.db"));
+        if db_path.exists() {
+            Self::open_in_dir(session_id, dir).await
+        } else {
+            Self::create_in_dir(session_id, dir).await
+        }
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let conn = self
+            .db
+            .connect()
+            .context("Failed to connect to session DB")?;
 
         let mut rows = conn
             .query(SELECT_ALL_SQL, ())
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .context("Failed to query conversation history")?;
 
         let mut messages = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| anyhow::anyhow!("{e}"))? {
-            let role_val = row.get_value(0).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let content_val = row.get_value(1).map_err(|e| anyhow::anyhow!("{e}"))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .context("Failed to fetch next row from conversation history")?
+        {
+            let role_val = row.get_value(0).context("Failed to read role column")?;
+            let content_val = row.get_value(1).context("Failed to read content column")?;
 
             let role_str = match role_val {
                 Value::Text(s) => s,
@@ -197,11 +204,19 @@ impl Session {
     }
 
     pub async fn save_history(&self, messages: &[Message]) -> Result<()> {
-        let conn = self.db.connect().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut conn = self
+            .db
+            .connect()
+            .context("Failed to connect to session DB")?;
 
-        conn.execute("DELETE FROM conversation", ())
+        let tx = conn
+            .transaction()
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .context("Failed to begin transaction")?;
+
+        tx.execute("DELETE FROM conversation", ())
+            .await
+            .context("Failed to clear conversation history")?;
 
         for message in messages {
             let role_str = match message.role {
@@ -212,7 +227,7 @@ impl Session {
             let content_json = serde_json::to_string(&message.content)
                 .context("Failed to serialize message content")?;
 
-            conn.execute(
+            tx.execute(
                 INSERT_SQL,
                 turso::params::Params::Positional(vec![
                     Value::Text(role_str.to_string()),
@@ -220,8 +235,15 @@ impl Session {
                 ]),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .context("Failed to insert message into conversation")?;
         }
+
+        tx.commit()
+            .await
+            .context("Failed to commit conversation history")?;
+
+        conn.cacheflush()
+            .context("Failed to flush session DB to disk")?;
 
         Ok(())
     }
@@ -290,14 +312,14 @@ mod tests {
 
     #[test]
     fn validate_session_id_rejects_misplaced_hyphens() {
-        let id = "01944ab87a6770009219566f82fff672";
-        // 32 hex chars, no hyphens — should be ok
-        assert!(validate_session_id(id).is_ok());
-
-        // Now test with misplaced hyphens
         let bad = "0194-4ab8-7a67-7000-9219-566f82fff672";
-        // This has hyphens at wrong positions (4,9,14,19) not (8,13,18,23)
         assert!(validate_session_id(bad).is_err());
+    }
+
+    #[test]
+    fn validate_session_id_accepts_no_hyphen_format() {
+        let id = "01944ab87a6770009219566f82fff672";
+        assert!(validate_session_id(id).is_ok());
     }
 
     #[test]
@@ -314,7 +336,7 @@ mod tests {
 
         let msg = Message::text(Role::User, "Hello, world!".to_string());
         session
-            .save_message(&msg)
+            .save_history(&[msg])
             .await
             .expect("save should succeed");
 
@@ -333,16 +355,19 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg1 = Message::text(Role::User, "What is Rust?".to_string());
-        let msg2 = Message::text(
-            Role::Assistant,
-            "Rust is a systems programming language.".to_string(),
-        );
-        let msg3 = Message::text(Role::User, "Tell me more.".to_string());
+        let messages = vec![
+            Message::text(Role::User, "What is Rust?".to_string()),
+            Message::text(
+                Role::Assistant,
+                "Rust is a systems programming language.".to_string(),
+            ),
+            Message::text(Role::User, "Tell me more.".to_string()),
+        ];
 
-        session.save_message(&msg1).await.expect("save msg1");
-        session.save_message(&msg2).await.expect("save msg2");
-        session.save_message(&msg3).await.expect("save msg3");
+        session
+            .save_history(&messages)
+            .await
+            .expect("save should succeed");
 
         let loaded = session.load_history().await.expect("load should succeed");
         assert_eq!(loaded.len(), 3);
@@ -357,7 +382,7 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg = Message {
+        let messages = vec![Message {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::Text("Running ls".to_string()),
@@ -367,10 +392,10 @@ mod tests {
                     input: serde_json::json!({"command": "ls -la"}),
                 },
             ],
-        };
+        }];
 
         session
-            .save_message(&msg)
+            .save_history(&messages)
             .await
             .expect("save should succeed");
         let loaded = session.load_history().await.expect("load should succeed");
@@ -398,17 +423,17 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg = Message {
+        let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-1".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: false,
             }],
-        };
+        }];
 
         session
-            .save_message(&msg)
+            .save_history(&messages)
             .await
             .expect("save should succeed");
         let loaded = session.load_history().await.expect("load should succeed");
@@ -447,9 +472,9 @@ mod tests {
 
         {
             let session = create_test_session(&tmp, &session_id).await;
-            let msg = Message::text(Role::User, "persistent message".to_string());
+            let messages = vec![Message::text(Role::User, "persistent message".to_string())];
             session
-                .save_message(&msg)
+                .save_history(&messages)
                 .await
                 .expect("save should succeed");
         }
@@ -472,8 +497,8 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg1 = Message::text(Role::User, "first message".to_string());
-        session.save_message(&msg1).await.expect("save msg1");
+        let msg1 = vec![Message::text(Role::User, "first message".to_string())];
+        session.save_history(&msg1).await.expect("save msg1");
 
         let new_messages = vec![
             Message::text(Role::User, "replaced user".to_string()),
@@ -503,8 +528,8 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg = Message::text(Role::User, "to be cleared".to_string());
-        session.save_message(&msg).await.expect("save");
+        let msg = vec![Message::text(Role::User, "to be cleared".to_string())];
+        session.save_history(&msg).await.expect("save");
 
         session
             .save_history(&[])
@@ -546,12 +571,10 @@ mod tests {
                 Message::text(Role::Assistant, "There is one file: file1.txt".to_string()),
             ];
 
-            for msg in &messages {
-                session
-                    .save_message(msg)
-                    .await
-                    .expect("save should succeed");
-            }
+            session
+                .save_history(&messages)
+                .await
+                .expect("save should succeed");
         }
 
         {
@@ -575,5 +598,52 @@ mod tests {
                 matches!(&loaded[2].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t1")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn open_or_create_creates_new_session_when_absent() {
+        let tmp = TempDir::new().expect("temp dir");
+        let session_id = test_session_id();
+
+        let db_path = tmp.path().join(format!("{session_id}.db"));
+        assert!(!db_path.exists());
+
+        let session = Session::open_or_create_in_dir(&session_id, tmp.path())
+            .await
+            .expect("open_or_create");
+
+        let messages = vec![Message::text(Role::User, "hello".to_string())];
+        session
+            .save_history(&messages)
+            .await
+            .expect("save should succeed");
+
+        assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn open_or_create_opens_existing_session() {
+        let tmp = TempDir::new().expect("temp dir");
+        let session_id = test_session_id();
+
+        {
+            let session = create_test_session(&tmp, &session_id).await;
+            let messages = vec![Message::text(Role::User, "existing data".to_string())];
+            session
+                .save_history(&messages)
+                .await
+                .expect("save should succeed");
+        }
+
+        let session = Session::open_or_create_in_dir(&session_id, tmp.path())
+            .await
+            .expect("open_or_create");
+
+        let loaded = session.load_history().await.expect("load should succeed");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].content,
+            vec![ContentBlock::Text("existing data".to_string())]
+        );
     }
 }
