@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -354,109 +354,100 @@ async fn run_app(
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
 
+    let mut terminal_events = EventStream::new();
+
     loop {
         app.viewport_height = terminal.size()?.height.saturating_sub(5);
         terminal.draw(|frame| render_app(&app, frame))?;
-
-        if matches!(app.state, AppState::Input) {
-            if event::poll(std::time::Duration::from_millis(50))?
-                && let Event::Key(key) = event::read()?
-                && !app.handle_scroll_key(&key)
-            {
-                match key {
-                    KeyEvent {
-                        code: KeyCode::Char('c'),
-                        modifiers: KeyModifiers::CONTROL,
-                        ..
-                    }
-                    | KeyEvent {
-                        code: KeyCode::Esc, ..
-                    } => break,
-                    KeyEvent {
-                        code: KeyCode::Enter,
-                        modifiers: KeyModifiers::NONE,
-                        ..
-                    } => {
-                        let text = app.input_text();
-                        if !text.trim().is_empty() {
-                            if let Some(ref mut log) = logger {
-                                log.log_user_input(&text)?;
+        tokio::select! {
+            Some(agent_event) = event_rx.recv() => {
+                handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+            }
+            Some(Ok(terminal_event)) = terminal_events.next() => {
+                if let Event::Key(key) = terminal_event && !app.handle_scroll_key(&key) {
+                    match app.state {
+                        AppState::Input => {
+                            match key {
+                                KeyEvent {
+                                    code: KeyCode::Char('c'),
+                                    modifiers: KeyModifiers::CONTROL,
+                                    ..
+                                }
+                                | KeyEvent {
+                                    code: KeyCode::Esc, ..
+                                } => break,
+                                KeyEvent {
+                                    code: KeyCode::Enter,
+                                    modifiers: KeyModifiers::NONE,
+                                    ..
+                                } => {
+                                    let text = app.input_text();
+                                    if !text.trim().is_empty() {
+                                        if let Some(ref mut log) = logger {
+                                            log.log_user_input(&text)?;
+                                        }
+                                        stream_task =
+                                            Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
+                                    }
+                                }
+                                _ => {
+                                    app.input.input(key);
+                                }
                             }
-                            stream_task =
-                                Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
+                        },
+                        AppState::ToolConfirmation { .. } => {
+                            let response = match key {
+                                KeyEvent {
+                                    code: KeyCode::Char('y') | KeyCode::Char('Y'),
+                                    ..
+                                } => Some(ConfirmationResponse::Approved),
+                                KeyEvent {
+                                    code: KeyCode::Char('n') | KeyCode::Char('N'),
+                                    ..
+                                } => Some(ConfirmationResponse::Rejected),
+                                KeyEvent {
+                                    code: KeyCode::Char('c'),
+                                    modifiers: KeyModifiers::CONTROL,
+                                    ..
+                                } => break,
+                                _ => None,
+                            };
+                            if let Some(response) = response {
+                                let (name, input) = match &app.state {
+                                    AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
+                                    _ => unreachable!(),
+                                };
+                                app.conversation.push(ConversationEntry {
+                                    role: ConversationRole::ToolUse,
+                                    content: tool_use_display_content(&name, &input),
+                                });
+                                let sent = app
+                                    .confirmation_tx
+                                    .as_ref()
+                                    .is_some_and(|tx| tx.unbounded_send(response).is_ok());
+                                if sent {
+                                    app.set_state(AppState::Streaming);
+                                } else {
+                                    app.conversation.push(ConversationEntry {
+                                        role: ConversationRole::Error,
+                                        content: "Confirmation channel closed unexpectedly.".to_string(),
+                                    });
+                                    app.confirmation_tx = None;
+                                    app.set_state(AppState::Input);
+                                }
+                            }
+                        },
+                        _ => {
+                            if let
+                                KeyEvent {
+                                    code: KeyCode::Char('c'),
+                                    modifiers: KeyModifiers::CONTROL,
+                                    ..
+                                } = key {
+                                    break;
+                                }
                         }
                     }
-                    _ => {
-                        app.input.input(key);
-                    }
-                }
-            }
-        } else if matches!(app.state, AppState::ToolConfirmation { .. }) {
-            if event::poll(std::time::Duration::from_millis(50))?
-                && let Event::Key(key) = event::read()?
-            {
-                let response = if app.handle_scroll_key(&key) {
-                    None
-                } else {
-                    match key {
-                        KeyEvent {
-                            code: KeyCode::Char('y') | KeyCode::Char('Y'),
-                            ..
-                        } => Some(ConfirmationResponse::Approved),
-                        KeyEvent {
-                            code: KeyCode::Char('n') | KeyCode::Char('N'),
-                            ..
-                        } => Some(ConfirmationResponse::Rejected),
-                        KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                            ..
-                        } => break,
-                        _ => None,
-                    }
-                };
-
-                if let Some(response) = response {
-                    let (name, input) = match &app.state {
-                        AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
-                        _ => unreachable!(),
-                    };
-                    app.conversation.push(ConversationEntry {
-                        role: ConversationRole::ToolUse,
-                        content: tool_use_display_content(&name, &input),
-                    });
-                    let sent = app
-                        .confirmation_tx
-                        .as_ref()
-                        .is_some_and(|tx| tx.unbounded_send(response).is_ok());
-                    if sent {
-                        app.set_state(AppState::Streaming);
-                    } else {
-                        app.conversation.push(ConversationEntry {
-                            role: ConversationRole::Error,
-                            content: "Confirmation channel closed unexpectedly.".to_string(),
-                        });
-                        app.confirmation_tx = None;
-                        app.set_state(AppState::Input);
-                    }
-                }
-            }
-        } else {
-            tokio::select! {
-                Some(agent_event) = event_rx.recv() => {
-                    handle_agent_event(&mut app, agent_event, logger.as_mut())?;
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(16)) => {
-                    if event::poll(std::time::Duration::from_millis(0))?
-                        && let Event::Key(key) = event::read()?
-                        && !app.handle_scroll_key(&key)
-                            && let KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } = key {
-                                break;
-                            }
                 }
             }
         }
