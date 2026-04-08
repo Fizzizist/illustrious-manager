@@ -3,6 +3,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
+use tui_markdown::from_str as markdown_to_text;
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
@@ -69,15 +70,43 @@ impl<'a> ConversationArea<'a> {
     pub fn lines(&self) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         for entry in self.entries {
-            lines.push(Line::from(Span::styled(
-                format!("{}:", entry.role.display_label()),
-                Style::default().fg(entry.role.color()),
-            )));
-            let display_content = maybe_truncate(&entry.content, &entry.role);
-            for line in display_content.lines() {
-                lines.push(Line::from(format!("  {line}")));
+            match entry.role {
+                ConversationRole::Assistant => {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}:", entry.role.display_label()),
+                        Style::default().fg(entry.role.color()),
+                    )));
+                    let md_text = markdown_to_text(&entry.content);
+                    for md_line in md_text.lines {
+                        let mut prefixed = Line::from(Span::raw("  "));
+                        prefixed.spans.extend(md_line.spans);
+                        lines.push(prefixed);
+                    }
+                    lines.push(Line::from(""));
+                }
+                ConversationRole::ToolUse => {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}:", entry.role.display_label()),
+                        Style::default().fg(entry.role.color()),
+                    )));
+                    let diff_lines = format_tool_use_as_diff(&entry.content);
+                    for dl in diff_lines {
+                        lines.push(dl);
+                    }
+                    lines.push(Line::from(""));
+                }
+                _ => {
+                    lines.push(Line::from(Span::styled(
+                        format!("{}:", entry.role.display_label()),
+                        Style::default().fg(entry.role.color()),
+                    )));
+                    let display_content = maybe_truncate(&entry.content, &entry.role);
+                    for line in display_content.lines() {
+                        lines.push(Line::from(format!("  {line}")));
+                    }
+                    lines.push(Line::from(""));
+                }
             }
-            lines.push(Line::from(""));
         }
 
         if !self.current_response.is_empty() {
@@ -85,8 +114,11 @@ impl<'a> ConversationArea<'a> {
                 "Assistant:",
                 Style::default().fg(Color::Blue),
             )));
-            for line in self.current_response.lines() {
-                lines.push(Line::from(format!("  {line}")));
+            let md_text = markdown_to_text(self.current_response);
+            for md_line in md_text.lines {
+                let mut prefixed = Line::from(Span::raw("  "));
+                prefixed.spans.extend(md_line.spans);
+                lines.push(prefixed);
             }
         }
 
@@ -157,6 +189,91 @@ pub fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String
         name,
         serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
     )
+}
+
+fn format_tool_use_as_diff(content: &str) -> Vec<Line<'_>> {
+    let (name, input_str) = content.split_once('\n').unwrap_or((content, ""));
+    let input_str = input_str.trim();
+
+    match name {
+        "edit_file" => format_edit_file_diff(input_str),
+        "write_file" => format_write_file_diff(input_str),
+        _ => content
+            .lines()
+            .map(|l| Line::from(format!("  {l}")))
+            .collect(),
+    }
+}
+
+fn format_edit_file_diff(input_str: &str) -> Vec<Line<'static>> {
+    let input: serde_json::Value =
+        serde_json::from_str(input_str).unwrap_or(serde_json::Value::Null);
+
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let old_string = input
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_string = input
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  edit_file: {path}"),
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::raw("  ```diff")));
+    for line in old_string.lines() {
+        lines.push(Line::from(Span::styled(
+            format!("  -{line}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    for line in new_string.lines() {
+        lines.push(Line::from(Span::styled(
+            format!("  +{line}"),
+            Style::default().fg(Color::Green),
+        )));
+    }
+    lines.push(Line::from(Span::raw("  ```")));
+
+    lines
+}
+
+fn format_write_file_diff(input_str: &str) -> Vec<Line<'static>> {
+    let input: serde_json::Value =
+        serde_json::from_str(input_str).unwrap_or(serde_json::Value::Null);
+
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("  write_file: {path}"),
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(""));
+
+    lines.push(Line::from(Span::raw("  ```diff")));
+    for line in content.lines() {
+        lines.push(Line::from(Span::styled(
+            format!("  +{line}"),
+            Style::default().fg(Color::Green),
+        )));
+    }
+    lines.push(Line::from(Span::raw("  ```")));
+
+    lines
 }
 
 #[cfg(test)]
@@ -341,5 +458,85 @@ mod tests {
         let result = tool_use_display_content("bash", &serde_json::json!({"command": "ls"}));
         assert!(result.contains("bash"));
         assert!(result.contains("command"));
+    }
+
+    #[test]
+    fn format_tool_use_edit_file_produces_diff() {
+        let content = "edit_file\n  {\"path\":\"src/main.rs\",\"old_string\":\"old\\n\",\"new_string\":\"new\\n\"}";
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("-old"),
+            "diff should contain removed line: {text}"
+        );
+        assert!(
+            text.contains("+new"),
+            "diff should contain added line: {text}"
+        );
+        assert!(
+            text.contains("edit_file: src/main.rs"),
+            "should show tool name and path: {text}"
+        );
+    }
+
+    #[test]
+    fn format_tool_use_write_file_produces_diff() {
+        let content = "write_file\n  {\"path\":\"src/lib.rs\",\"content\":\"fn main() {}\"}";
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("+fn main() {}"),
+            "diff should contain added line: {text}"
+        );
+        assert!(
+            text.contains("write_file: src/lib.rs"),
+            "should show tool name and path: {text}"
+        );
+    }
+
+    #[test]
+    fn format_tool_use_unknown_tool_renders_plain() {
+        let content = "bash\n  {\"command\":\"ls\"}";
+        let lines = format_tool_use_as_diff(content);
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("bash"),
+            "plain render should show tool name: {text}"
+        );
+        assert!(
+            text.contains("command"),
+            "plain render should show input: {text}"
+        );
+    }
+
+    #[test]
+    fn render_markdown_assistant_bold() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: "This is **bold** text.".to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let lines = area.lines();
+        let text: String = lines
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("**"),
+            "markdown syntax should be rendered, not raw: {text}"
+        );
     }
 }

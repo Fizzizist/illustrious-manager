@@ -262,6 +262,96 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
 }
 
 #[test]
+fn test_tui_markdown_renders_assistant_headings() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::User,
+        content: "Explain Rust".to_string(),
+    });
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::Assistant,
+        content: "# Rust Programming\n\nRust is a **systems** language.".to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_markdown_renders_assistant_code_block() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::Assistant,
+        content: "Here is an example:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```"
+            .to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_markdown_renders_assistant_list() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::Assistant,
+        content:
+            "Key features:\n\n- Memory safety\n- Zero-cost abstractions\n- Fearless concurrency"
+                .to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_edit_file_renders_as_diff() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolUse,
+        content: r#"edit_file
+  {"path":"src/main.rs","old_string":"fn main() {\n    println!(\"old\");\n}","new_string":"fn main() {\n    println!(\"new\");\n}"}"#.to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_tui_write_file_renders_as_diff() {
+    let mut app = App::new();
+    app.conversation.push(ConversationEntry {
+        role: ConversationRole::ToolUse,
+        content: r#"write_file
+  {"path":"src/lib.rs","content":"pub fn greet() {\n    println!(\"hello\");\n}"}"#
+            .to_string(),
+    });
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    assert_snapshot!(terminal.backend());
+}
+
+#[test]
 fn test_tui_scrolled_up_shows_earlier_content() {
     let mut app = App::new();
     for i in 0..20 {
