@@ -103,12 +103,33 @@ pub fn discover_skills_from_env() -> HashMap<String, PathBuf> {
     skills
 }
 
-pub fn first_line(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()?
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim_start_matches('#').trim().to_string())
+/// Extracts the `description` field from YAML frontmatter at the top of a skill file.
+///
+/// Expects frontmatter delimited by `---` lines, e.g.:
+/// ```markdown
+/// ---
+/// name: my-skill
+/// description: what this skill does
+/// ---
+/// ```
+pub fn skill_description(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut lines = content.lines();
+
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("description:") {
+            return Some(rest.trim().to_string());
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -283,29 +304,38 @@ mod tests {
     }
 
     #[test]
-    fn first_line_strips_markdown_heading_marker() {
+    fn skill_description_extracts_description_from_frontmatter() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
-        fs::write(&path, "# My Skill Title\nsome body text").unwrap();
+        fs::write(
+            &path,
+            "---\nname: my-skill\ndescription: does the thing\n---\n\n# Body",
+        )
+        .unwrap();
 
-        assert_eq!(first_line(&path).unwrap(), "My Skill Title");
+        assert_eq!(skill_description(&path).unwrap(), "does the thing");
     }
 
     #[test]
-    fn first_line_skips_leading_blank_lines() {
+    fn skill_description_returns_none_when_no_frontmatter() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
-        fs::write(&path, "\n\n# Title").unwrap();
+        fs::write(&path, "# My Skill\nNo frontmatter here").unwrap();
 
-        assert_eq!(first_line(&path).unwrap(), "Title");
+        assert!(skill_description(&path).is_none());
     }
 
     #[test]
-    fn first_line_returns_none_for_empty_file() {
+    fn skill_description_returns_none_when_description_field_missing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
-        fs::write(&path, "").unwrap();
+        fs::write(&path, "---\nname: my-skill\n---\n\n# Body").unwrap();
 
-        assert!(first_line(&path).is_none());
+        assert!(skill_description(&path).is_none());
+    }
+
+    #[test]
+    fn skill_description_returns_none_for_missing_file() {
+        assert!(skill_description(Path::new("/nonexistent/path.md")).is_none());
     }
 }
