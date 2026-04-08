@@ -64,6 +64,23 @@ impl Agent {
         Ok(self)
     }
 
+    pub fn load_skills(&self, skills: &std::collections::HashMap<String, std::path::PathBuf>) {
+        if skills.is_empty() {
+            return;
+        }
+
+        let mut names: Vec<&str> = skills.keys().map(String::as_str).collect();
+        names.sort();
+
+        let mut content =
+            String::from("The following skills are available via the `skill` tool:\n\n");
+        for name in names {
+            content.push_str(&format!("- {}\n", name));
+        }
+
+        lock(&self.history).push(Message::text(Role::User, content));
+    }
+
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
     }
@@ -878,6 +895,60 @@ mod tests {
                 AgentEvent::ToolResult { is_error, .. } if !is_error
             )),
             "tool should execute after approval"
+        );
+    }
+
+    #[test]
+    fn load_skills_adds_skill_names_to_history() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config);
+
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "my-skill".to_string(),
+            std::path::PathBuf::from("/fake/path"),
+        );
+        skills.insert(
+            "another-skill".to_string(),
+            std::path::PathBuf::from("/fake/path2"),
+        );
+        agent.load_skills(&skills);
+
+        let history = agent.history();
+        assert_eq!(history.len(), 1);
+        match &history[0].content[0] {
+            ContentBlock::Text(text) => {
+                assert!(
+                    text.contains("another-skill"),
+                    "should mention another-skill"
+                );
+                assert!(text.contains("my-skill"), "should mention my-skill");
+                assert!(text.contains("skill"), "should mention skill tool");
+            }
+            _ => panic!("expected Text content"),
+        }
+    }
+
+    #[test]
+    fn load_skills_with_empty_map_adds_nothing_to_history() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config);
+
+        agent.load_skills(&std::collections::HashMap::new());
+
+        assert!(
+            agent.history().is_empty(),
+            "empty skills map should not add history entry"
         );
     }
 }
