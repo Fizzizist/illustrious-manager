@@ -3,7 +3,6 @@ source: tests/tui_test.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────────────────────────┐"
-"│  Message 10                                                                  │"
 "│                                                                              │"
 "│You:                                                                          │"
 "│  Message 11                                                                  │"
@@ -22,6 +21,7 @@ expression: terminal.backend()
 "│                                                                              │"
 "│You:                                                                          │"
 "│  Message 16                                                                  │"
+"│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "┌Input (Enter to send, Ctrl+C to quit)─────────────────────────────────────────┐"
 "│                                                                              │"

@@ -1,0 +1,16 @@
+---
+source: src/frontend/tui/conversation_area.rs
+expression: terminal.backend()
+---
+"┌Conversation──────────────────────────────────────────────┐"
+"│[Tool]:                                                   │"
+"│  bash                                                    │"
+"│    {"command": "ls"}                                     │"
+"│                                                          │"
+"│[Result]:                                                 │"
+"│  file1.txt                                               │"
+"│  file2.txt                                               │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

@@ -16,6 +16,7 @@ fn test_tui_tool_call_renders_inline() {
         role: ConversationRole::ToolUse,
         content: "bash\n  {\"command\":\"ls\"}".to_string(),
     });
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -36,6 +37,7 @@ fn test_tui_tool_result_renders_below_invocation() {
         role: ConversationRole::ToolResult,
         content: "file1.txt\nfile2.txt".to_string(),
     });
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -53,6 +55,7 @@ fn test_tui_long_tool_result_is_truncated() {
         role: ConversationRole::ToolResult,
         content: long_output,
     });
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -69,6 +72,7 @@ fn test_tui_confirmation_prompt_state_renders() {
         role: ConversationRole::User,
         content: "Write a file".to_string(),
     });
+    app.sync_conversation_area();
     app.set_state(AppState::ToolConfirmation {
         name: "write_file".to_string(),
         input: serde_json::json!({"path": "/tmp/test.txt", "content": "hello"}),
@@ -84,7 +88,7 @@ fn test_tui_confirmation_prompt_state_renders() {
 
 #[test]
 fn test_tui_initial_state() {
-    let mut app = App::new();
+    let app = App::new();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
@@ -105,6 +109,7 @@ fn test_tui_with_conversation() {
         role: ConversationRole::Assistant,
         content: "Hi there! How can I help you?".to_string(),
     });
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -123,6 +128,7 @@ fn test_tui_streaming_state() {
         content: "Tell me a story".to_string(),
     });
     app.current_response = "Once upon a time".to_string();
+    app.sync_conversation_area();
     app.set_state(AppState::Streaming);
 
     let backend = TestBackend::new(80, 24);
@@ -245,8 +251,8 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
             content: long_response.clone(),
         });
     }
-    // scroll_offset=0 means auto-scroll to bottom — the last entry must be visible
-    app.scroll_offset = 0;
+    // sync_conversation_area calls scroll_to_bottom — the last entry must be visible
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -270,10 +276,16 @@ fn test_tui_scrolled_up_shows_earlier_content() {
             content: format!("Message {i}"),
         });
     }
-    app.scroll_offset = 10;
+    app.sync_conversation_area();
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    // First render to initialize the TextArea viewport
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+    // Now scroll up to see earlier content
+    app.conversation_area.scroll_up_half();
     terminal
         .draw(|frame| render_app(&app, frame))
         .expect("draw must succeed");
