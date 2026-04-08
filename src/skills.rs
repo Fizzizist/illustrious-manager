@@ -82,41 +82,6 @@ pub fn load_skill_content(path: &Path) -> Result<String> {
         .with_context(|| format!("Failed to read skill file: {}", path.display()))
 }
 
-/// Process a prompt, checking for skill invocations.
-///
-/// If the prompt starts with `/<skill_name>`, returns the skill content
-/// prepended to the original prompt.
-///
-/// Returns `None` if no skill was invoked.
-pub fn process_skill_command(prompt: &str, skills: &SkillMapping) -> Option<(String, String)> {
-    let prompt = prompt.trim();
-
-    if !prompt.starts_with('/') {
-        return None;
-    }
-
-    let skill_name_end = prompt.find(' ').unwrap_or(prompt.len());
-    let skill_name = &prompt[1..skill_name_end];
-
-    let skill_path = skills.get(skill_name)?;
-
-    let remaining_prompt = if skill_name_end < prompt.len() {
-        prompt[skill_name_end..].trim()
-    } else {
-        ""
-    };
-
-    let skill_content = load_skill_content(skill_path).ok()?;
-
-    let content = if remaining_prompt.is_empty() {
-        skill_content
-    } else {
-        format!("{}\n\n{}", skill_content, remaining_prompt)
-    };
-
-    Some((skill_name.to_string(), content))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,72 +210,6 @@ mod tests {
     fn load_skill_content_returns_error_for_nonexistent_file() {
         let result = load_skill_content(PathBuf::from("/tmp/nonexistent_skill_xyz.md").as_path());
         assert!(result.is_err(), "should return error for nonexistent file");
-    }
-
-    #[test]
-    fn process_skill_command_returns_none_for_non_slash_prompt() {
-        let skills = SkillMapping::new();
-        let result = process_skill_command("hello world", &skills);
-        assert!(result.is_none(), "non-slash prompt should return None");
-    }
-
-    #[test]
-    fn process_skill_command_returns_none_for_unknown_skill() {
-        let skills = SkillMapping::new();
-        let result = process_skill_command("/unknown skill", &skills);
-        assert!(result.is_none(), "unknown skill should return None");
-    }
-
-    #[test]
-    fn process_skill_command_loads_skill_content_for_known_skill() {
-        let dir = TestSkillDir::new();
-        let skill_path = dir.add_skill("test-skill", "# Test Skill\n\nDo this thing");
-
-        let mut skills = SkillMapping::new();
-        skills.insert("test-skill".to_string(), skill_path);
-
-        let result = process_skill_command("/test-skill", &skills);
-        assert!(result.is_some(), "known skill should return Some");
-
-        let (skill_name, content) = result.unwrap();
-        assert_eq!(skill_name, "test-skill");
-        assert!(content.contains("# Test Skill"));
-        assert!(content.contains("Do this thing"));
-    }
-
-    #[test]
-    fn process_skill_command_appends_remaining_prompt_to_skill_content() {
-        let dir = TestSkillDir::new();
-        let skill_path = dir.add_skill("commit", "# Commit\n\nWrite a commit message");
-
-        let mut skills = SkillMapping::new();
-        skills.insert("commit".to_string(), skill_path);
-
-        let result = process_skill_command("/commit fix the bug", &skills);
-        assert!(result.is_some(), "skill with args should return Some");
-
-        let (_, content) = result.unwrap();
-        assert!(content.contains("# Commit"));
-        assert!(content.contains("Write a commit message"));
-        assert!(content.contains("fix the bug"));
-    }
-
-    #[test]
-    fn process_skill_command_handles_skill_with_no_additional_args() {
-        let dir = TestSkillDir::new();
-        let skill_path = dir.add_skill("help", "# Help\n\nThis is help");
-
-        let mut skills = SkillMapping::new();
-        skills.insert("help".to_string(), skill_path);
-
-        let result = process_skill_command("/help", &skills);
-        assert!(result.is_some(), "skill with no args should return Some");
-
-        let (_, content) = result.unwrap();
-        assert!(content.contains("# Help"));
-        assert!(content.contains("This is help"));
-        // Should not have trailing whitespace from empty remaining prompt
-        assert!(!content.ends_with("\n\n"));
     }
 
     #[test]

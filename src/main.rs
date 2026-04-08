@@ -23,7 +23,7 @@ use tools::sandbox::SandboxPolicy;
 use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
 
-use illustrious_manager::skills::discover_skills;
+use illustrious_manager::skills::{SkillMapping, discover_skills};
 
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
@@ -110,7 +110,13 @@ async fn main() -> Result<()> {
         tools: registry.definitions(),
     };
 
-    let skills = discover_skills().unwrap_or_default();
+    let skills = match discover_skills() {
+        Ok(skills) => skills,
+        Err(e) => {
+            eprintln!("Warning: failed to discover skills: {}", e);
+            SkillMapping::new()
+        }
+    };
 
     let agent = Arc::new(
         Agent::new(selection.backend, request_config)

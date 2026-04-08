@@ -103,6 +103,9 @@ impl Agent {
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
 
+        // Process skill commands: if input starts with /skill-name, load the skill content.
+        // Unknown skill names are passed through unchanged to support forward compatibility
+        // and collaborative workflows where users may share prompts with different skill sets.
         let processed_input = {
             let prompt = input.trim();
             if let Some(skill_name_end) = prompt.find(' ').or_else(|| {
@@ -121,16 +124,25 @@ impl Agent {
                             ""
                         };
 
-                        if let Ok(skill_content) = std::fs::read_to_string(skill_path) {
-                            if remaining_prompt.is_empty() {
-                                skill_content
-                            } else {
-                                format!("{}\n\n{}", skill_content, remaining_prompt)
+                        match std::fs::read_to_string(skill_path) {
+                            Ok(skill_content) => {
+                                if remaining_prompt.is_empty() {
+                                    skill_content
+                                } else {
+                                    format!("{}\n\n{}", skill_content, remaining_prompt)
+                                }
                             }
-                        } else {
-                            input
+                            Err(e) => {
+                                eprintln!(
+                                    "Warning: failed to read skill file '{}': {}",
+                                    skill_path.display(),
+                                    e
+                                );
+                                input
+                            }
                         }
                     } else {
+                        // Unknown skill: pass through unchanged
                         input
                     }
                 } else {
@@ -138,12 +150,19 @@ impl Agent {
                 }
             } else if let Some(skill_name) = prompt.strip_prefix('/') {
                 if let Some(skill_path) = self.skills.get(skill_name) {
-                    if let Ok(skill_content) = std::fs::read_to_string(skill_path) {
-                        skill_content
-                    } else {
-                        input
+                    match std::fs::read_to_string(skill_path) {
+                        Ok(skill_content) => skill_content,
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: failed to read skill file '{}': {}",
+                                skill_path.display(),
+                                e
+                            );
+                            input
+                        }
                     }
                 } else {
+                    // Unknown skill: pass through unchanged
                     input
                 }
             } else {
