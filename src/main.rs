@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
     registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
 
     let skills = discover_skills_from_env();
-    registry.register(Box::new(SkillTool::new(skills.clone())))?;
+    registry.register(Box::new(SkillTool::new(&skills)))?;
 
     let request_config = RequestConfig {
         model: selection.model,

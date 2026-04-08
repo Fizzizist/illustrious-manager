@@ -9,8 +9,10 @@ pub struct SkillTool {
 }
 
 impl SkillTool {
-    pub fn new(skills: HashMap<String, PathBuf>) -> Self {
-        Self { skills }
+    pub fn new(skills: &HashMap<String, PathBuf>) -> Self {
+        Self {
+            skills: skills.clone(),
+        }
     }
 }
 
@@ -66,36 +68,47 @@ impl Tool for SkillTool {
     }
 }
 
-pub fn discover_skills(pwd: &Path, home: &Path) -> HashMap<String, PathBuf> {
-    let mut skills = HashMap::new();
-
-    let skill_dirs = [home.join(".claude/skills"), pwd.join(".claude/skills")];
-
-    for dir in &skill_dirs {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let skill_file = path.join("SKILL.md");
-                    if skill_file.exists()
-                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    {
-                        skills.insert(name.to_string(), skill_file);
-                    }
+fn scan_skills_dir(dir: &Path, skills: &mut HashMap<String, PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists()
+                    && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                {
+                    skills.insert(name.to_string(), skill_file);
                 }
             }
         }
     }
+}
 
+// home is scanned first so that pwd entries override home entries with the same name.
+pub fn discover_skills(pwd: &Path, home: &Path) -> HashMap<String, PathBuf> {
+    let mut skills = HashMap::new();
+    scan_skills_dir(&home.join(".claude/skills"), &mut skills);
+    scan_skills_dir(&pwd.join(".claude/skills"), &mut skills);
     skills
 }
 
 pub fn discover_skills_from_env() -> HashMap<String, PathBuf> {
-    let pwd = std::env::current_dir().unwrap_or_default();
-    match dirs::home_dir() {
-        Some(home) => discover_skills(&pwd, &home),
-        None => discover_skills(&pwd, Path::new("")),
+    let mut skills = HashMap::new();
+    if let Some(home) = dirs::home_dir() {
+        scan_skills_dir(&home.join(".claude/skills"), &mut skills);
     }
+    if let Ok(pwd) = std::env::current_dir() {
+        scan_skills_dir(&pwd.join(".claude/skills"), &mut skills);
+    }
+    skills
+}
+
+pub fn first_line(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim_start_matches('#').trim().to_string())
 }
 
 #[cfg(test)]
@@ -190,6 +203,30 @@ mod tests {
     }
 
     #[test]
+    fn discover_skills_skips_dirs_with_non_utf8_names() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let pwd = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+
+        let skills_dir = home.path().join(".claude/skills");
+        fs::create_dir_all(&skills_dir).expect("create skills dir");
+
+        let bad_name = OsStr::from_bytes(b"bad-\xff-skill");
+        let bad_dir = skills_dir.join(bad_name);
+        fs::create_dir_all(&bad_dir).expect("create non-utf8 dir");
+        fs::write(bad_dir.join("SKILL.md"), "content").expect("write SKILL.md");
+
+        let skills = discover_skills(pwd.path(), home.path());
+
+        assert!(
+            skills.is_empty(),
+            "non-UTF8 skill dir names are silently skipped"
+        );
+    }
+
+    #[test]
     fn skill_tool_execute_returns_file_content() {
         let dir = TempDir::new().unwrap();
         let skill_file = dir.path().join("my-skill.md");
@@ -197,7 +234,7 @@ mod tests {
 
         let mut skills = HashMap::new();
         skills.insert("my-skill".to_string(), skill_file);
-        let tool = SkillTool::new(skills);
+        let tool = SkillTool::new(&skills);
 
         let result = tool
             .execute(serde_json::json!({"name": "my-skill"}))
@@ -214,7 +251,7 @@ mod tests {
 
     #[test]
     fn skill_tool_execute_unknown_name_returns_error() {
-        let tool = SkillTool::new(HashMap::new());
+        let tool = SkillTool::new(&HashMap::new());
 
         let result = tool.execute(serde_json::json!({"name": "nonexistent"}));
 
@@ -232,7 +269,7 @@ mod tests {
 
     #[test]
     fn skill_tool_execute_missing_name_field_returns_invalid_input() {
-        let tool = SkillTool::new(HashMap::new());
+        let tool = SkillTool::new(&HashMap::new());
 
         let result = tool.execute(serde_json::json!({}));
 
@@ -241,7 +278,34 @@ mod tests {
 
     #[test]
     fn skill_tool_is_not_a_write_tool() {
-        let tool = SkillTool::new(HashMap::new());
+        let tool = SkillTool::new(&HashMap::new());
         assert!(!tool.is_write_tool());
+    }
+
+    #[test]
+    fn first_line_strips_markdown_heading_marker() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("skill.md");
+        fs::write(&path, "# My Skill Title\nsome body text").unwrap();
+
+        assert_eq!(first_line(&path).unwrap(), "My Skill Title");
+    }
+
+    #[test]
+    fn first_line_skips_leading_blank_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("skill.md");
+        fs::write(&path, "\n\n# Title").unwrap();
+
+        assert_eq!(first_line(&path).unwrap(), "Title");
+    }
+
+    #[test]
+    fn first_line_returns_none_for_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("skill.md");
+        fs::write(&path, "").unwrap();
+
+        assert!(first_line(&path).is_none());
     }
 }

@@ -64,6 +64,8 @@ impl Agent {
         Ok(self)
     }
 
+    // TODO: synthetic User messages are a design smell; use Role::System or a metadata
+    // mechanism if one is added in future.
     pub fn load_skills(&self, skills: &std::collections::HashMap<String, std::path::PathBuf>) {
         if skills.is_empty() {
             return;
@@ -75,7 +77,10 @@ impl Agent {
         let mut content =
             String::from("The following skills are available via the `skill` tool:\n\n");
         for name in names {
-            content.push_str(&format!("- {}\n", name));
+            let path = &skills[name];
+            let desc = crate::tools::skill::first_line(path)
+                .unwrap_or_else(|| "(no description)".to_string());
+            content.push_str(&format!("- {}: {}\n", name, desc));
         }
 
         lock(&self.history).push(Message::text(Role::User, content));
