@@ -193,7 +193,12 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
-            app.current_response.clear();
+            if !app.current_response.is_empty() {
+                app.conversation.push(ConversationEntry {
+                    role: ConversationRole::Assistant,
+                    content: std::mem::take(&mut app.current_response),
+                });
+            }
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::ToolUse,
                 content: tool_use_display_content(&name, &input),
@@ -212,7 +217,12 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
-            app.current_response.clear();
+            if !app.current_response.is_empty() {
+                app.conversation.push(ConversationEntry {
+                    role: ConversationRole::Assistant,
+                    content: std::mem::take(&mut app.current_response),
+                });
+            }
             app.set_state(AppState::ToolConfirmation { name, input });
         }
         AgentEvent::Usage { .. } => {}
@@ -557,5 +567,98 @@ mod tests {
         let mut app = App::new();
         let event = AgentEvent::ResponseComplete("test".to_string());
         handle_agent_event(&mut app, event, None).expect("should not error without logger");
+    }
+
+    #[test]
+    fn tool_use_received_preserves_accumulated_text_as_assistant_entry() {
+        let mut app = App::new();
+        app.current_response = "Let me look into that.".to_string();
+
+        let event = AgentEvent::ToolUseReceived {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        let assistant_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::Assistant)
+            .collect();
+        assert_eq!(
+            assistant_entries.len(),
+            1,
+            "should have saved assistant text"
+        );
+        assert_eq!(
+            assistant_entries[0].content, "Let me look into that.",
+            "saved text should match streamed text"
+        );
+        assert!(
+            app.current_response.is_empty(),
+            "current_response should be cleared after saving"
+        );
+
+        let tool_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::ToolUse)
+            .collect();
+        assert_eq!(tool_entries.len(), 1, "should also have the tool use entry");
+    }
+
+    #[test]
+    fn tool_use_received_with_no_accumulated_text_does_not_add_empty_assistant() {
+        let mut app = App::new();
+
+        let event = AgentEvent::ToolUseReceived {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        let assistant_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::Assistant)
+            .collect();
+        assert!(
+            assistant_entries.is_empty(),
+            "should not add empty assistant entry"
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_required_preserves_accumulated_text_as_assistant_entry() {
+        let mut app = App::new();
+        app.current_response = "I need to edit the file.".to_string();
+
+        let event = AgentEvent::ToolConfirmationRequired {
+            id: "t1".to_string(),
+            name: "edit_file".to_string(),
+            input: serde_json::json!({"path": "/tmp/test.txt"}),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        let assistant_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::Assistant)
+            .collect();
+        assert_eq!(
+            assistant_entries.len(),
+            1,
+            "should have saved assistant text"
+        );
+        assert_eq!(
+            assistant_entries[0].content, "I need to edit the file.",
+            "saved text should match streamed text"
+        );
+        assert!(
+            app.current_response.is_empty(),
+            "current_response should be cleared after saving"
+        );
     }
 }
