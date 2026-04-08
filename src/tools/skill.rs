@@ -77,10 +77,10 @@ pub fn discover_skills(pwd: &Path, home: &Path) -> HashMap<String, PathBuf> {
                 let path = entry.path();
                 if path.is_dir() {
                     let skill_file = path.join("SKILL.md");
-                    if skill_file.exists() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            skills.insert(name.to_string(), skill_file);
-                        }
+                    if skill_file.exists()
+                        && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    {
+                        skills.insert(name.to_string(), skill_file);
                     }
                 }
             }
