@@ -5,9 +5,9 @@
 //! - `$PWD/.claude/skills`
 //! - `$HOME/.claude/skills`
 
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
 
 /// Mapping of skill names to their SKILL.md file paths
 pub type SkillMapping = HashMap<String, PathBuf>;
@@ -56,7 +56,8 @@ fn discover_skills_from_dir(dir: &Path) -> Result<SkillMapping> {
 
     for entry in entries {
         let entry = entry.with_context(|| format!("Failed to read entry in: {}", dir.display()))?;
-        let file_type = entry.file_type()
+        let file_type = entry
+            .file_type()
             .with_context(|| format!("Failed to get file type for: {}", entry.path().display()))?;
 
         if !file_type.is_dir() {
@@ -149,14 +150,20 @@ mod tests {
     fn discover_skills_from_empty_directory_returns_empty_mapping() {
         let dir = TestSkillDir::new();
         let skills = discover_skills_from_dir(dir.path()).expect("discover should succeed");
-        assert!(skills.is_empty(), "empty directory should return empty mapping");
+        assert!(
+            skills.is_empty(),
+            "empty directory should return empty mapping"
+        );
     }
 
     #[test]
     fn discover_skills_from_nonexistent_directory_returns_empty_mapping() {
         let nonexist = PathBuf::from("/tmp/illustrious_test_nonexistent_12345");
         let skills = discover_skills_from_dir(&nonexist).expect("discover should succeed");
-        assert!(skills.is_empty(), "nonexistent directory should return empty mapping");
+        assert!(
+            skills.is_empty(),
+            "nonexistent directory should return empty mapping"
+        );
     }
 
     #[test]
@@ -166,7 +173,10 @@ mod tests {
 
         let skills = discover_skills_from_dir(dir.path()).expect("discover should succeed");
         assert_eq!(skills.len(), 1, "should find one skill");
-        assert!(skills.contains_key("test-skill"), "should have test-skill key");
+        assert!(
+            skills.contains_key("test-skill"),
+            "should have test-skill key"
+        );
         assert_eq!(
             skills.get("test-skill").unwrap().file_name().unwrap(),
             "SKILL.md",
@@ -185,8 +195,14 @@ mod tests {
 
         let skills = discover_skills_from_dir(dir.path()).expect("discover should succeed");
         assert_eq!(skills.len(), 1, "should only find valid skill");
-        assert!(skills.contains_key("valid-skill"), "should have valid-skill");
-        assert!(!skills.contains_key("empty-skill"), "should not have empty-skill");
+        assert!(
+            skills.contains_key("valid-skill"),
+            "should have valid-skill"
+        );
+        assert!(
+            !skills.contains_key("empty-skill"),
+            "should not have empty-skill"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -105,7 +105,13 @@ impl Agent {
 
         let processed_input = {
             let prompt = input.trim();
-            if let Some(skill_name_end) = prompt.find(' ').or_else(|| if prompt.starts_with('/') { Some(prompt.len()) } else { None }) {
+            if let Some(skill_name_end) = prompt.find(' ').or_else(|| {
+                if prompt.starts_with('/') {
+                    Some(prompt.len())
+                } else {
+                    None
+                }
+            }) {
                 if prompt.starts_with('/') {
                     let skill_name = &prompt[1..skill_name_end];
                     if let Some(skill_path) = self.skills.get(skill_name) {
@@ -977,8 +983,7 @@ mod tests {
             tools: vec![],
         };
 
-        let agent = Agent::new(Box::new(backend), config)
-            .with_skills(skills);
+        let agent = Agent::new(Box::new(backend), config).with_skills(skills);
 
         let stream = agent
             .send("/test-skill".to_string(), None)
@@ -1007,8 +1012,7 @@ mod tests {
         };
         let skills = SkillMapping::new();
 
-        let agent = Agent::new(Box::new(backend), config)
-            .with_skills(skills);
+        let agent = Agent::new(Box::new(backend), config).with_skills(skills);
 
         let stream = agent
             .send("/unknown-skill arg".to_string(), None)
@@ -1042,8 +1046,7 @@ mod tests {
             tools: vec![],
         };
 
-        let agent = Agent::new(Box::new(backend), config)
-            .with_skills(skills);
+        let agent = Agent::new(Box::new(backend), config).with_skills(skills);
 
         let stream = agent
             .send("/commit fix the bug".to_string(), None)
