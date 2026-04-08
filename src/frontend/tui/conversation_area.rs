@@ -18,6 +18,37 @@ pub enum ConversationRole {
     ToolResult,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolName {
+    EditFile,
+    WriteFile,
+    Bash,
+    Skill,
+    Other(String),
+}
+
+impl ToolName {
+    pub fn from_tool_name(name: &str) -> Self {
+        match name {
+            "edit_file" => ToolName::EditFile,
+            "write_file" => ToolName::WriteFile,
+            "bash" => ToolName::Bash,
+            "skill" => ToolName::Skill,
+            other => ToolName::Other(other.to_string()),
+        }
+    }
+
+    pub fn display_name(&self) -> &str {
+        match self {
+            ToolName::EditFile => "edit_file",
+            ToolName::WriteFile => "write_file",
+            ToolName::Bash => "bash",
+            ToolName::Skill => "skill",
+            ToolName::Other(s) => s.as_str(),
+        }
+    }
+}
+
 impl ConversationRole {
     pub fn display_label(&self) -> &'static str {
         match self {
@@ -42,6 +73,7 @@ impl ConversationRole {
 
 pub struct ConversationEntry {
     pub role: ConversationRole,
+    pub tool_name: Option<ToolName>,
     pub content: String,
 }
 
@@ -89,9 +121,25 @@ impl<'a> ConversationArea<'a> {
                         format!("{}:", entry.role.display_label()),
                         Style::default().fg(entry.role.color()),
                     )));
-                    let diff_lines = format_tool_use_as_diff(&entry.content);
-                    for dl in diff_lines {
-                        lines.push(dl);
+                    match entry.tool_name.as_ref() {
+                        Some(ToolName::EditFile) => {
+                            let input_str = extract_tool_input(&entry.content);
+                            for dl in format_edit_file_diff(input_str) {
+                                lines.push(dl);
+                            }
+                        }
+                        Some(ToolName::WriteFile) => {
+                            let input_str = extract_tool_input(&entry.content);
+                            for dl in format_write_file_diff(input_str) {
+                                lines.push(dl);
+                            }
+                        }
+                        _ => {
+                            let display_content = maybe_truncate(&entry.content, &entry.role);
+                            for line in display_content.lines() {
+                                lines.push(Line::from(format!("  {line}")));
+                            }
+                        }
                     }
                     lines.push(Line::from(""));
                 }
@@ -191,18 +239,11 @@ pub fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String
     )
 }
 
-fn format_tool_use_as_diff(content: &str) -> Vec<Line<'static>> {
-    let (name, input_str) = content.split_once('\n').unwrap_or((content, ""));
-    let input_str = input_str.trim();
-
-    match name {
-        "edit_file" => format_edit_file_diff(input_str),
-        "write_file" => format_write_file_diff(input_str),
-        _ => content
-            .lines()
-            .map(|l| Line::from(format!("  {l}")))
-            .collect(),
-    }
+fn extract_tool_input(content: &str) -> &str {
+    content
+        .split_once('\n')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or("")
 }
 
 fn format_diff_block(header: &str, removals: &[&str], additions: &[&str]) -> Vec<Line<'static>> {
@@ -296,10 +337,12 @@ mod tests {
         let entries = vec![
             ConversationEntry {
                 role: ConversationRole::User,
+                tool_name: None,
                 content: "hello".to_string(),
             },
             ConversationEntry {
                 role: ConversationRole::Assistant,
+                tool_name: None,
                 content: "world".to_string(),
             },
         ];
@@ -380,10 +423,12 @@ mod tests {
         let entries = vec![
             ConversationEntry {
                 role: ConversationRole::User,
+                tool_name: None,
                 content: "Hello".to_string(),
             },
             ConversationEntry {
                 role: ConversationRole::Assistant,
+                tool_name: None,
                 content: "Hi there!".to_string(),
             },
         ];
@@ -420,6 +465,7 @@ mod tests {
         let entries: Vec<ConversationEntry> = (0..40)
             .map(|i| ConversationEntry {
                 role: ConversationRole::User,
+                tool_name: None,
                 content: format!("line {i}"),
             })
             .collect();
@@ -432,6 +478,7 @@ mod tests {
     fn max_scroll_zero_when_content_fits() {
         let entries = vec![ConversationEntry {
             role: ConversationRole::User,
+            tool_name: None,
             content: "short".to_string(),
         }];
         let area = ConversationArea::new(&entries, "", 0, 100);
@@ -449,8 +496,14 @@ mod tests {
     #[test]
     fn format_tool_use_edit_file_produces_diff() {
         let content = "edit_file\n  {\"path\":\"src/main.rs\",\"old_string\":\"old\\n\",\"new_string\":\"new\\n\"}";
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::EditFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -472,8 +525,14 @@ mod tests {
     #[test]
     fn format_tool_use_write_file_produces_diff() {
         let content = "write_file\n  {\"path\":\"src/lib.rs\",\"content\":\"fn main() {}\"}";
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::WriteFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -491,8 +550,14 @@ mod tests {
     #[test]
     fn format_tool_use_unknown_tool_renders_plain() {
         let content = "bash\n  {\"command\":\"ls\"}";
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::Bash),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -510,8 +575,14 @@ mod tests {
     #[test]
     fn format_tool_use_edit_file_malformed_json() {
         let content = "edit_file\n  {{{not valid json}}}";
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::EditFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -525,8 +596,14 @@ mod tests {
     #[test]
     fn format_tool_use_write_file_malformed_json() {
         let content = "write_file\n  {{{garbage}}}";
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::WriteFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -541,8 +618,14 @@ mod tests {
     fn format_tool_use_edit_file_empty_old_string() {
         let content = r#"edit_file
   {"path":"src/new.rs","old_string":"","new_string":"fn main() {}"}"#;
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::EditFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -558,8 +641,14 @@ mod tests {
     fn format_tool_use_write_file_empty_content() {
         let content = r#"write_file
   {"path":"src/empty.rs","content":""}"#;
-        let lines = format_tool_use_as_diff(content);
-        let text: String = lines
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            tool_name: Some(ToolName::WriteFile),
+            content: content.to_string(),
+        }];
+        let area = ConversationArea::new(&entries, "", 0, 10);
+        let text: String = area
+            .lines()
             .iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -597,6 +686,7 @@ mod tests {
     fn render_markdown_assistant_bold() {
         let entries = vec![ConversationEntry {
             role: ConversationRole::Assistant,
+            tool_name: None,
             content: "This is **bold** text.".to_string(),
         }];
         let area = ConversationArea::new(&entries, "", 0, 10);
