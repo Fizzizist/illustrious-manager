@@ -109,18 +109,6 @@ impl Session {
 
         Ok(messages)
     }
-
-    pub fn load_history_sync(&self) -> Result<Vec<Message>> {
-        let rt = tokio::runtime::Handle::try_current();
-        match rt {
-            Ok(handle) => handle.block_on(self.load_history()),
-            Err(_) => {
-                let rt =
-                    tokio::runtime::Runtime::new().context("Failed to create tokio runtime")?;
-                rt.block_on(self.load_history())
-            }
-        }
-    }
 }
 
 fn ensure_sessions_dir(dir: &Path) -> Result<()> {

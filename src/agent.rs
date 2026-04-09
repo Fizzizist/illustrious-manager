@@ -61,8 +61,8 @@ impl Agent {
         self
     }
 
-    pub fn with_session(self, session: Session) -> Self {
-        let existing_history = session.load_history_sync().unwrap_or_default();
+    pub async fn with_session(self, session: Session) -> Self {
+        let existing_history = session.load_history().await.unwrap_or_default();
         if !existing_history.is_empty() {
             *lock(&self.history) = existing_history;
         }
