@@ -46,6 +46,27 @@ impl Tool for WriteFileTool {
         &self.schema
     }
 
+    fn markdown_input(&self, input: &Value) -> String {
+        let path = input["path"].as_str().unwrap_or("?");
+        let content = input["content"].as_str().unwrap_or("");
+        format!("**Write:** `{}`\n```\n{}\n```", path, content)
+    }
+
+    fn markdown_output(&self, result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|b| {
+                if let crate::types::ContentBlock::Text(s) = b {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn is_write_tool(&self) -> bool {
         true
     }
@@ -255,5 +276,37 @@ mod tests {
             }
             _ => panic!("Expected text content block"),
         }
+    }
+
+    #[test]
+    fn markdown_input_formats_path_and_content() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let tool = WriteFileTool::new(sandbox);
+
+        let input = serde_json::json!({
+            "path": "hello.rs",
+            "content": "fn main() {}"
+        });
+        let md = tool.markdown_input(&input);
+        assert!(md.contains("**Write:**"), "should have bold Write label");
+        assert!(md.contains("`hello.rs`"), "should show path as code");
+        assert!(md.contains("fn main()"), "should include content");
+    }
+
+    #[test]
+    fn markdown_output_returns_result_text() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let sandbox = SandboxPolicy::new(temp_dir.path());
+        let tool = WriteFileTool::new(sandbox);
+
+        let file_path = temp_dir.path().join("out.txt");
+        let input = serde_json::json!({
+            "path": file_path.to_str().expect("path"),
+            "content": "data"
+        });
+        let result = tool.execute(input).expect("Write should succeed");
+        let md = tool.markdown_output(&result);
+        assert!(md.contains("Wrote"), "should contain wrote message");
     }
 }

@@ -53,6 +53,34 @@ impl Tool for EditFile {
         &SCHEMA
     }
 
+    fn markdown_input(&self, input: &Value) -> String {
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let old = input
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new = input
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        format!("**Edit:** `{}`\n```diff\n- {}\n+ {}\n```", path, old, new)
+    }
+
+    fn markdown_output(&self, result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|b| {
+                if let crate::types::ContentBlock::Text(s) = b {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn is_write_tool(&self) -> bool {
         true
     }
@@ -279,5 +307,42 @@ mod tests {
 
         let content = fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(content, "foo bar\n");
+    }
+
+    #[test]
+    fn markdown_input_formats_as_diff() {
+        let (_temp_dir, file_path) = create_test_file("hello world\n");
+        let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
+        let tool = EditFile::new(sandbox);
+
+        let input = serde_json::json!({
+            "path": "test.txt",
+            "old_string": "hello world",
+            "new_string": "goodbye world"
+        });
+        let md = tool.markdown_input(&input);
+        assert!(md.contains("```diff"), "should format as diff code block");
+        assert!(md.contains("- hello world"), "should show removed line");
+        assert!(md.contains("+ goodbye world"), "should show added line");
+        assert!(md.contains("`test.txt`"), "should show file path");
+    }
+
+    #[test]
+    fn markdown_output_returns_result_text() {
+        let (_temp_dir, file_path) = create_test_file("hello world\n");
+        let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
+        let tool = EditFile::new(sandbox);
+
+        let input = serde_json::json!({
+            "path": file_path.file_name().unwrap().to_str().unwrap(),
+            "old_string": "hello world",
+            "new_string": "goodbye"
+        });
+        let result = tool.execute(input).expect("should succeed");
+        let md = tool.markdown_output(&result);
+        assert!(
+            md.contains("Successfully replaced"),
+            "should contain success message"
+        );
     }
 }

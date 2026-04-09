@@ -81,6 +81,27 @@ impl Tool for BashTool {
         &self.schema
     }
 
+    fn markdown_input(&self, input: &Value) -> String {
+        let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        format!("```sh\n{}\n```", command)
+    }
+
+    fn markdown_output(&self, result: &ToolResult) -> String {
+        let text = result
+            .content
+            .iter()
+            .filter_map(|b| {
+                if let crate::types::ContentBlock::Text(s) = b {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("```\n{}\n```", text)
+    }
+
     fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let command = input
             .get("command")
@@ -451,5 +472,34 @@ mod tests {
             ),
             _ => panic!("expected Text"),
         }
+    }
+
+    #[test]
+    fn markdown_input_wraps_command_in_sh_code_block() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let md = tool.markdown_input(&serde_json::json!({"command": "ls -la"}));
+        assert!(md.contains("```sh"), "should wrap in sh code block");
+        assert!(md.contains("ls -la"), "should include command");
+    }
+
+    #[test]
+    fn markdown_output_wraps_result_in_code_block() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}))
+            .expect("should succeed");
+        let md = tool.markdown_output(&result);
+        assert!(md.contains("```"), "should wrap in code block");
+        assert!(md.contains("hello"), "should include output");
     }
 }
