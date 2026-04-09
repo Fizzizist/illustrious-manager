@@ -4,6 +4,7 @@ pub mod config;
 pub mod context_files;
 pub mod frontend;
 pub mod logging;
+pub mod session;
 pub mod tools;
 pub mod types;
 
@@ -16,6 +17,7 @@ use std::time::SystemTime;
 use agent::Agent;
 use futures::channel::mpsc;
 use logging::Logger;
+use session::Session;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
@@ -49,6 +51,9 @@ struct Cli {
 
     #[arg(long)]
     debug: bool,
+
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -90,6 +95,14 @@ async fn main() -> Result<()> {
 
     let selection = backend::from_config(&app_config).await?;
 
+    let sessions_dir = session::sessions_dir()?;
+
+    let session = match &cli.session_id {
+        Some(id) => Session::create_or_load(&sessions_dir, id).await?,
+        None => Session::create(&sessions_dir, None).await?,
+    };
+    let session_id = session.id.clone();
+
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(BashTool::new(
         app_config.tools.bash_allowlist.clone(),
@@ -116,7 +129,8 @@ async fn main() -> Result<()> {
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
-            .with_context_files()?,
+            .with_context_files()?
+            .with_session(session),
     );
     agent.load_skills(&skills);
 
@@ -146,6 +160,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    eprintln!("Session ID: {}", session_id);
     Ok(())
 }
 
@@ -213,5 +228,25 @@ mod tests {
     fn debug_flag_is_false_when_not_present() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert_eq!(cli.debug, false);
+    }
+
+    #[test]
+    fn session_id_flag_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--session-id",
+            "01923456-7890-7abc-def0-123456789abc",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.session_id,
+            Some("01923456-7890-7abc-def0-123456789abc".to_string())
+        );
+    }
+
+    #[test]
+    fn session_id_flag_defaults_to_none() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(cli.session_id.is_none());
     }
 }
