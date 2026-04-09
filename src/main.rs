@@ -124,9 +124,7 @@ async fn main() -> Result<()> {
     );
     agent.load_skills(&skills);
 
-    let session_id = cli
-        .session_id
-        .unwrap_or_else(session::generate_session_id);
+    let session_id = cli.session_id.unwrap_or_else(session::generate_session_id);
     let session = session::Session::open_or_create(&session_id).await?;
     let history = session.load_history().await?;
     agent.load_history(history);
