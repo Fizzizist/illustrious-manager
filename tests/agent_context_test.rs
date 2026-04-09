@@ -100,7 +100,7 @@ fn load_context_files_with_empty_vec_does_not_modify_history() {
 }
 
 #[test]
-fn load_context_files_can_be_called_multiple_times() {
+fn load_context_files_deduplicates_on_session_resume() {
     let backend = Box::new(NullBackend::new());
     let config = RequestConfig {
         model: "test".to_string(),
@@ -114,32 +114,33 @@ fn load_context_files_can_be_called_multiple_times() {
         content: "First content".to_string(),
     }];
 
+    agent.load_context_files(files1);
+
     let files2 = vec![ContextFile {
         path: "/second.md".into(),
         content: "Second content".to_string(),
     }];
 
-    agent.load_context_files(files1);
     agent.load_context_files(files2);
 
     let history = agent.history();
     assert_eq!(
         history.len(),
-        2,
-        "should add separate message for each call"
+        1,
+        "second call should be deduplicated since prefix already exists in history"
     );
 
-    let text1 = if let ContentBlock::Text(t) = &history[0].content[0] {
+    let text = if let ContentBlock::Text(t) = &history[0].content[0] {
         t
     } else {
         panic!("expected Text content block")
     };
-    assert!(text1.contains("First content"));
-
-    let text2 = if let ContentBlock::Text(t) = &history[1].content[0] {
-        t
-    } else {
-        panic!("expected Text content block")
-    };
-    assert!(text2.contains("Second content"));
+    assert!(
+        text.contains("First content"),
+        "should contain the first call's content"
+    );
+    assert!(
+        !text.contains("Second content"),
+        "should not contain second call's content since it was deduplicated"
+    );
 }
