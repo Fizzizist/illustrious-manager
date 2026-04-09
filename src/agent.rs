@@ -7,7 +7,7 @@ use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::session::Session;
+use crate::session::{Session, persist_to_session};
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -35,36 +35,6 @@ pub struct Agent {
 // corruption is the lesser evil for a long-running interactive process.
 fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn lock_session(m: &Mutex<Option<Session>>) -> std::sync::MutexGuard<'_, Option<Session>> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-async fn persist_to_session(session: &Mutex<Option<Session>>, message: &Message) {
-    let owned_conn = {
-        let guard = lock_session(session);
-        guard.as_ref().map(|s| s.conn.clone())
-    };
-    if let Some(conn) = owned_conn {
-        let content_json = match serde_json::to_string(&message.content) {
-            Ok(j) => j,
-            Err(_) => return,
-        };
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-        let _ = conn
-            .execute(
-                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
-                [
-                    turso::Value::Text(role_str.to_string()),
-                    turso::Value::Text(content_json),
-                ],
-            )
-            .await;
-    }
 }
 
 impl Agent {
