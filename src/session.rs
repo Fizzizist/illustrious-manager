@@ -74,22 +74,7 @@ impl Session {
     }
 
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        let content_json = serde_json::to_string(&message.content)
-            .context("Failed to serialize message content")?;
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-
-        self.conn
-            .execute(
-                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
-                [Value::Text(role_str.to_string()), Value::Text(content_json)],
-            )
-            .await
-            .context("Failed to insert message into session")?;
-
-        Ok(())
+        insert_message_with_conn(&self.conn, message).await
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
@@ -136,10 +121,6 @@ impl Session {
             }
         }
     }
-
-    pub async fn persist_message(&self, message: &Message) -> Result<()> {
-        self.insert_message(message).await
-    }
 }
 
 fn ensure_sessions_dir(dir: &Path) -> Result<()> {
@@ -160,24 +141,24 @@ pub async fn persist_to_session(session: &Mutex<Option<Session>>, message: &Mess
         guard.as_ref().map(|s| s.conn.clone())
     };
     if let Some(conn) = owned_conn {
-        let content_json = match serde_json::to_string(&message.content) {
-            Ok(j) => j,
-            Err(_) => return,
-        };
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-        let _ = conn
-            .execute(
-                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
-                [
-                    turso::Value::Text(role_str.to_string()),
-                    turso::Value::Text(content_json),
-                ],
-            )
-            .await;
+        let _ = insert_message_with_conn(&conn, message).await;
     }
+}
+
+async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Result<()> {
+    let content_json =
+        serde_json::to_string(&message.content).context("Failed to serialize message content")?;
+    let role_str = match message.role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+    };
+    conn.execute(
+        "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+        [Value::Text(role_str.to_string()), Value::Text(content_json)],
+    )
+    .await
+    .context("Failed to insert message into session")?;
+    Ok(())
 }
 
 pub fn sessions_dir() -> Result<PathBuf> {
