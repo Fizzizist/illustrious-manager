@@ -130,7 +130,8 @@ async fn main() -> Result<()> {
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
             .with_context_files()?
-            .with_session(session),
+            .with_session(session)
+            .await,
     );
     agent.load_skills(&skills);
 
