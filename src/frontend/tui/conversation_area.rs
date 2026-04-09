@@ -75,20 +75,15 @@ impl<'a> ConversationArea<'a> {
                 Style::default().fg(entry.role.color()),
             )));
             let display_content = maybe_truncate(&entry.content, &entry.role);
-            match entry.role {
-                ConversationRole::User | ConversationRole::Assistant => {
-                    let rendered = markdown_to_text(&display_content);
-                    for line in rendered.lines {
-                        lines.push(Line::from(format!("  {}", line)));
-                    }
-                }
-                ConversationRole::Error
-                | ConversationRole::ToolUse
-                | ConversationRole::ToolResult => {
-                    for line in display_content.lines() {
-                        lines.push(Line::from(format!("  {line}")));
-                    }
-                }
+            let rendered = markdown_to_text(&display_content);
+            for line in rendered.lines {
+                let mut prefixed = Line::from(Span::raw("  "));
+                prefixed.spans.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content.into_owned(), span.style)),
+                );
+                lines.push(prefixed);
             }
             lines.push(Line::from(""));
         }
@@ -100,7 +95,9 @@ impl<'a> ConversationArea<'a> {
             )));
             let rendered = markdown_to_text(self.current_response);
             for line in rendered.lines {
-                lines.push(Line::from(format!("  {}", line)));
+                let mut prefixed = Line::from(Span::raw("  "));
+                prefixed.spans.extend(line.spans);
+                lines.push(prefixed);
             }
         }
 
