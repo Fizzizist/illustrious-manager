@@ -7,6 +7,7 @@ use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
+use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -26,6 +27,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
+    session: Arc<Mutex<Option<Session>>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -33,6 +35,36 @@ pub struct Agent {
 // corruption is the lesser evil for a long-running interactive process.
 fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_session(m: &Mutex<Option<Session>>) -> std::sync::MutexGuard<'_, Option<Session>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+async fn persist_to_session(session: &Mutex<Option<Session>>, message: &Message) {
+    let owned_conn = {
+        let guard = lock_session(session);
+        guard.as_ref().map(|s| s.conn.clone())
+    };
+    if let Some(conn) = owned_conn {
+        let content_json = match serde_json::to_string(&message.content) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let role_str = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        let _ = conn
+            .execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [
+                    turso::Value::Text(role_str.to_string()),
+                    turso::Value::Text(content_json),
+                ],
+            )
+            .await;
+    }
 }
 
 impl Agent {
@@ -44,6 +76,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
+            session: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -55,6 +88,15 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self
+    }
+
+    pub fn with_session(self, session: Session) -> Self {
+        let existing_history = session.load_history_sync().unwrap_or_default();
+        if !existing_history.is_empty() {
+            *lock(&self.history) = existing_history;
+        }
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
         self
     }
 
@@ -83,7 +125,14 @@ impl Agent {
             content.push_str(&format!("- {}: {}\n", name, desc));
         }
 
-        lock(&self.history).push(Message::text(Role::User, content));
+        let msg = Message::text(Role::User, content);
+        lock(&self.history).push(msg.clone());
+        let session = Arc::clone(&self.session);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                persist_to_session(&session, &msg).await;
+            });
+        }
     }
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
@@ -108,7 +157,14 @@ impl Agent {
             ));
         }
 
-        lock(&self.history).push(Message::text(Role::User, content));
+        let msg = Message::text(Role::User, content);
+        lock(&self.history).push(msg.clone());
+        let session = Arc::clone(&self.session);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                persist_to_session(&session, &msg).await;
+            });
+        }
     }
 
     pub async fn send(
@@ -117,7 +173,8 @@ impl Agent {
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
-        lock(&self.history).push(Message::text(Role::User, input));
+        let user_msg = Message::text(Role::User, input);
+        lock(&self.history).push(user_msg.clone());
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         let history_arc = Arc::clone(&self.history);
@@ -126,6 +183,9 @@ impl Agent {
         let config = self.config.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
+        let session = Arc::clone(&self.session);
+
+        persist_to_session(&session, &user_msg).await;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -204,10 +264,12 @@ impl Agent {
                     if !text_accumulated.is_empty() {
                         content.push(ContentBlock::Text(text_accumulated.clone()));
                     }
-                    lock(&history_arc).push(Message {
+                    let assistant_msg = Message {
                         role: Role::Assistant,
                         content,
-                    });
+                    };
+                    lock(&history_arc).push(assistant_msg.clone());
+                    persist_to_session(&session, &assistant_msg).await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -222,14 +284,19 @@ impl Agent {
                 )
                 .await;
 
-                lock(&history_arc).push(Message {
+                let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
-                });
-                lock(&history_arc).push(Message {
+                };
+                lock(&history_arc).push(assistant_msg.clone());
+                persist_to_session(&session, &assistant_msg).await;
+
+                let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
-                });
+                };
+                lock(&history_arc).push(tool_result_msg.clone());
+                persist_to_session(&session, &tool_result_msg).await;
             }
         });
 
