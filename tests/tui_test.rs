@@ -2,7 +2,7 @@ use insta::assert_snapshot;
 use ratatui::{Terminal, backend::TestBackend};
 
 use illustrious_manager::frontend::tui::{
-    App, AppState, ConversationEntry, ConversationRole, ToolName, render_app,
+    App, AppState, ConversationEntry, ConversationRole, render_app,
 };
 
 #[test]
@@ -10,12 +10,10 @@ fn test_tui_tool_call_renders_inline() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: "Run ls".to_string(),
     });
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolUse,
-        tool_name: Some(ToolName::Bash),
         content: "bash\n  {\"command\":\"ls\"}".to_string(),
     });
 
@@ -32,12 +30,10 @@ fn test_tui_tool_result_renders_below_invocation() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolUse,
-        tool_name: Some(ToolName::Bash),
         content: "bash\n  {\"command\":\"ls\"}".to_string(),
     });
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolResult,
-        tool_name: None,
         content: "file1.txt\nfile2.txt".to_string(),
     });
 
@@ -55,7 +51,6 @@ fn test_tui_long_tool_result_is_truncated() {
     let long_output = "x".repeat(500);
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolResult,
-        tool_name: None,
         content: long_output,
     });
 
@@ -72,7 +67,6 @@ fn test_tui_confirmation_prompt_state_renders() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: "Write a file".to_string(),
     });
     app.set_state(AppState::ToolConfirmation {
@@ -105,12 +99,10 @@ fn test_tui_with_conversation() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: "Hello!".to_string(),
     });
     app.conversation.push(ConversationEntry {
         role: ConversationRole::Assistant,
-        tool_name: None,
         content: "Hi there! How can I help you?".to_string(),
     });
 
@@ -128,7 +120,6 @@ fn test_tui_streaming_state() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: "Tell me a story".to_string(),
     });
     app.current_response = "Once upon a time".to_string();
@@ -247,12 +238,10 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
     for i in 0..10 {
         app.conversation.push(ConversationEntry {
             role: ConversationRole::User,
-            tool_name: None,
             content: format!("Message {i}"),
         });
         app.conversation.push(ConversationEntry {
             role: ConversationRole::Assistant,
-            tool_name: None,
             content: long_response.clone(),
         });
     }
@@ -277,12 +266,10 @@ fn test_tui_markdown_renders_assistant_headings() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: "Explain Rust".to_string(),
     });
     app.conversation.push(ConversationEntry {
         role: ConversationRole::Assistant,
-        tool_name: None,
         content: "# Rust Programming\n\nRust is a **systems** language.".to_string(),
     });
 
@@ -299,7 +286,6 @@ fn test_tui_markdown_renders_assistant_code_block() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::Assistant,
-        tool_name: None,
         content: "Here is an example:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```"
             .to_string(),
     });
@@ -317,7 +303,6 @@ fn test_tui_markdown_renders_assistant_list() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::Assistant,
-        tool_name: None,
         content:
             "Key features:\n\n- Memory safety\n- Zero-cost abstractions\n- Fearless concurrency"
                 .to_string(),
@@ -336,7 +321,6 @@ fn test_tui_edit_file_renders_as_diff() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolUse,
-        tool_name: Some(ToolName::EditFile),
         content: r#"edit_file
   {"path":"src/main.rs","old_string":"fn main() {\n    println!(\"old\");\n}","new_string":"fn main() {\n    println!(\"new\");\n}"}"#.to_string(),
     });
@@ -354,7 +338,6 @@ fn test_tui_write_file_renders_as_diff() {
     let mut app = App::new();
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolUse,
-        tool_name: Some(ToolName::WriteFile),
         content: r#"write_file
   {"path":"src/lib.rs","content":"pub fn greet() {\n    println!(\"hello\");\n}"}"#
             .to_string(),
@@ -374,7 +357,6 @@ fn test_tui_scrolled_up_shows_earlier_content() {
     for i in 0..20 {
         app.conversation.push(ConversationEntry {
             role: ConversationRole::User,
-            tool_name: None,
             content: format!("Message {i}"),
         });
     }

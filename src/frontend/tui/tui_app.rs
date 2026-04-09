@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::conversation_area::{
-    ConversationArea, ConversationEntry, ConversationRole, ToolName, tool_use_display_content,
+    ConversationArea, ConversationEntry, ConversationRole, tool_use_display_content,
 };
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
@@ -175,7 +175,6 @@ pub fn handle_agent_event(
         AgentEvent::ResponseComplete(full) => {
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::Assistant,
-                tool_name: None,
                 content: full,
             });
             app.current_response.clear();
@@ -186,7 +185,6 @@ pub fn handle_agent_event(
         AgentEvent::Error(msg) => {
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::Error,
-                tool_name: None,
                 content: msg,
             });
             app.current_response.clear();
@@ -198,13 +196,11 @@ pub fn handle_agent_event(
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry {
                     role: ConversationRole::Assistant,
-                    tool_name: None,
                     content: std::mem::take(&mut app.current_response),
                 });
             }
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::ToolUse,
-                tool_name: Some(ToolName::from_tool_name(&name)),
                 content: tool_use_display_content(&name, &input),
             });
             app.scroll_offset = 0;
@@ -217,18 +213,13 @@ pub fn handle_agent_event(
             } else {
                 ConversationRole::ToolResult
             };
-            app.conversation.push(ConversationEntry {
-                role,
-                tool_name: None,
-                content,
-            });
+            app.conversation.push(ConversationEntry { role, content });
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry {
                     role: ConversationRole::Assistant,
-                    tool_name: None,
                     content: std::mem::take(&mut app.current_response),
                 });
             }
@@ -343,7 +334,6 @@ async fn run_app(
                                 };
                                 app.conversation.push(ConversationEntry {
                                     role: ConversationRole::ToolUse,
-                                    tool_name: Some(ToolName::from_tool_name(&name)),
                                     content: tool_use_display_content(&name, &input),
                                 });
                                 let sent = app
@@ -355,7 +345,6 @@ async fn run_app(
                                 } else {
                                     app.conversation.push(ConversationEntry {
                                         role: ConversationRole::Error,
-                                        tool_name: None,
                                         content: "Confirmation channel closed unexpectedly.".to_string(),
                                     });
                                     app.confirmation_tx = None;
@@ -396,7 +385,6 @@ pub async fn submit_message(
 
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
-        tool_name: None,
         content: input.clone(),
     });
 
@@ -442,7 +430,6 @@ mod tests {
         for i in 0..40 {
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::User,
-                tool_name: None,
                 content: format!("line {i}"),
             });
         }
