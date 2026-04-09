@@ -3,6 +3,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
+use tui_markdown::from_str as markdown_to_text;
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
@@ -74,8 +75,15 @@ impl<'a> ConversationArea<'a> {
                 Style::default().fg(entry.role.color()),
             )));
             let display_content = maybe_truncate(&entry.content, &entry.role);
-            for line in display_content.lines() {
-                lines.push(Line::from(format!("  {line}")));
+            let rendered = markdown_to_text(&display_content);
+            for line in rendered.lines {
+                let mut prefixed = Line::from(Span::raw("  "));
+                prefixed.spans.extend(
+                    line.spans
+                        .into_iter()
+                        .map(|span| Span::styled(span.content.into_owned(), span.style)),
+                );
+                lines.push(prefixed);
             }
             lines.push(Line::from(""));
         }
@@ -85,8 +93,11 @@ impl<'a> ConversationArea<'a> {
                 "Assistant:",
                 Style::default().fg(Color::Blue),
             )));
-            for line in self.current_response.lines() {
-                lines.push(Line::from(format!("  {line}")));
+            let rendered = markdown_to_text(self.current_response);
+            for line in rendered.lines {
+                let mut prefixed = Line::from(Span::raw("  "));
+                prefixed.spans.extend(line.spans);
+                lines.push(prefixed);
             }
         }
 
@@ -341,5 +352,122 @@ mod tests {
         let result = tool_use_display_content("bash", &serde_json::json!({"command": "ls"}));
         assert!(result.contains("bash"));
         assert!(result.contains("command"));
+    }
+
+    #[test]
+    fn render_markdown_bold_text() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: "This is **bold** text".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_bold_text", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_code_block() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: "```rust\nfn main() {}\n```".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_code_block", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_heading() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: "# Hello World\nSome content".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_heading", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_list() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::Assistant,
+            content: "- item one\n- item two\n- item three".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_list", terminal.backend());
+    }
+
+    #[test]
+    fn render_user_markdown_italic() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::User,
+            content: "This is *italic* text".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_user_markdown_italic", terminal.backend());
+    }
+
+    #[test]
+    fn render_tool_entry_not_rendered_as_markdown() {
+        let entries = vec![ConversationEntry {
+            role: ConversationRole::ToolUse,
+            content: "bash\n  {\"command\": \"ls\"}".to_string(),
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 20);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_tool_entry_not_rendered_as_markdown",
+            terminal.backend()
+        );
     }
 }

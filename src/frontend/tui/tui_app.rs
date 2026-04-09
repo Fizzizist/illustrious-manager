@@ -14,12 +14,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::conversation_area::{
-    ConversationArea, ConversationEntry, ConversationRole, tool_use_display_content,
-};
+use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
+use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +39,7 @@ pub struct App {
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
     pub scroll_offset: u16,
     pub viewport_height: u16,
+    tools: std::sync::Arc<ToolRegistry>,
 }
 
 impl App {
@@ -57,7 +57,7 @@ impl App {
         }
     }
 
-    pub fn new() -> Self {
+    pub fn new(tools: std::sync::Arc<ToolRegistry>) -> Self {
         Self {
             input: InputArea::new(),
             conversation: Vec::new(),
@@ -66,6 +66,7 @@ impl App {
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+            tools,
         }
     }
 
@@ -91,6 +92,17 @@ impl App {
 
     fn half_page(&self) -> u16 {
         (self.viewport_height / 2).max(1)
+    }
+
+    fn tool_use_markdown(&self, name: &str, input: &serde_json::Value) -> String {
+        match self.tools.lookup(name) {
+            Ok(tool) => format!("**{}**\n{}", tool.name(), tool.markdown_input(input)),
+            Err(_) => format!(
+                "{}\n{}",
+                name,
+                serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
+            ),
+        }
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -131,7 +143,7 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new()
+        Self::new(std::sync::Arc::new(ToolRegistry::new()))
     }
 }
 
@@ -201,19 +213,34 @@ pub fn handle_agent_event(
             }
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::ToolUse,
-                content: tool_use_display_content(&name, &input),
+                content: app.tool_use_markdown(&name, &input),
             });
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
-            content, is_error, ..
+            name,
+            content,
+            is_error,
         } => {
             let role = if is_error {
                 ConversationRole::Error
             } else {
                 ConversationRole::ToolResult
             };
-            app.conversation.push(ConversationEntry { role, content });
+            let display = match app.tools.lookup(&name) {
+                Ok(tool) => {
+                    let result = crate::tools::ToolResult {
+                        content: vec![crate::types::ContentBlock::Text(content)],
+                        is_error: false,
+                    };
+                    tool.markdown_output(&result)
+                }
+                Err(_) => content,
+            };
+            app.conversation.push(ConversationEntry {
+                role,
+                content: display,
+            });
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
@@ -257,7 +284,7 @@ async fn run_app(
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
 ) -> Result<()> {
-    let mut app = App::new();
+    let mut app = App::new(agent.tools());
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 
@@ -334,7 +361,7 @@ async fn run_app(
                                 };
                                 app.conversation.push(ConversationEntry {
                                     role: ConversationRole::ToolUse,
-                                    content: tool_use_display_content(&name, &input),
+                                    content: app.tool_use_markdown(&name, &input),
                                 });
                                 let sent = app
                                     .confirmation_tx
@@ -420,12 +447,12 @@ mod tests {
 
     #[test]
     fn scroll_offset_starts_at_zero() {
-        let app = App::new();
+        let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         assert_eq!(app.scroll_offset, 0);
     }
 
     fn app_with_content(viewport_height: u16) -> App {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.viewport_height = viewport_height;
         for i in 0..40 {
             app.conversation.push(ConversationEntry {
@@ -463,7 +490,7 @@ mod tests {
 
     #[test]
     fn scroll_down_does_not_underflow() {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.scroll_offset = 5;
         app.scroll_down(20);
         assert_eq!(app.scroll_offset, 0);
@@ -520,7 +547,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let log_path = temp_dir.path().join("test.log");
         let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
         let event = AgentEvent::ToolUseReceived {
             id: "t1".to_string(),
@@ -544,7 +571,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let log_path = temp_dir.path().join("test.log");
         let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
         let event = AgentEvent::ResponseComplete("hello world".to_string());
 
@@ -564,14 +591,14 @@ mod tests {
 
     #[test]
     fn handle_agent_event_with_no_logger_does_not_panic() {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let event = AgentEvent::ResponseComplete("test".to_string());
         handle_agent_event(&mut app, event, None).expect("should not error without logger");
     }
 
     #[test]
     fn tool_use_received_preserves_accumulated_text_as_assistant_entry() {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.current_response = "Let me look into that.".to_string();
 
         let event = AgentEvent::ToolUseReceived {
@@ -610,7 +637,7 @@ mod tests {
 
     #[test]
     fn tool_use_received_with_no_accumulated_text_does_not_add_empty_assistant() {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
         let event = AgentEvent::ToolUseReceived {
             id: "t1".to_string(),
@@ -632,7 +659,7 @@ mod tests {
 
     #[test]
     fn tool_confirmation_required_preserves_accumulated_text_as_assistant_entry() {
-        let mut app = App::new();
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.current_response = "I need to edit the file.".to_string();
 
         let event = AgentEvent::ToolConfirmationRequired {
