@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use turso::{Builder, Connection, Value};
@@ -147,6 +148,36 @@ fn ensure_sessions_dir(dir: &Path) -> Result<()> {
             .with_context(|| format!("Failed to create sessions directory: {}", dir.display()))?;
     }
     Ok(())
+}
+
+fn lock_session(m: &Mutex<Option<Session>>) -> std::sync::MutexGuard<'_, Option<Session>> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub async fn persist_to_session(session: &Mutex<Option<Session>>, message: &Message) {
+    let owned_conn = {
+        let guard = lock_session(session);
+        guard.as_ref().map(|s| s.conn.clone())
+    };
+    if let Some(conn) = owned_conn {
+        let content_json = match serde_json::to_string(&message.content) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let role_str = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        let _ = conn
+            .execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [
+                    turso::Value::Text(role_str.to_string()),
+                    turso::Value::Text(content_json),
+                ],
+            )
+            .await;
+    }
 }
 
 pub fn sessions_dir() -> Result<PathBuf> {
