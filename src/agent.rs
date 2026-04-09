@@ -70,6 +70,19 @@ impl Agent {
         self
     }
 
+    fn history_contains_prefix(&self, prefix: &str) -> bool {
+        lock(&self.history).iter().any(|msg| {
+            msg.role == Role::User
+                && msg.content.iter().any(|block| {
+                    if let ContentBlock::Text(text) = block {
+                        text.starts_with(prefix)
+                    } else {
+                        false
+                    }
+                })
+        })
+    }
+
     pub fn with_context_files(self) -> Result<Self> {
         let files = discover_context_files_from_env()?;
         self.load_context_files(files);
@@ -80,6 +93,10 @@ impl Agent {
     // mechanism if one is added in future.
     pub fn load_skills(&self, skills: &std::collections::HashMap<String, std::path::PathBuf>) {
         if skills.is_empty() {
+            return;
+        }
+
+        if self.history_contains_prefix("The following skills are available") {
             return;
         }
 
@@ -115,6 +132,10 @@ impl Agent {
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
         if files.is_empty() {
+            return;
+        }
+
+        if self.history_contains_prefix("The following context files were loaded") {
             return;
         }
 
@@ -995,6 +1016,57 @@ mod tests {
         assert!(
             agent.history().is_empty(),
             "empty skills map should not add history entry"
+        );
+    }
+
+    #[test]
+    fn load_skills_skips_when_prefix_already_in_history() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config);
+
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "my-skill".to_string(),
+            std::path::PathBuf::from("/fake/path"),
+        );
+        agent.load_skills(&skills);
+        assert_eq!(agent.history().len(), 1, "first call should add entry");
+
+        agent.load_skills(&skills);
+        assert_eq!(
+            agent.history().len(),
+            1,
+            "second call should be deduplicated"
+        );
+    }
+
+    #[test]
+    fn load_context_files_skips_when_prefix_already_in_history() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config);
+
+        let files = vec![crate::context_files::ContextFile {
+            path: std::path::PathBuf::from("/test.md"),
+            content: "hello".to_string(),
+        }];
+        agent.load_context_files(files.clone());
+        assert_eq!(agent.history().len(), 1, "first call should add entry");
+
+        agent.load_context_files(files);
+        assert_eq!(
+            agent.history().len(),
+            1,
+            "second call should be deduplicated"
         );
     }
 }
