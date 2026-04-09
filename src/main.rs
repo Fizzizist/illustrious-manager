@@ -129,9 +129,9 @@ async fn main() -> Result<()> {
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
-            .with_context_files()?
             .with_session(session)
-            .await,
+            .await
+            .with_context_files()?,
     );
     agent.load_skills(&skills);
 
