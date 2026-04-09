@@ -237,7 +237,10 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry { role, content: display });
+            app.conversation.push(ConversationEntry {
+                role,
+                content: display,
+            });
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {

@@ -7,7 +7,9 @@ use illustrious_manager::frontend::tui::{
 
 #[test]
 fn test_tui_tool_call_renders_inline() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
         content: "Run ls".to_string(),
@@ -27,7 +29,9 @@ fn test_tui_tool_call_renders_inline() {
 
 #[test]
 fn test_tui_tool_result_renders_below_invocation() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolUse,
         content: "bash\n  {\"command\":\"ls\"}".to_string(),
@@ -47,7 +51,9 @@ fn test_tui_tool_result_renders_below_invocation() {
 
 #[test]
 fn test_tui_long_tool_result_is_truncated() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     let long_output = "x".repeat(500);
     app.conversation.push(ConversationEntry {
         role: ConversationRole::ToolResult,
@@ -64,7 +70,9 @@ fn test_tui_long_tool_result_is_truncated() {
 
 #[test]
 fn test_tui_confirmation_prompt_state_renders() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
         content: "Write a file".to_string(),
@@ -84,7 +92,9 @@ fn test_tui_confirmation_prompt_state_renders() {
 
 #[test]
 fn test_tui_initial_state() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
 
@@ -96,7 +106,9 @@ fn test_tui_initial_state() {
 
 #[test]
 fn test_tui_with_conversation() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
         content: "Hello!".to_string(),
@@ -117,7 +129,9 @@ fn test_tui_with_conversation() {
 
 #[test]
 fn test_tui_streaming_state() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.conversation.push(ConversationEntry {
         role: ConversationRole::User,
         content: "Tell me a story".to_string(),
@@ -189,7 +203,9 @@ async fn user_message_appears_immediately() {
     let agent = Arc::new(Agent::new(backend, config));
 
     // Create app with user input
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     app.set_input("Hello, world!");
 
     // Submit the message - this should return QUICKLY (< 100ms) without
@@ -232,7 +248,9 @@ async fn user_message_appears_immediately() {
 
 #[test]
 fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     // Each assistant response is 100 chars, which wraps at 78 chars (80 wide - 2 borders)
     let long_response = "x".repeat(100);
     for i in 0..10 {
@@ -263,7 +281,9 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
 
 #[test]
 fn test_tui_scrolled_up_shows_earlier_content() {
-    let mut app = App::new(std::sync::Arc::new(illustrious_manager::tools::ToolRegistry::new()));
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
     for i in 0..20 {
         app.conversation.push(ConversationEntry {
             role: ConversationRole::User,
