@@ -70,6 +70,42 @@ impl App {
         }
     }
 
+    pub fn load_history(&mut self, messages: &[crate::types::Message]) {
+        for message in messages {
+            let role = match message.role {
+                crate::types::Role::User => ConversationRole::User,
+                crate::types::Role::Assistant => ConversationRole::Assistant,
+            };
+            for block in &message.content {
+                let entry = match block {
+                    crate::types::ContentBlock::Text(text) => Some(ConversationEntry {
+                        role: role.clone(),
+                        content: text.clone(),
+                    }),
+                    crate::types::ContentBlock::ToolUse { name, input, .. } => {
+                        Some(ConversationEntry {
+                            role: ConversationRole::ToolUse,
+                            content: self.tool_use_markdown(name, input),
+                        })
+                    }
+                    crate::types::ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => Some(ConversationEntry {
+                        role: if *is_error {
+                            ConversationRole::Error
+                        } else {
+                            ConversationRole::ToolResult
+                        },
+                        content: content.clone(),
+                    }),
+                };
+                if let Some(e) = entry {
+                    self.conversation.push(e);
+                }
+            }
+        }
+    }
+
     pub fn input_text(&self) -> String {
         self.input.text()
     }
@@ -285,6 +321,7 @@ async fn run_app(
     mut logger: Option<Logger>,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
+    app.load_history(&agent.history());
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 
@@ -687,5 +724,83 @@ mod tests {
             app.current_response.is_empty(),
             "current_response should be cleared after saving"
         );
+    }
+
+    #[test]
+    fn load_history_populates_conversation_from_messages() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+            Message::text(Role::User, "how are you?".to_string()),
+            Message::text(Role::Assistant, "doing well".to_string()),
+        ];
+
+        app.load_history(&messages);
+
+        assert_eq!(app.conversation.len(), 4);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[0].content, "hello");
+        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[1].content, "hi there");
+        assert_eq!(app.conversation[2].role, ConversationRole::User);
+        assert_eq!(app.conversation[2].content, "how are you?");
+        assert_eq!(app.conversation[3].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[3].content, "doing well");
+    }
+
+    #[test]
+    fn load_history_with_tool_use_and_result_blocks() {
+        use crate::types::{ContentBlock, Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::text(Role::User, "run ls".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text("let me check".to_string()),
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "file.txt".to_string(),
+                    is_error: false,
+                }],
+            },
+            Message::text(Role::Assistant, "here is the file".to_string()),
+        ];
+
+        app.load_history(&messages);
+
+        assert_eq!(app.conversation.len(), 5);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[0].content, "run ls");
+        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[1].content, "let me check");
+        assert_eq!(app.conversation[2].role, ConversationRole::ToolUse);
+        assert!(app.conversation[2].content.contains("bash"));
+        assert_eq!(app.conversation[3].role, ConversationRole::ToolResult);
+        assert_eq!(app.conversation[3].content, "file.txt");
+        assert_eq!(app.conversation[4].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[4].content, "here is the file");
+    }
+
+    #[test]
+    fn load_history_with_empty_messages_does_nothing() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.load_history(&[]);
+        assert!(app.conversation.is_empty());
     }
 }
