@@ -60,6 +60,28 @@ pub trait Tool: Send + Sync {
     fn is_write_tool(&self) -> bool {
         false
     }
+
+    fn markdown_input(&self, input: &Value) -> String {
+        format!(
+            "```json\n{}\n```",
+            serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".to_string())
+        )
+    }
+
+    fn markdown_output(&self, result: &ToolResult) -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|b| {
+                if let crate::types::ContentBlock::Text(s) = b {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Registry for tool discovery and execution
@@ -357,5 +379,27 @@ mod tests {
             tool_name: "my_tool".to_string(),
         };
         assert_eq!(format!("{}", err), "Tool 'my_tool' already registered");
+    }
+
+    #[test]
+    fn default_markdown_input_formats_as_json_code_block() {
+        let tool = MockTool::new("test", "A test tool");
+        let input = serde_json::json!({"arg1": "value"});
+        let md = tool.markdown_input(&input);
+        assert!(md.contains("```json"), "should wrap in json code block");
+        assert!(md.contains("arg1"), "should contain the field name");
+    }
+
+    #[test]
+    fn default_markdown_output_returns_text_content() {
+        let tool = MockTool::new("test", "A test tool");
+        let result = tool
+            .execute(serde_json::json!({"arg1": "hello"}))
+            .expect("should succeed");
+        let md = tool.markdown_output(&result);
+        assert!(
+            md.contains("executed with:"),
+            "should contain execution result text"
+        );
     }
 }

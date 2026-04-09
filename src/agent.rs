@@ -86,6 +86,10 @@ impl Agent {
         lock(&self.history).push(Message::text(Role::User, content));
     }
 
+    pub fn tools(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.tools)
+    }
+
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
     }
