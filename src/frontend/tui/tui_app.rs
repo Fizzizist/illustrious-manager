@@ -20,7 +20,7 @@ use super::conversation_area::{
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
-use crate::types::{AgentEvent, ConfirmationResponse};
+use crate::types::{AgentEvent, ConfirmationResponse, ContentBlock, Message, Role};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
@@ -66,6 +66,44 @@ impl App {
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+        }
+    }
+
+    pub fn restore_history(&mut self, messages: &[Message]) {
+        for message in messages {
+            let role = match message.role {
+                Role::User => ConversationRole::User,
+                Role::Assistant => ConversationRole::Assistant,
+            };
+            for block in &message.content {
+                match block {
+                    ContentBlock::Text(text) => {
+                        self.conversation.push(ConversationEntry {
+                            role: role.clone(),
+                            content: text.clone(),
+                        });
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        self.conversation.push(ConversationEntry {
+                            role: ConversationRole::ToolUse,
+                            content: tool_use_display_content(name, input),
+                        });
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let result_role = if *is_error {
+                            ConversationRole::Error
+                        } else {
+                            ConversationRole::ToolResult
+                        };
+                        self.conversation.push(ConversationEntry {
+                            role: result_role,
+                            content: content.clone(),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -260,6 +298,7 @@ async fn run_app(
     session: crate::session::Session,
 ) -> Result<()> {
     let mut app = App::new();
+    app.restore_history(&agent.history());
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 
@@ -666,5 +705,87 @@ mod tests {
             app.current_response.is_empty(),
             "current_response should be cleared after saving"
         );
+    }
+
+    #[test]
+    fn restore_history_with_text_messages() {
+        let mut app = App::new();
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+            Message::text(Role::User, "how are you?".to_string()),
+        ];
+
+        app.restore_history(&messages);
+
+        assert_eq!(app.conversation.len(), 3);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[0].content, "hello");
+        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[1].content, "hi there");
+        assert_eq!(app.conversation[2].role, ConversationRole::User);
+        assert_eq!(app.conversation[2].content, "how are you?");
+    }
+
+    #[test]
+    fn restore_history_with_tool_use_and_result() {
+        let mut app = App::new();
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Text("Let me check.".to_string()),
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "file.txt".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+
+        app.restore_history(&messages);
+
+        assert_eq!(app.conversation.len(), 3);
+        assert_eq!(app.conversation[0].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[0].content, "Let me check.");
+        assert_eq!(app.conversation[1].role, ConversationRole::ToolUse);
+        assert!(app.conversation[1].content.contains("bash"));
+        assert_eq!(app.conversation[2].role, ConversationRole::ToolResult);
+        assert_eq!(app.conversation[2].content, "file.txt");
+    }
+
+    #[test]
+    fn restore_history_with_error_tool_result() {
+        let mut app = App::new();
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                content: "command failed".to_string(),
+                is_error: true,
+            }],
+        }];
+
+        app.restore_history(&messages);
+
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].role, ConversationRole::Error);
+        assert_eq!(app.conversation[0].content, "command failed");
+    }
+
+    #[test]
+    fn restore_history_with_empty_messages_does_nothing() {
+        let mut app = App::new();
+        app.restore_history(&[]);
+        assert!(app.conversation.is_empty());
     }
 }
