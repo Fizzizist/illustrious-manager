@@ -156,6 +156,8 @@ async fn main() -> Result<()> {
         }
     }
 
+    eprintln!("session: {}", session_id);
+
     Ok(())
 }
 
