@@ -1069,4 +1069,56 @@ mod tests {
             "second call should be deduplicated"
         );
     }
+
+    #[tokio::test]
+    async fn context_files_preserved_after_session_restore() {
+        use crate::context_files::ContextFile;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = Session::create(dir.path(), None)
+            .await
+            .expect("create session");
+        session
+            .insert_message(&Message::text(Role::User, "previous message".to_string()))
+            .await
+            .expect("insert");
+
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let agent = Agent::new(Box::new(backend), config)
+            .with_session(session)
+            .await;
+
+        assert_eq!(
+            agent.history().len(),
+            1,
+            "session history should be restored"
+        );
+
+        let files = vec![ContextFile {
+            path: std::path::PathBuf::from("/test.md"),
+            content: "hello".to_string(),
+        }];
+        agent.load_context_files(files);
+
+        assert_eq!(
+            agent.history().len(),
+            2,
+            "context files should be added on top of restored session history"
+        );
+
+        let context_msg = &agent.history()[1];
+        match &context_msg.content[0] {
+            ContentBlock::Text(t) => assert!(
+                t.contains("The following context files were loaded"),
+                "context file message should have expected prefix"
+            ),
+            _ => panic!("expected Text block"),
+        }
+    }
 }
