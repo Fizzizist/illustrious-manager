@@ -203,49 +203,55 @@ impl Session {
         Ok(messages)
     }
 
-    pub async fn save_history(&self, messages: &[Message]) -> Result<()> {
-        let mut conn = self
+    pub async fn save_message(&self, message: &Message) -> Result<()> {
+        let conn = self
             .db
             .connect()
             .context("Failed to connect to session DB")?;
 
-        let tx = conn
-            .transaction()
-            .await
-            .context("Failed to begin transaction")?;
+        let role_str = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
 
-        tx.execute("DELETE FROM conversation", ())
-            .await
-            .context("Failed to clear conversation history")?;
+        let content_json = serde_json::to_string(&message.content)
+            .context("Failed to serialize message content")?;
 
-        for message in messages {
-            let role_str = match message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            };
-
-            let content_json = serde_json::to_string(&message.content)
-                .context("Failed to serialize message content")?;
-
-            tx.execute(
-                INSERT_SQL,
-                turso::params::Params::Positional(vec![
-                    Value::Text(role_str.to_string()),
-                    Value::Text(content_json),
-                ]),
-            )
-            .await
-            .context("Failed to insert message into conversation")?;
-        }
-
-        tx.commit()
-            .await
-            .context("Failed to commit conversation history")?;
+        conn.execute(
+            INSERT_SQL,
+            turso::params::Params::Positional(vec![
+                Value::Text(role_str.to_string()),
+                Value::Text(content_json),
+            ]),
+        )
+        .await
+        .context("Failed to insert message into conversation")?;
 
         conn.cacheflush()
             .context("Failed to flush session DB to disk")?;
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn history_count(&self) -> Result<usize> {
+        let conn = self
+            .db
+            .connect()
+            .context("Failed to connect to session DB")?;
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM conversation", ())
+            .await
+            .context("Failed to count rows")?;
+        if let Some(row) = rows.next().await.context("Failed to fetch count")? {
+            let val = row.get_value(0).context("Failed to read count")?;
+            match val {
+                Value::Integer(n) => Ok(n as usize),
+                _ => bail!("Expected INTEGER for COUNT(*)"),
+            }
+        } else {
+            Ok(0)
+        }
     }
 }
 
@@ -336,7 +342,7 @@ mod tests {
 
         let msg = Message::text(Role::User, "Hello, world!".to_string());
         session
-            .save_history(&[msg])
+            .save_message(&msg)
             .await
             .expect("save should succeed");
 
@@ -364,10 +370,12 @@ mod tests {
             Message::text(Role::User, "Tell me more.".to_string()),
         ];
 
-        session
-            .save_history(&messages)
-            .await
-            .expect("save should succeed");
+        for msg in &messages {
+            session
+                .save_message(msg)
+                .await
+                .expect("save should succeed");
+        }
 
         let loaded = session.load_history().await.expect("load should succeed");
         assert_eq!(loaded.len(), 3);
@@ -382,7 +390,7 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let messages = vec![Message {
+        let message = Message {
             role: Role::Assistant,
             content: vec![
                 ContentBlock::Text("Running ls".to_string()),
@@ -392,10 +400,10 @@ mod tests {
                     input: serde_json::json!({"command": "ls -la"}),
                 },
             ],
-        }];
+        };
 
         session
-            .save_history(&messages)
+            .save_message(&message)
             .await
             .expect("save should succeed");
         let loaded = session.load_history().await.expect("load should succeed");
@@ -423,17 +431,17 @@ mod tests {
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let messages = vec![Message {
+        let message = Message {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool-1".to_string(),
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: false,
             }],
-        }];
+        };
 
         session
-            .save_history(&messages)
+            .save_message(&message)
             .await
             .expect("save should succeed");
         let loaded = session.load_history().await.expect("load should succeed");
@@ -472,9 +480,9 @@ mod tests {
 
         {
             let session = create_test_session(&tmp, &session_id).await;
-            let messages = vec![Message::text(Role::User, "persistent message".to_string())];
+            let msg = Message::text(Role::User, "persistent message".to_string());
             session
-                .save_history(&messages)
+                .save_message(&msg)
                 .await
                 .expect("save should succeed");
         }
@@ -492,52 +500,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn save_history_overwrites_existing_messages() {
+    async fn save_message_appends_to_existing() {
         let tmp = TempDir::new().expect("temp dir");
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg1 = vec![Message::text(Role::User, "first message".to_string())];
-        session.save_history(&msg1).await.expect("save msg1");
+        let msg1 = Message::text(Role::User, "first message".to_string());
+        session.save_message(&msg1).await.expect("save msg1");
 
-        let new_messages = vec![
-            Message::text(Role::User, "replaced user".to_string()),
-            Message::text(Role::Assistant, "replaced assistant".to_string()),
-        ];
-
-        session
-            .save_history(&new_messages)
-            .await
-            .expect("save_history should succeed");
+        let msg2 = Message::text(Role::User, "second message".to_string());
+        let msg3 = Message::text(Role::Assistant, "response".to_string());
+        session.save_message(&msg2).await.expect("save msg2");
+        session.save_message(&msg3).await.expect("save msg3");
 
         let loaded = session.load_history().await.expect("load should succeed");
-        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.len(), 3);
         assert_eq!(
             loaded[0].content,
-            vec![ContentBlock::Text("replaced user".to_string())]
+            vec![ContentBlock::Text("first message".to_string())]
         );
         assert_eq!(
             loaded[1].content,
-            vec![ContentBlock::Text("replaced assistant".to_string())]
+            vec![ContentBlock::Text("second message".to_string())]
+        );
+        assert_eq!(
+            loaded[2].content,
+            vec![ContentBlock::Text("response".to_string())]
         );
     }
 
     #[tokio::test]
-    async fn save_history_with_empty_vec_clears_all() {
+    async fn history_count_matches_saved_messages() {
         let tmp = TempDir::new().expect("temp dir");
         let session_id = test_session_id();
         let session = create_test_session(&tmp, &session_id).await;
 
-        let msg = vec![Message::text(Role::User, "to be cleared".to_string())];
-        session.save_history(&msg).await.expect("save");
+        assert_eq!(session.history_count().await.expect("count"), 0);
 
         session
-            .save_history(&[])
+            .save_message(&Message::text(Role::User, "one".to_string()))
             .await
-            .expect("save_history with empty vec");
+            .expect("save");
+        assert_eq!(session.history_count().await.expect("count"), 1);
 
-        let loaded = session.load_history().await.expect("load");
-        assert!(loaded.is_empty());
+        session
+            .save_message(&Message::text(Role::Assistant, "two".to_string()))
+            .await
+            .expect("save");
+        assert_eq!(session.history_count().await.expect("count"), 2);
     }
 
     #[tokio::test]
@@ -571,10 +581,12 @@ mod tests {
                 Message::text(Role::Assistant, "There is one file: file1.txt".to_string()),
             ];
 
-            session
-                .save_history(&messages)
-                .await
-                .expect("save should succeed");
+            for msg in &messages {
+                session
+                    .save_message(msg)
+                    .await
+                    .expect("save should succeed");
+            }
         }
 
         {
@@ -612,9 +624,9 @@ mod tests {
             .await
             .expect("open_or_create");
 
-        let messages = vec![Message::text(Role::User, "hello".to_string())];
+        let msg = Message::text(Role::User, "hello".to_string());
         session
-            .save_history(&messages)
+            .save_message(&msg)
             .await
             .expect("save should succeed");
 
@@ -628,9 +640,9 @@ mod tests {
 
         {
             let session = create_test_session(&tmp, &session_id).await;
-            let messages = vec![Message::text(Role::User, "existing data".to_string())];
+            let msg = Message::text(Role::User, "existing data".to_string());
             session
-                .save_history(&messages)
+                .save_message(&msg)
                 .await
                 .expect("save should succeed");
         }

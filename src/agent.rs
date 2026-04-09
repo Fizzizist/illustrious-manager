@@ -7,6 +7,7 @@ use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
+use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -26,6 +27,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
+    session: Option<Arc<Session>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -44,7 +46,13 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
+            session: None,
         }
+    }
+
+    pub fn with_session(mut self, session: Arc<Session>) -> Self {
+        self.session = Some(session);
+        self
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -112,18 +120,19 @@ impl Agent {
         guard.extend(messages);
     }
 
-    pub async fn save_history_to_session(&self, session: &crate::session::Session) -> Result<()> {
-        let history = self.history();
-        session.save_history(&history).await
-    }
-
     pub async fn send(
         &self,
         input: String,
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
-        lock(&self.history).push(Message::text(Role::User, input));
+        let user_msg = Message::text(Role::User, input);
+        lock(&self.history).push(user_msg.clone());
+        if let Some(session) = &self.session
+            && let Err(e) = session.save_message(&user_msg).await
+        {
+            eprintln!("Warning: failed to save message to session: {e}");
+        }
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         let history_arc = Arc::clone(&self.history);
@@ -132,10 +141,24 @@ impl Agent {
         let config = self.config.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
+        let session = self.session.clone();
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
             let mut confirmation_rx = confirmation_rx;
+
+            async fn push_and_save(
+                history: &Arc<Mutex<Vec<Message>>>,
+                session: &Option<Arc<Session>>,
+                message: Message,
+            ) {
+                lock(history).push(message.clone());
+                if let Some(session) = session
+                    && let Err(e) = session.save_message(&message).await
+                {
+                    eprintln!("Warning: failed to save message to session: {e}");
+                }
+            }
 
             'outer: loop {
                 if iterations >= max_iterations {
@@ -210,10 +233,15 @@ impl Agent {
                     if !text_accumulated.is_empty() {
                         content.push(ContentBlock::Text(text_accumulated.clone()));
                     }
-                    lock(&history_arc).push(Message {
-                        role: Role::Assistant,
-                        content,
-                    });
+                    push_and_save(
+                        &history_arc,
+                        &session,
+                        Message {
+                            role: Role::Assistant,
+                            content,
+                        },
+                    )
+                    .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -228,14 +256,24 @@ impl Agent {
                 )
                 .await;
 
-                lock(&history_arc).push(Message {
-                    role: Role::Assistant,
-                    content: assistant_content,
-                });
-                lock(&history_arc).push(Message {
-                    role: Role::User,
-                    content: tool_result_blocks,
-                });
+                push_and_save(
+                    &history_arc,
+                    &session,
+                    Message {
+                        role: Role::Assistant,
+                        content: assistant_content,
+                    },
+                )
+                .await;
+                push_and_save(
+                    &history_arc,
+                    &session,
+                    Message {
+                        role: Role::User,
+                        content: tool_result_blocks,
+                    },
+                )
+                .await;
             }
         });
 

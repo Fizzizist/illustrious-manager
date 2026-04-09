@@ -116,16 +116,18 @@ async fn main() -> Result<()> {
         tools: registry.definitions(),
     };
 
+    let session_id = cli.session_id.unwrap_or_else(session::generate_session_id);
+    let session = Arc::new(session::Session::open_or_create(&session_id).await?);
+
     let agent = Arc::new(
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
-            .with_context_files()?,
+            .with_context_files()?
+            .with_session(session.clone()),
     );
     agent.load_skills(&skills);
 
-    let session_id = cli.session_id.unwrap_or_else(session::generate_session_id);
-    let session = session::Session::open_or_create(&session_id).await?;
     let history = session.load_history().await?;
     agent.load_history(history);
 
@@ -149,10 +151,9 @@ async fn main() -> Result<()> {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
             frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
-            agent.save_history_to_session(&session).await?;
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger, session).await?;
+            frontend::tui::run(agent.clone(), initial_prompt, logger).await?;
         }
     }
 
