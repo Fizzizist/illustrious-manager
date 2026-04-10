@@ -112,7 +112,7 @@ impl Agent {
             content.push_str(&format!("- {}: {}\n", name, desc));
         }
 
-        let msg = Message::text(Role::User, content);
+        let msg = Message::system(Role::User, content);
         lock(&self.history).push(msg.clone());
         let session = Arc::clone(&self.session);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -148,7 +148,7 @@ impl Agent {
             ));
         }
 
-        let msg = Message::text(Role::User, content);
+        let msg = Message::system(Role::User, content);
         lock(&self.history).push(msg.clone());
         let session = Arc::clone(&self.session);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -258,6 +258,7 @@ impl Agent {
                     let assistant_msg = Message {
                         role: Role::Assistant,
                         content,
+                        hidden: false,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
                     persist_to_session(&session, &assistant_msg).await;
@@ -278,6 +279,7 @@ impl Agent {
                 let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
+                    hidden: false,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
                 persist_to_session(&session, &assistant_msg).await;
@@ -285,6 +287,7 @@ impl Agent {
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
+                    hidden: false,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
                 persist_to_session(&session, &tool_result_msg).await;
@@ -988,6 +991,7 @@ mod tests {
 
         let history = agent.history();
         assert_eq!(history.len(), 1);
+        assert!(history[0].hidden, "skill message should be hidden");
         match &history[0].content[0] {
             ContentBlock::Text(text) => {
                 assert!(
@@ -1068,6 +1072,27 @@ mod tests {
             1,
             "second call should be deduplicated"
         );
+    }
+
+    #[test]
+    fn load_context_files_creates_hidden_message() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config);
+
+        let files = vec![crate::context_files::ContextFile {
+            path: std::path::PathBuf::from("/test.md"),
+            content: "hello".to_string(),
+        }];
+        agent.load_context_files(files);
+
+        let history = agent.history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].hidden, "context file message should be hidden");
     }
 
     #[tokio::test]
