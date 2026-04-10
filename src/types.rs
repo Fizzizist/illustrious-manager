@@ -171,8 +171,6 @@ impl<'de> Deserialize<'de> for ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
-    #[serde(default)]
-    pub hidden: bool,
 }
 
 impl Message {
@@ -180,15 +178,6 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text(content)],
-            hidden: false,
-        }
-    }
-
-    pub fn system(role: Role, content: String) -> Self {
-        Self {
-            role,
-            content: vec![ContentBlock::Text(content)],
-            hidden: true,
         }
     }
 }
@@ -295,7 +284,6 @@ mod tests {
         let original = Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello, world!".to_string())],
-            hidden: false,
         };
 
         let json = serde_json::to_string(&original).expect("Message should serialize to JSON");
@@ -413,7 +401,6 @@ mod tests {
         let msg = Message::text(Role::User, "Hello".to_string());
         assert_eq!(msg.role, Role::User);
         assert_eq!(msg.content.len(), 1);
-        assert!(!msg.hidden, "text() should produce non-hidden messages");
         assert!(matches!(msg.content[0], ContentBlock::Text(_)));
         if let ContentBlock::Text(text) = &msg.content[0] {
             assert_eq!(text, "Hello");
@@ -421,37 +408,9 @@ mod tests {
     }
 
     #[test]
-    fn message_system_constructor_creates_hidden_message() {
-        let msg = Message::system(Role::User, "system context".to_string());
-        assert_eq!(msg.role, Role::User);
-        assert!(msg.hidden, "system() should produce hidden messages");
-        assert_eq!(msg.content.len(), 1);
-        if let ContentBlock::Text(text) = &msg.content[0] {
-            assert_eq!(text, "system context");
-        }
-    }
-
-    #[test]
-    fn message_hidden_field_defaults_to_false_on_deserialize() {
-        let json = r#"{"role":"user","content":["Hello"]}"#;
-        let msg: Message = serde_json::from_str(json).expect("should deserialize");
-        assert!(!msg.hidden, "missing hidden should default to false");
-    }
-
-    #[test]
-    fn message_hidden_field_serializes_and_deserializes() {
-        let msg = Message::system(Role::User, "test".to_string());
-        let json = serde_json::to_string(&msg).expect("serialize");
-        assert!(json.contains("\"hidden\":true"), "hidden should serialize");
-        let back: Message = serde_json::from_str(&json).expect("deserialize");
-        assert!(back.hidden);
-    }
-
-    #[test]
     fn message_with_multiple_content_blocks_serializes_correctly() {
         let msg = Message {
             role: Role::Assistant,
-            hidden: false,
             content: vec![
                 ContentBlock::Text("Thinking...".to_string()),
                 ContentBlock::ToolUse {
