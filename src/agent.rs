@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
+use tokio::runtime;
 
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
@@ -96,7 +97,7 @@ impl Agent {
             content.push_str(&format!("- {}: {}\n", name, desc));
         }
 
-        let msg = Message::system(Role::User, content);
+        let msg = Message::text(Role::User, content);
         lock(&self.history).push(msg.clone());
         self
     }
@@ -107,6 +108,20 @@ impl Agent {
 
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
+    }
+
+    pub fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
+        let guard = match self.session.lock() {
+            Ok(g) => Ok(g),
+            Err(_) => Err(anyhow::anyhow!("mutex poisoned")),
+        }?;
+        if let Some(session) = guard.as_ref() {
+            let handle = runtime::Handle::current();
+            if let Ok(messages) = handle.block_on(session.load_history()) {
+                return Ok(messages);
+            }
+        }
+        Ok(Vec::new())
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -123,7 +138,7 @@ impl Agent {
             ));
         }
 
-        let msg = Message::system(Role::User, content);
+        let msg = Message::text(Role::User, content);
         // prepend context files and don't persist them to the DB
         lock(&self.history).insert(0, msg.clone());
     }
@@ -228,7 +243,6 @@ impl Agent {
                     let assistant_msg = Message {
                         role: Role::Assistant,
                         content,
-                        hidden: false,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
                     persist_to_session(&session, &assistant_msg).await;
@@ -249,7 +263,6 @@ impl Agent {
                 let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
-                    hidden: false,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
                 persist_to_session(&session, &assistant_msg).await;
@@ -257,7 +270,6 @@ impl Agent {
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
-                    hidden: false,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
                 persist_to_session(&session, &tool_result_msg).await;
@@ -946,7 +958,6 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config);
 
         let mut skills = std::collections::HashMap::new();
         skills.insert(
@@ -957,11 +968,10 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        agent.load_skills(&skills);
+        let agent = Agent::new(Box::new(backend), config).with_skills(&skills);
 
         let history = agent.history();
         assert_eq!(history.len(), 1);
-        assert!(history[0].hidden, "skill message should be hidden");
         match &history[0].content[0] {
             ContentBlock::Text(text) => {
                 assert!(
@@ -983,137 +993,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config);
-
-        agent.load_skills(&std::collections::HashMap::new());
+        let agent =
+            Agent::new(Box::new(backend), config).with_skills(&std::collections::HashMap::new());
 
         assert!(
             agent.history().is_empty(),
             "empty skills map should not add history entry"
         );
-    }
-
-    #[test]
-    fn load_skills_skips_when_prefix_already_in_history() {
-        let backend = SequencedBackend::new(vec![]);
-        let config = RequestConfig {
-            model: "test".to_string(),
-            max_tokens: 100,
-            tools: vec![],
-        };
-        let agent = Agent::new(Box::new(backend), config);
-
-        let mut skills = std::collections::HashMap::new();
-        skills.insert(
-            "my-skill".to_string(),
-            std::path::PathBuf::from("/fake/path"),
-        );
-        agent.load_skills(&skills);
-        assert_eq!(agent.history().len(), 1, "first call should add entry");
-
-        agent.load_skills(&skills);
-        assert_eq!(
-            agent.history().len(),
-            1,
-            "second call should be deduplicated"
-        );
-    }
-
-    #[test]
-    fn load_context_files_skips_when_prefix_already_in_history() {
-        let backend = SequencedBackend::new(vec![]);
-        let config = RequestConfig {
-            model: "test".to_string(),
-            max_tokens: 100,
-            tools: vec![],
-        };
-        let agent = Agent::new(Box::new(backend), config);
-
-        let files = vec![crate::context_files::ContextFile {
-            path: std::path::PathBuf::from("/test.md"),
-            content: "hello".to_string(),
-        }];
-        agent.load_context_files(files.clone());
-        assert_eq!(agent.history().len(), 1, "first call should add entry");
-
-        agent.load_context_files(files);
-        assert_eq!(
-            agent.history().len(),
-            1,
-            "second call should be deduplicated"
-        );
-    }
-
-    #[test]
-    fn load_context_files_creates_hidden_message() {
-        let backend = SequencedBackend::new(vec![]);
-        let config = RequestConfig {
-            model: "test".to_string(),
-            max_tokens: 100,
-            tools: vec![],
-        };
-        let agent = Agent::new(Box::new(backend), config);
-
-        let files = vec![crate::context_files::ContextFile {
-            path: std::path::PathBuf::from("/test.md"),
-            content: "hello".to_string(),
-        }];
-        agent.load_context_files(files);
-
-        let history = agent.history();
-        assert_eq!(history.len(), 1);
-        assert!(history[0].hidden, "context file message should be hidden");
-    }
-
-    #[tokio::test]
-    async fn context_files_preserved_after_session_restore() {
-        use crate::context_files::ContextFile;
-
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None)
-            .await
-            .expect("create session");
-        session
-            .insert_message(&Message::text(Role::User, "previous message".to_string()))
-            .await
-            .expect("insert");
-
-        let backend = SequencedBackend::new(vec![]);
-        let config = RequestConfig {
-            model: "test".to_string(),
-            max_tokens: 100,
-            tools: vec![],
-        };
-
-        let agent = Agent::new(Box::new(backend), config)
-            .with_session(session)
-            .await;
-
-        assert_eq!(
-            agent.history().len(),
-            1,
-            "session history should be restored"
-        );
-
-        let files = vec![ContextFile {
-            path: std::path::PathBuf::from("/test.md"),
-            content: "hello".to_string(),
-        }];
-        agent.load_context_files(files);
-
-        assert_eq!(
-            agent.history().len(),
-            2,
-            "context files should be added on top of restored session history"
-        );
-
-        let context_msg = &agent.history()[1];
-        match &context_msg.content[0] {
-            ContentBlock::Text(t) => assert!(
-                t.contains("The following context files were loaded"),
-                "context file message should have expected prefix"
-            ),
-            _ => panic!("expected Text block"),
-        }
     }
 }

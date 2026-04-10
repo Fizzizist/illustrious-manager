@@ -10,12 +10,8 @@ const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    hidden INTEGER NOT NULL DEFAULT 0
+    content TEXT NOT NULL
 );";
-
-const MIGRATION: &str = "\
-ALTER TABLE conversation ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0;";
 
 pub struct Session {
     pub id: String,
@@ -43,7 +39,6 @@ impl Session {
         conn.execute(SCHEMA, ())
             .await
             .context("Failed to create conversation table")?;
-        let _ = conn.execute(MIGRATION, ()).await;
 
         Ok(Self { id, conn })
     }
@@ -62,7 +57,6 @@ impl Session {
             .await
             .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
         let conn = db.connect()?;
-        let _ = conn.execute(MIGRATION, ()).await;
 
         Ok(Self {
             id: session_id.to_string(),
@@ -86,10 +80,7 @@ impl Session {
     pub async fn load_history(&self) -> Result<Vec<Message>> {
         let mut rows = self
             .conn
-            .query(
-                "SELECT role, content, hidden FROM conversation ORDER BY id ASC",
-                (),
-            )
+            .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
             .await
             .context("Failed to query conversation history")?;
 
@@ -103,10 +94,6 @@ impl Session {
                 Value::Text(s) => s,
                 other => bail!("Unexpected content type in DB: {:?}", other),
             };
-            let hidden = match row.get_value(2)? {
-                Value::Integer(n) => n != 0,
-                _ => false,
-            };
 
             let role = match role_str.as_str() {
                 "user" => Role::User,
@@ -117,11 +104,7 @@ impl Session {
             let content: Vec<ContentBlock> =
                 serde_json::from_str(&content_str).context("Failed to deserialize content")?;
 
-            messages.push(Message {
-                role,
-                content,
-                hidden,
-            });
+            messages.push(Message { role, content });
         }
 
         Ok(messages)
@@ -157,14 +140,9 @@ async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Resul
         Role::User => "user",
         Role::Assistant => "assistant",
     };
-    let hidden_int = if message.hidden { 1 } else { 0 };
     conn.execute(
-        "INSERT INTO conversation (role, content, hidden) VALUES (?1, ?2, ?3)",
-        [
-            Value::Text(role_str.to_string()),
-            Value::Text(content_json),
-            Value::Integer(hidden_int),
-        ],
+        "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+        [Value::Text(role_str.to_string()), Value::Text(content_json)],
     )
     .await
     .context("Failed to insert message into session")?;
@@ -358,7 +336,6 @@ mod tests {
 
         let msg = Message {
             role: Role::Assistant,
-            hidden: false,
             content: vec![
                 ContentBlock::Text("let me check".to_string()),
                 ContentBlock::ToolUse {
@@ -390,7 +367,6 @@ mod tests {
 
         let msg = Message {
             role: Role::User,
-            hidden: false,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
                 content: "file.txt".to_string(),
@@ -413,36 +389,6 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
-    }
-
-    #[tokio::test]
-    async fn hidden_message_is_persisted_and_restored() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
-
-        let msg = Message::system(Role::User, "hidden context".to_string());
-        session.insert_message(&msg).await.expect("insert");
-
-        let history = session.load_history().await.expect("load");
-        assert_eq!(history.len(), 1);
-        assert!(history[0].hidden, "hidden flag should be preserved");
-        match &history[0].content[0] {
-            ContentBlock::Text(t) => assert_eq!(t, "hidden context"),
-            _ => panic!("expected text"),
-        }
-    }
-
-    #[tokio::test]
-    async fn non_hidden_message_restored_as_visible() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
-
-        let msg = Message::text(Role::User, "visible message".to_string());
-        session.insert_message(&msg).await.expect("insert");
-
-        let history = session.load_history().await.expect("load");
-        assert_eq!(history.len(), 1);
-        assert!(!history[0].hidden, "regular message should not be hidden");
     }
 
     #[tokio::test]

@@ -341,7 +341,6 @@ mod tests {
             tools: vec![],
         };
         let messages = vec![Message {
-            hidden: false,
             role: Role::User,
             content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
         }];
@@ -363,12 +362,10 @@ mod tests {
         };
         let messages = vec![
             Message {
-                hidden: false,
                 role: Role::User,
                 content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
             },
             Message {
-                hidden: false,
                 role: Role::Assistant,
                 content: vec![crate::types::ContentBlock::Text("Hi there!".to_string())],
             },
@@ -398,7 +395,6 @@ mod tests {
             tools: vec![],
         };
         let messages = vec![Message {
-            hidden: false,
             role: Role::User,
             content: vec![crate::types::ContentBlock::Text(
                 "read the test.txt file".to_string(),
@@ -495,7 +491,6 @@ mod tests {
             ],
         };
         let messages = vec![Message {
-            hidden: false,
             role: Role::User,
             content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
         }];
@@ -540,7 +535,6 @@ mod tests {
             tools: vec![],
         };
         let messages = vec![Message {
-            hidden: false,
             role: Role::User,
             content: vec![crate::types::ContentBlock::Text("Hello".to_string())],
         }];
@@ -764,12 +758,10 @@ mod tests {
         };
         let messages = vec![
             Message {
-                hidden: false,
                 role: Role::User,
                 content: vec![ContentBlock::Text("run ls".to_string())],
             },
             Message {
-                hidden: false,
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "tool_0".to_string(),
@@ -811,7 +803,6 @@ mod tests {
             tools: vec![],
         };
         let messages = vec![Message {
-            hidden: false,
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool_0".to_string(),
@@ -838,12 +829,10 @@ mod tests {
         };
         let messages = vec![
             Message {
-                hidden: false,
                 role: Role::User,
                 content: vec![ContentBlock::Text("run ls".to_string())],
             },
             Message {
-                hidden: false,
                 role: Role::Assistant,
                 content: vec![ContentBlock::ToolUse {
                     id: "tool_0".to_string(),
@@ -852,7 +841,6 @@ mod tests {
                 }],
             },
             Message {
-                hidden: false,
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool_0".to_string(),
