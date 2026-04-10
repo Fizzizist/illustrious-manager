@@ -72,6 +72,9 @@ impl App {
 
     pub fn load_history(&mut self, messages: &[crate::types::Message]) {
         for message in messages {
+            if message.hidden {
+                continue;
+            }
             let role = match message.role {
                 crate::types::Role::User => ConversationRole::User,
                 crate::types::Role::Assistant => ConversationRole::Assistant,
@@ -762,6 +765,7 @@ mod tests {
             Message::text(Role::User, "run ls".to_string()),
             Message {
                 role: Role::Assistant,
+                hidden: false,
                 content: vec![
                     ContentBlock::Text("let me check".to_string()),
                     ContentBlock::ToolUse {
@@ -773,6 +777,7 @@ mod tests {
             },
             Message {
                 role: Role::User,
+                hidden: false,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".to_string(),
                     content: "file.txt".to_string(),
@@ -801,6 +806,43 @@ mod tests {
     fn load_history_with_empty_messages_does_nothing() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
+        assert!(app.conversation.is_empty());
+    }
+
+    #[test]
+    fn load_history_skips_hidden_messages() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::system(Role::User, "system context".to_string()),
+            Message::text(Role::User, "hello".to_string()),
+            Message::system(Role::User, "skill context".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+        ];
+
+        app.load_history(&messages);
+
+        assert_eq!(app.conversation.len(), 2);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[0].content, "hello");
+        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[1].content, "hi there");
+    }
+
+    #[test]
+    fn load_history_only_hidden_messages_produces_empty_conversation() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::system(Role::User, "context files loaded".to_string()),
+            Message::system(Role::User, "skills available".to_string()),
+        ];
+
+        app.load_history(&messages);
         assert!(app.conversation.is_empty());
     }
 }
