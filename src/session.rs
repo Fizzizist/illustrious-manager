@@ -200,9 +200,7 @@ mod tests {
     #[tokio::test]
     async fn create_session_initializes_db_with_schema() {
         let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None)
-            .await
-            .expect("create session");
+        let session = Session::new(None).await.expect("create session");
 
         let db_path = dir.path().join(format!("{}.db", session.id));
         assert!(db_path.exists(), "DB file should be created");
@@ -219,7 +217,7 @@ mod tests {
     async fn create_session_with_custom_id_uses_that_id() {
         let dir = TempDir::new().expect("temp dir");
         let id = uuid::Uuid::now_v7().to_string();
-        let session = Session::create(dir.path(), Some(&id))
+        let session = Session::new(Some(id.clone()))
             .await
             .expect("create session");
 
@@ -229,8 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_rejects_invalid_id() {
-        let dir = TempDir::new().expect("temp dir");
-        let result = Session::create(dir.path(), Some("garbage")).await;
+        let result = Session::new(Some("garbage".to_string())).await;
         assert!(result.is_err());
     }
 
@@ -240,9 +237,7 @@ mod tests {
         let id = uuid::Uuid::now_v7().to_string();
 
         {
-            let session = Session::create(dir.path(), Some(&id))
-                .await
-                .expect("create");
+            let session = Session::new(Some(id.clone())).await.expect("create");
             let msg = Message::text(Role::User, "saved message".to_string());
             session.insert_message(&msg).await.expect("insert");
         }
@@ -268,32 +263,26 @@ mod tests {
 
     #[tokio::test]
     async fn create_or_load_loads_existing() {
-        let dir = TempDir::new().expect("temp dir");
         let id = uuid::Uuid::now_v7().to_string();
 
         {
-            let session = Session::create(dir.path(), Some(&id))
-                .await
-                .expect("create");
+            let session = Session::new(Some(id.clone())).await.expect("create");
             session
                 .insert_message(&Message::text(Role::User, "exists".to_string()))
                 .await
                 .expect("insert");
         }
 
-        let session = Session::create_or_load(dir.path(), &id)
-            .await
-            .expect("create_or_load");
+        let session = Session::create_or_load(id).await.expect("create_or_load");
         let history = session.load_history().await.expect("history");
         assert_eq!(history.len(), 1);
     }
 
     #[tokio::test]
     async fn create_or_load_creates_when_missing() {
-        let dir = TempDir::new().expect("temp dir");
         let id = uuid::Uuid::now_v7().to_string();
 
-        let session = Session::create_or_load(dir.path(), &id)
+        let session = Session::create_or_load(id.clone())
             .await
             .expect("create_or_load");
         assert_eq!(session.id, id);
@@ -303,8 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_and_load_multiple_messages() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
+        let session = Session::new(None).await.expect("create");
 
         session
             .insert_message(&Message::text(Role::User, "first".to_string()))
@@ -328,8 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_message_with_tool_use_content() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
+        let session = Session::new(None).await.expect("create");
 
         let msg = Message {
             role: Role::Assistant,
@@ -359,8 +346,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_message_with_tool_result_content() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
+        let session = Session::new(None).await.expect("create");
 
         let msg = Message {
             role: Role::User,
@@ -390,8 +376,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_id_is_uuidv7() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::create(dir.path(), None).await.expect("create");
+        let session = Session::new(None).await.expect("create");
         assert!(
             validate_uuidv7(&session.id).is_ok(),
             "auto-generated session ID should be valid UUIDv7"

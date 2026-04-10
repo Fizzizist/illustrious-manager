@@ -557,14 +557,19 @@ mod tests {
             }
         }
 
-        let agent = Arc::new(Agent::new(
-            Box::new(StubBackend),
-            RequestConfig {
-                model: "test".to_string(),
-                max_tokens: 1024,
-                tools: vec![],
-            },
-        ));
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                None,
+            )
+            .await
+            .expect("agent creation failed"),
+        );
 
         let mut app = app_with_content(10);
         app.scroll_offset = 15;
