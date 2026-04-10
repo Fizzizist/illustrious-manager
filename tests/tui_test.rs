@@ -92,7 +92,7 @@ fn test_tui_confirmation_prompt_state_renders() {
 
 #[test]
 fn test_tui_initial_state() {
-    let mut app = App::new(std::sync::Arc::new(
+    let app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
     let backend = TestBackend::new(80, 24);
@@ -200,7 +200,11 @@ async fn user_message_appears_immediately() {
         delay_ms: 5000,
         call_count: call_count.clone(),
     });
-    let agent = Arc::new(Agent::new(backend, config));
+    let agent = Arc::new(
+        Agent::new(backend, config, None)
+            .await
+            .expect("agent creation fail"),
+    );
 
     // Create app with user input
     let mut app = App::new(std::sync::Arc::new(

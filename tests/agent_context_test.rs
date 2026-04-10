@@ -28,15 +28,17 @@ impl LlmBackend for NullBackend {
     }
 }
 
-#[test]
-fn load_context_files_adds_messages_to_history() {
+#[tokio::test]
+async fn load_context_files_adds_messages_to_history() {
     let backend = Box::new(NullBackend::new());
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config);
+    let agent = Agent::new(backend, config, None)
+        .await
+        .expect("agent creation fail");
 
     let context_files = vec![
         ContextFile {
@@ -80,15 +82,17 @@ fn load_context_files_adds_messages_to_history() {
     );
 }
 
-#[test]
-fn load_context_files_with_empty_vec_does_not_modify_history() {
+#[tokio::test]
+async fn load_context_files_with_empty_vec_does_not_modify_history() {
     let backend = Box::new(NullBackend::new());
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config);
+    let agent = Agent::new(backend, config, None)
+        .await
+        .expect("agent creation fail");
 
     agent.load_context_files(vec![]);
 

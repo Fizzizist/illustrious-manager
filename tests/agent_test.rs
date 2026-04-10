@@ -50,7 +50,9 @@ async fn test_agent_single_message() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config, None)
+        .await
+        .expect("agent creation fail");
 
     let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 
@@ -93,7 +95,9 @@ async fn test_agent_history_accumulates() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config, None)
+        .await
+        .expect("agent creation fail");
 
     // First message
     let stream = agent.send("Hello".to_string(), None).await.unwrap();
@@ -132,7 +136,9 @@ async fn test_agent_backend_error_emits_error_event() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(ErrorBackend), config);
+    let agent = Agent::new(Box::new(ErrorBackend), config, None)
+        .await
+        .expect("agent creation fail");
 
     let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 

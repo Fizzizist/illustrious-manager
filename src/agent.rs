@@ -512,7 +512,7 @@ mod tests {
         }
     }
 
-    fn agent_with_mode(
+    async fn agent_with_mode(
         backend: impl LlmBackend + 'static,
         tool: Option<Box<dyn crate::tools::Tool>>,
         mode: ConfirmationMode,
@@ -530,7 +530,9 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config)
+        Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config)
     }
@@ -547,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn pure_text_response_emits_response_complete_without_tool_loop() {
         let backend = SequencedBackend::new(vec![text_response("hello world")]);
-        let agent = agent_with_mode(backend, None, ConfirmationMode::Never);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
             .send("hi".to_string(), None)
@@ -585,7 +587,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "ls output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run ls".to_string(), None)
@@ -639,7 +642,9 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -682,7 +687,9 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -726,7 +733,9 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -771,7 +780,9 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -825,7 +836,9 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -864,7 +877,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run".to_string(), None)
@@ -896,7 +910,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run".to_string(), None)
@@ -938,7 +953,9 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -963,8 +980,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn load_skills_adds_skill_names_to_history() {
+    #[tokio::test]
+    async fn load_skills_adds_skill_names_to_history() {
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
@@ -981,7 +998,10 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        let agent = Agent::new(Box::new(backend), config).with_skills(&skills);
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
+            .with_skills(&skills);
 
         let history = agent.history();
         assert_eq!(history.len(), 1);
@@ -998,16 +1018,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn load_skills_with_empty_map_adds_nothing_to_history() {
+    #[tokio::test]
+    async fn load_skills_with_empty_map_adds_nothing_to_history() {
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
         };
-        let agent =
-            Agent::new(Box::new(backend), config).with_skills(&std::collections::HashMap::new());
+        let agent = Agent::new(Box::new(backend), config, None)
+            .await
+            .expect("agent creation fail")
+            .with_skills(&std::collections::HashMap::new());
 
         assert!(
             agent.history().is_empty(),
