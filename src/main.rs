@@ -129,11 +129,11 @@ async fn main() -> Result<()> {
         Agent::new(selection.backend, request_config)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
+            .with_context_files()?
+            .with_skills(&skills)
             .with_session(session)
-            .await
-            .with_context_files()?,
+            .await,
     );
-    agent.load_skills(&skills);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;

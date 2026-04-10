@@ -62,25 +62,12 @@ impl Agent {
     }
 
     pub async fn with_session(self, session: Session) -> Self {
-        let existing_history = session.load_history().await.unwrap_or_default();
+        let existing_history: Vec<Message> = session.load_history().await.unwrap_or_default();
         if !existing_history.is_empty() {
-            *lock(&self.history) = existing_history;
+            lock(&self.history).extend(existing_history);
         }
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
         self
-    }
-
-    fn history_contains_prefix(&self, prefix: &str) -> bool {
-        lock(&self.history).iter().any(|msg| {
-            msg.role == Role::User
-                && msg.content.iter().any(|block| {
-                    if let ContentBlock::Text(text) = block {
-                        text.starts_with(prefix)
-                    } else {
-                        false
-                    }
-                })
-        })
     }
 
     pub fn with_context_files(self) -> Result<Self> {
@@ -89,15 +76,12 @@ impl Agent {
         Ok(self)
     }
 
-    // TODO: synthetic User messages are a design smell; use Role::System or a metadata
-    // mechanism if one is added in future.
-    pub fn load_skills(&self, skills: &std::collections::HashMap<String, std::path::PathBuf>) {
+    pub fn with_skills(
+        self,
+        skills: &std::collections::HashMap<String, std::path::PathBuf>,
+    ) -> Self {
         if skills.is_empty() {
-            return;
-        }
-
-        if self.history_contains_prefix("The following skills are available") {
-            return;
+            return self;
         }
 
         let mut names: Vec<&str> = skills.keys().map(String::as_str).collect();
@@ -114,12 +98,7 @@ impl Agent {
 
         let msg = Message::system(Role::User, content);
         lock(&self.history).push(msg.clone());
-        let session = Arc::clone(&self.session);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                persist_to_session(&session, &msg).await;
-            });
-        }
+        self
     }
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
@@ -135,10 +114,6 @@ impl Agent {
             return;
         }
 
-        if self.history_contains_prefix("The following context files were loaded") {
-            return;
-        }
-
         let mut content = String::from("The following context files were loaded:\n\n");
         for file in files {
             content.push_str(&format!(
@@ -149,13 +124,8 @@ impl Agent {
         }
 
         let msg = Message::system(Role::User, content);
-        lock(&self.history).push(msg.clone());
-        let session = Arc::clone(&self.session);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                persist_to_session(&session, &msg).await;
-            });
-        }
+        // prepend context files and don't persist them to the DB
+        lock(&self.history).insert(0, msg.clone());
     }
 
     pub async fn send(
