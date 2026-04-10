@@ -28,7 +28,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
-    session: Arc<Mutex<Option<Session>>>,
+    session: Arc<Mutex<Session>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -39,16 +39,24 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
 }
 
 impl Agent {
-    pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig) -> Self {
-        Self {
+    pub async fn new(
+        backend: Box<dyn LlmBackend>,
+        config: RequestConfig,
+        session_id: Option<String>,
+    ) -> Result<Self> {
+        let session = match session_id {
+            Some(id) => Session::create_or_load(id).await?,
+            None => Session::new(None).await?,
+        };
+        Ok(Self {
             backend: Arc::from(backend),
             history: Arc::new(Mutex::new(Vec::new())),
             config,
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            session: Arc::new(Mutex::new(None)),
-        }
+            session: Arc::new(Mutex::new(session)),
+        })
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
@@ -67,7 +75,7 @@ impl Agent {
         if !existing_history.is_empty() {
             lock(&self.history).extend(existing_history);
         }
-        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session;
         self
     }
 
@@ -110,16 +118,21 @@ impl Agent {
         lock(&self.history).clone()
     }
 
+    pub fn session_id(&self) -> Result<String> {
+        match self.session.lock() {
+            Ok(g) => Ok(g.id.clone()),
+            Err(_) => Err(anyhow::anyhow!("mutex poisoned")),
+        }
+    }
+
     pub fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
         let guard = match self.session.lock() {
             Ok(g) => Ok(g),
             Err(_) => Err(anyhow::anyhow!("mutex poisoned")),
         }?;
-        if let Some(session) = guard.as_ref() {
-            let handle = runtime::Handle::current();
-            if let Ok(messages) = handle.block_on(session.load_history()) {
-                return Ok(messages);
-            }
+        let handle = runtime::Handle::current();
+        if let Ok(messages) = handle.block_on(guard.load_history()) {
+            return Ok(messages);
         }
         Ok(Vec::new())
     }

@@ -17,7 +17,6 @@ use std::time::SystemTime;
 use agent::Agent;
 use futures::channel::mpsc;
 use logging::Logger;
-use session::Session;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
@@ -95,14 +94,6 @@ async fn main() -> Result<()> {
 
     let selection = backend::from_config(&app_config).await?;
 
-    let sessions_dir = session::sessions_dir()?;
-
-    let session = match &cli.session_id {
-        Some(id) => Session::create_or_load(&sessions_dir, id).await?,
-        None => Session::create(&sessions_dir, None).await?,
-    };
-    let session_id = session.id.clone();
-
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(BashTool::new(
         app_config.tools.bash_allowlist.clone(),
@@ -126,13 +117,12 @@ async fn main() -> Result<()> {
     };
 
     let agent = Arc::new(
-        Agent::new(selection.backend, request_config)
+        Agent::new(selection.backend, request_config, cli.session_id.clone())
+            .await?
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
             .with_context_files()?
-            .with_skills(&skills)
-            .with_session(session)
-            .await,
+            .with_skills(&skills),
     );
 
     let mut logger = if cli.debug {
@@ -161,7 +151,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    eprintln!("Session ID: {}", session_id);
+    eprintln!("Session ID: {}", agent.session_id()?);
     Ok(())
 }
 
