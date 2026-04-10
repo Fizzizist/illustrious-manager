@@ -19,14 +19,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn create(sessions_dir: &Path, session_id: Option<&str>) -> Result<Self> {
-        ensure_sessions_dir(sessions_dir)?;
+    pub async fn new(id: Option<String>) -> Result<Self> {
+        let sessions_dir = sessions_dir()?;
+        ensure_sessions_dir(&sessions_dir)?;
 
-        let id = match session_id {
-            Some(provided) => {
-                validate_uuidv7(provided)?;
-                provided.to_string()
-            }
+        let id = match id {
+            Some(sess_id) => sess_id,
             None => generate_uuidv7(),
         };
 
@@ -64,12 +62,13 @@ impl Session {
         })
     }
 
-    pub async fn create_or_load(sessions_dir: &Path, session_id: &str) -> Result<Self> {
+    pub async fn create_or_load(session_id: String) -> Result<Self> {
+        let sessions_dir = sessions_dir()?;
         let db_path = sessions_dir.join(format!("{session_id}.db"));
         if db_path.exists() {
-            Self::load(sessions_dir, session_id).await
+            Self::load(&sessions_dir, &session_id).await
         } else {
-            Self::create(sessions_dir, Some(session_id)).await
+            Self::new(Some(session_id.to_string())).await
         }
     }
 
@@ -119,18 +118,16 @@ fn ensure_sessions_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn lock_session(m: &Mutex<Option<Session>>) -> std::sync::MutexGuard<'_, Option<Session>> {
+fn lock_session(m: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-pub async fn persist_to_session(session: &Mutex<Option<Session>>, message: &Message) {
+pub async fn persist_to_session(session: &Mutex<Session>, message: &Message) {
     let owned_conn = {
         let guard = lock_session(session);
-        guard.as_ref().map(|s| s.conn.clone())
+        guard.conn.clone()
     };
-    if let Some(conn) = owned_conn {
-        let _ = insert_message_with_conn(&conn, message).await;
-    }
+    let _ = insert_message_with_conn(&owned_conn, message).await;
 }
 
 async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Result<()> {
