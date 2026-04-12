@@ -61,7 +61,6 @@ impl Session {
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
-        //load_history_from_conn(&self.conn).await
         let mut rows = self
             .conn
             .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
