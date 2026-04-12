@@ -6,7 +6,7 @@ use super::LlmBackend;
 use super::openai_compat;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-const ENDPOINT: &str = "https://api.ollama.com/v1/chat/completions";
+const ENDPOINT: &str = "https://ollama.com/v1/chat/completions";
 
 #[derive(Debug)]
 pub struct OllamaBackend {
