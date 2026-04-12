@@ -111,7 +111,7 @@ impl Agent {
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        Ok(self.session.lock().await.load_history().await?)
+        self.session.lock().await.load_history().await
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
