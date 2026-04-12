@@ -185,7 +185,7 @@ pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     config.tools.sandbox_root = resolve_sandbox_root(&config.tools.sandbox_root)?
         .to_string_lossy()
         .into_owned();
-    let _ = fs::create_dir_all(&config.sessions_dir);
+    fs::create_dir_all(&config.sessions_dir)?;
     Ok(config)
 }
 
@@ -198,11 +198,11 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
 
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
+            fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create config directory: {}", parent.display())
             })?;
         }
-        std::fs::write(&path, CONFIG_TEMPLATE)
+        fs::write(&path, CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to write default config: {}", path.display()))?;
         eprintln!("Created default config at: {}", path.display());
     }
