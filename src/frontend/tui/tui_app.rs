@@ -1,5 +1,8 @@
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -301,14 +304,22 @@ pub async fn run(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, agent, initial_prompt, logger).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        PopKeyboardEnhancementFlags,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -357,6 +368,13 @@ async fn run_app(
                                 | KeyEvent {
                                     code: KeyCode::Esc, ..
                                 } => break,
+                                KeyEvent {
+                                    code: KeyCode::Enter,
+                                    modifiers: KeyModifiers::SHIFT,
+                                    ..
+                                } => {
+                                    app.input.input(key);
+                                }
                                 KeyEvent {
                                     code: KeyCode::Enter,
                                     modifiers: KeyModifiers::NONE,

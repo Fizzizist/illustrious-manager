@@ -3,7 +3,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
 use ratatui_textarea::{TextArea, WrapMode};
 
-const INPUT_TITLE: &str = "Input (Enter to send, Ctrl+C to quit)";
+const INPUT_TITLE: &str = "Input (Enter to send, Shift+Enter for newline, Ctrl+C to quit)";
 const STREAMING_TITLE: &str = "Streaming...";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
@@ -434,6 +434,54 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_restored_input", terminal.backend());
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let mut input = InputArea::new();
+        input.input(char_key('a'));
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        input.input(char_key('b'));
+        assert_eq!(input.text(), "a\nb");
+        assert_eq!(input.lines().len(), 2);
+    }
+
+    #[test]
+    fn shift_enter_retains_previous_line() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('e'));
+        input.input(char_key('l'));
+        input.input(char_key('l'));
+        input.input(char_key('o'));
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(input.lines()[0], "hello");
+        assert_eq!(input.lines()[1], "");
+        input.input(char_key('w'));
+        input.input(char_key('o'));
+        input.input(char_key('r'));
+        input.input(char_key('l'));
+        input.input(char_key('d'));
+        assert_eq!(input.lines()[0], "hello");
+        assert_eq!(input.lines()[1], "world");
+    }
+
+    #[test]
+    fn height_for_width_grows_with_shift_enter_multiline() {
+        let mut input = InputArea::new();
+        input.input(char_key('a'));
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        input.input(char_key('b'));
+        let height = input.height_for_width(60, 24);
+        assert!(
+            height >= MIN_HEIGHT,
+            "multiline from shift+enter should have at least min height, got {height}"
+        );
+        let empty_height = InputArea::new().height_for_width(60, 24);
+        assert!(
+            height >= empty_height,
+            "multiline height {height} should be >= empty height {empty_height}"
+        );
     }
 
     #[test]
