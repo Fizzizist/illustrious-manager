@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
@@ -26,7 +27,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
-    session: Arc<Mutex<Session>>,
+    session: Arc<TokioMutex<Session>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -51,7 +52,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            session: Arc::new(Mutex::new(session)),
+            session: Arc::new(TokioMutex::new(session)),
         }
     }
 
@@ -105,18 +106,12 @@ impl Agent {
         lock(&self.history).clone()
     }
 
-    pub fn session_id(&self) -> Result<String> {
-        match self.session.lock() {
-            Ok(g) => Ok(g.id.clone()),
-            Err(_) => Err(anyhow::anyhow!("mutex poisoned")),
-        }
+    pub async fn session_id(&self) -> String {
+        self.session.lock().await.id.clone()
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        let guard = match self.session.lock() {
-            Ok(g) => g,
-            Err(_) => return Err(anyhow::anyhow!("mutex poisoned")),
-        };
+        let guard = self.session.lock().await;
         guard.load_history().await
     }
 

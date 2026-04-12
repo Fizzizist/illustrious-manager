@@ -1,7 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
-
 use anyhow::{Context, Result, bail};
+use tokio::sync::Mutex;
 use turso::{Builder, Connection, Value};
 
 use crate::types::{ContentBlock, Message, Role};
@@ -84,13 +83,9 @@ impl Session {
     }
 }
 
-fn lock_session(m: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 pub async fn persist_to_session(session: &Mutex<Session>, message: &Message) {
     let owned_conn = {
-        let guard = lock_session(session);
+        let guard = session.lock().await;
         guard.conn.clone()
     };
     let _ = insert_message_with_conn(&owned_conn, message).await;

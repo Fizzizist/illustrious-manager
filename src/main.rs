@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    eprintln!("Session ID: {}", agent.session_id()?);
+    eprintln!("Session ID: {}", agent.session_id().await);
     Ok(())
 }
 
