@@ -12,10 +12,8 @@ const ENDPOINT: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 /// Stateful SSE parser that tracks tool calls by index for OpenAI-compatible streaming.
 #[derive(Default)]
 pub struct ZaiSseParser {
-    /// Track tool calls by their index to generate stable IDs
     tool_calls_by_index: HashMap<u64, String>,
-    /// Buffer for events when multiple tool calls appear in a single SSE chunk
-    event_buffer: Vec<StreamEvent>,
+    pub event_buffer: Vec<StreamEvent>,
 }
 
 impl ZaiSseParser {
@@ -37,7 +35,7 @@ impl ZaiSseParser {
         Ok(None)
     }
 
-    fn fill_buffer(&mut self, data: &str) -> Result<()> {
+    pub fn fill_buffer(&mut self, data: &str) -> Result<()> {
         if data == "[DONE]" {
             self.event_buffer.push(StreamEvent::Done);
             return Ok(());

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod ollama;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
@@ -45,6 +46,18 @@ pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
             Ok(BackendSelection {
                 backend: Box::new(backend),
                 model: zai_config.model.clone(),
+            })
+        }
+        "ollama" => {
+            let ollama_config = config.ollama.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ollama backend configuration is missing. Add an [ollama] section to your config file."
+                )
+            })?;
+            let backend = ollama::OllamaBackend::new(ollama_config.api_key.clone())?;
+            Ok(BackendSelection {
+                backend: Box::new(backend),
+                model: ollama_config.model.clone(),
             })
         }
         _ => {

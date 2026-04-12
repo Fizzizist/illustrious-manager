@@ -48,7 +48,7 @@ cargo fmt                            # Format
 
 Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Three implementations: `vertex` (Vertex AI + Claude via SSE), `zai` (z.ai), and `ollama` (Ollama Cloud). Both `zai` and `ollama` use OpenAI-compatible SSE; `ollama` reuses `ZaiSseParser`. Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
 2. **Agent Core** (`src/agent.rs`) — Owns conversation history and context files. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`.
 
@@ -67,7 +67,7 @@ Key types live in `src/types.rs`. Configuration loading and CLI merge logic is i
 Config file at `~/.config/illustrious-manager/config.toml` (auto-created on first run):
 
 ```toml
-backend = "vertex"                    # "vertex" or "zai"
+backend = "vertex"                    # "vertex", "zai", or "ollama"
 
 [vertex]
 project = ""                          # GCP project ID (required)
@@ -77,6 +77,10 @@ model = "claude-sonnet-4-20250514"
 [zai]
 api_key = ""                          # z.ai API key (required for zai backend)
 model = "glm-5.1"
+
+# [ollama]
+# api_key = ""                        # Ollama Cloud API key (required for ollama backend)
+# model = "llama3.2"
 
 # [tools]
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never
