@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::session::{Session, load_history_from_conn, persist_to_session};
+use crate::session::{Session, persist_to_session};
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -37,10 +37,16 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
 }
 
 impl Agent {
-    pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig, session: Session) -> Self {
+    pub async fn new(
+        backend: Box<dyn LlmBackend>,
+        config: RequestConfig,
+        session: Session,
+    ) -> Self {
+        let history: Vec<Message> = session.load_history().await.unwrap_or_default();
+
         Self {
             backend: Arc::from(backend),
-            history: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(history)),
             config,
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
@@ -57,15 +63,6 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
-        self
-    }
-
-    pub async fn with_session(self, session: Session) -> Self {
-        let existing_history: Vec<Message> = session.load_history().await.unwrap_or_default();
-        if !existing_history.is_empty() {
-            lock(&self.history).extend(existing_history);
-        }
-        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session;
         self
     }
 
@@ -96,7 +93,7 @@ impl Agent {
         }
 
         let msg = Message::text(Role::User, content);
-        lock(&self.history).push(msg.clone());
+        lock(&self.history).insert(0, msg.clone());
         self
     }
 
@@ -116,14 +113,11 @@ impl Agent {
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        let conn = {
-            let guard = match self.session.lock() {
-                Ok(g) => g,
-                Err(_) => return Err(anyhow::anyhow!("mutex poisoned")),
-            };
-            guard.conn.clone()
+        let guard = match self.session.lock() {
+            Ok(g) => g,
+            Err(_) => return Err(anyhow::anyhow!("mutex poisoned")),
         };
-        load_history_from_conn(&conn).await
+        guard.load_history().await
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
