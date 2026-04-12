@@ -4,7 +4,13 @@ use futures::StreamExt;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
+use illustrious_manager::session::Session;
 use illustrious_manager::types::*;
+
+async fn test_session() -> Session {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    Session::new(None, dir.keep()).await.expect("test session")
+}
 
 /// A mock backend that returns a fixed sequence of StreamEvents.
 struct MockBackend {
@@ -50,7 +56,7 @@ async fn test_agent_single_message() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config, test_session().await).await;
 
     let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 
@@ -93,7 +99,7 @@ async fn test_agent_history_accumulates() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(backend), config);
+    let agent = Agent::new(Box::new(backend), config, test_session().await).await;
 
     // First message
     let stream = agent.send("Hello".to_string(), None).await.unwrap();
@@ -132,7 +138,7 @@ async fn test_agent_backend_error_emits_error_event() {
         max_tokens: 1024,
         tools: vec![],
     };
-    let mut agent = Agent::new(Box::new(ErrorBackend), config);
+    let agent = Agent::new(Box::new(ErrorBackend), config, test_session().await).await;
 
     let mut stream = agent.send("Hi".to_string(), None).await.unwrap();
 

@@ -1,3 +1,5 @@
+use dirs;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -35,6 +37,12 @@ fn default_bash_denylist() -> Vec<String> {
         .iter()
         .map(ToString::to_string)
         .collect()
+}
+
+fn default_sessions_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|path| path.join("illustrious-manager/sessions"))
+        .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -86,6 +94,9 @@ const DEFAULT_BACKEND: &str = "vertex";
 
 const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex" or "zai"
 backend = "vertex"
+# where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
+# or a local `illustrious-manager-sessions` directory if $HOME is not found.
+# sessions_dir = "/path/to/sessions"
 
 [vertex]
 # Required: your GCP project ID
@@ -118,6 +129,8 @@ model = "glm-5.1"
 pub struct AppConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
+    #[serde(default = "default_sessions_dir")]
+    pub sessions_dir: PathBuf,
     pub vertex: VertexConfig,
     #[serde(default)]
     pub zai: Option<ZaiConfig>,
@@ -172,6 +185,7 @@ pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     config.tools.sandbox_root = resolve_sandbox_root(&config.tools.sandbox_root)?
         .to_string_lossy()
         .into_owned();
+    fs::create_dir_all(&config.sessions_dir)?;
     Ok(config)
 }
 
@@ -184,11 +198,11 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
 
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
+            fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create config directory: {}", parent.display())
             })?;
         }
-        std::fs::write(&path, CONFIG_TEMPLATE)
+        fs::write(&path, CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to write default config: {}", path.display()))?;
         eprintln!("Created default config at: {}", path.display());
     }
@@ -347,6 +361,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -364,6 +379,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -380,6 +396,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -400,6 +417,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -420,6 +438,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -436,6 +455,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());

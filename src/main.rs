@@ -4,6 +4,7 @@ pub mod config;
 pub mod context_files;
 pub mod frontend;
 pub mod logging;
+pub mod session;
 pub mod tools;
 pub mod types;
 
@@ -16,6 +17,7 @@ use std::time::SystemTime;
 use agent::Agent;
 use futures::channel::mpsc;
 use logging::Logger;
+use session::Session;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
@@ -49,6 +51,9 @@ struct Cli {
 
     #[arg(long)]
     debug: bool,
+
+    #[arg(long)]
+    session_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -112,13 +117,18 @@ async fn main() -> Result<()> {
         tools: registry.definitions(),
     };
 
+    let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
+
     let agent = Arc::new(
-        Agent::new(selection.backend, request_config)
+        Agent::new(selection.backend, request_config, session)
+            .await
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
+            // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
+            // because initial history is set from the input session
+            .with_skills(&skills)
             .with_context_files()?,
     );
-    agent.load_skills(&skills);
 
     let mut logger = if cli.debug {
         let log_path = create_log_path()?;
@@ -146,6 +156,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    eprintln!("Session ID: {}", agent.session_id().await);
     Ok(())
 }
 
@@ -213,5 +224,25 @@ mod tests {
     fn debug_flag_is_false_when_not_present() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert_eq!(cli.debug, false);
+    }
+
+    #[test]
+    fn session_id_flag_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--session-id",
+            "01923456-7890-7abc-def0-123456789abc",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.session_id,
+            Some("01923456-7890-7abc-def0-123456789abc".to_string())
+        );
+    }
+
+    #[test]
+    fn session_id_flag_defaults_to_none() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(cli.session_id.is_none());
     }
 }
