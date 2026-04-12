@@ -80,37 +80,40 @@ impl Session {
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
-        let mut rows = self
-            .conn
-            .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
-            .await
-            .context("Failed to query conversation history")?;
-
-        let mut messages = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let role_str = match row.get_value(0)? {
-                Value::Text(s) => s,
-                other => bail!("Unexpected role type in DB: {:?}", other),
-            };
-            let content_str = match row.get_value(1)? {
-                Value::Text(s) => s,
-                other => bail!("Unexpected content type in DB: {:?}", other),
-            };
-
-            let role = match role_str.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                other => bail!("Unknown role in DB: {}", other),
-            };
-
-            let content: Vec<ContentBlock> =
-                serde_json::from_str(&content_str).context("Failed to deserialize content")?;
-
-            messages.push(Message { role, content });
-        }
-
-        Ok(messages)
+        load_history_from_conn(&self.conn).await
     }
+}
+
+pub async fn load_history_from_conn(conn: &Connection) -> Result<Vec<Message>> {
+    let mut rows = conn
+        .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
+        .await
+        .context("Failed to query conversation history")?;
+
+    let mut messages = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let role_str = match row.get_value(0)? {
+            Value::Text(s) => s,
+            other => bail!("Unexpected role type in DB: {:?}", other),
+        };
+        let content_str = match row.get_value(1)? {
+            Value::Text(s) => s,
+            other => bail!("Unexpected content type in DB: {:?}", other),
+        };
+
+        let role = match role_str.as_str() {
+            "user" => Role::User,
+            "assistant" => Role::Assistant,
+            other => bail!("Unknown role in DB: {}", other),
+        };
+
+        let content: Vec<ContentBlock> =
+            serde_json::from_str(&content_str).context("Failed to deserialize content")?;
+
+        messages.push(Message { role, content });
+    }
+
+    Ok(messages)
 }
 
 fn ensure_sessions_dir(dir: &Path) -> Result<()> {

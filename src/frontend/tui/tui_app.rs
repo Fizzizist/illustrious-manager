@@ -323,7 +323,7 @@ async fn run_app(
     let mut app = App::new(agent.tools());
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
-    app.load_history(&agent.session_history()?);
+    app.load_history(&agent.session_history().await?);
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 

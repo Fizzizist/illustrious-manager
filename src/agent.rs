@@ -3,12 +3,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
-use tokio::runtime;
-
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::session::{Session, persist_to_session};
+use crate::session::{Session, load_history_from_conn, persist_to_session};
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -125,16 +123,15 @@ impl Agent {
         }
     }
 
-    pub fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        let guard = match self.session.lock() {
-            Ok(g) => Ok(g),
-            Err(_) => Err(anyhow::anyhow!("mutex poisoned")),
-        }?;
-        let handle = runtime::Handle::current();
-        if let Ok(messages) = handle.block_on(guard.load_history()) {
-            return Ok(messages);
-        }
-        Ok(Vec::new())
+    pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
+        let conn = {
+            let guard = match self.session.lock() {
+                Ok(g) => g,
+                Err(_) => return Err(anyhow::anyhow!("mutex poisoned")),
+            };
+            guard.conn.clone()
+        };
+        load_history_from_conn(&conn).await
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
