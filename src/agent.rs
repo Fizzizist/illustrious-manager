@@ -4,7 +4,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::session::{Session, persist_to_session};
+use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
@@ -152,7 +152,7 @@ impl Agent {
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
 
-        persist_to_session(&session, &user_msg).await;
+        self.session.lock().await.insert_message(&user_msg).await?;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -236,7 +236,7 @@ impl Agent {
                         content,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
-                    persist_to_session(&session, &assistant_msg).await;
+                    let _ = session.lock().await.insert_message(&assistant_msg).await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -256,14 +256,14 @@ impl Agent {
                     content: assistant_content,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
-                persist_to_session(&session, &assistant_msg).await;
+                let _ = session.lock().await.insert_message(&assistant_msg).await;
 
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
-                persist_to_session(&session, &tool_result_msg).await;
+                let _ = session.lock().await.insert_message(&tool_result_msg).await;
             }
         });
 
