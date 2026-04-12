@@ -1,3 +1,5 @@
+use dirs;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -35,6 +37,12 @@ fn default_bash_denylist() -> Vec<String> {
         .iter()
         .map(ToString::to_string)
         .collect()
+}
+
+fn default_sessions_dir() -> PathBuf {
+    dirs::config_dir()
+        .map(|path| path.join("illustrious-manager/sessions"))
+        .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -86,6 +94,9 @@ const DEFAULT_BACKEND: &str = "vertex";
 
 const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex" or "zai"
 backend = "vertex"
+# where the session database files or stored. Defaults to $HOME/.config/illustrious-manager/sessions 
+# or a local `illustrious-manager-sessions` directory if $HOME is not found.
+sessions_dir =
 
 [vertex]
 # Required: your GCP project ID
@@ -118,6 +129,8 @@ model = "glm-5.1"
 pub struct AppConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
+    #[serde(default = "default_sessions_dir")]
+    pub sessions_dir: PathBuf,
     pub vertex: VertexConfig,
     #[serde(default)]
     pub zai: Option<ZaiConfig>,
@@ -172,6 +185,7 @@ pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
     config.tools.sandbox_root = resolve_sandbox_root(&config.tools.sandbox_root)?
         .to_string_lossy()
         .into_owned();
+    let _ = fs::create_dir_all(&config.sessions_dir);
     Ok(config)
 }
 

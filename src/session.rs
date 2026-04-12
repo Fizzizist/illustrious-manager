@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
@@ -19,68 +19,81 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new(id: Option<String>) -> Result<Self> {
-        let sessions_dir = sessions_dir()?;
-        ensure_sessions_dir(&sessions_dir)?;
-
-        let id = match id {
-            Some(sess_id) => {
-                validate_uuidv7(&sess_id)?;
-                sess_id
+    pub async fn new(id: Option<String>, session_dir: PathBuf) -> Result<Self> {
+        let sess_id = match id {
+            Some(session_id) => {
+                validate_uuidv7(&session_id)?;
+                session_id
             }
             None => generate_uuidv7(),
         };
 
-        let db_path = sessions_dir.join(format!("{id}.db"));
+        let db_path = session_dir.join(format!("{}.db", &sess_id));
         let db = Builder::new_local(db_path.to_string_lossy().as_ref())
             .build()
             .await
             .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
         let conn = db.connect()?;
+        if db_path.exists() {
+            return Ok(Self { id: sess_id, conn });
+        }
         conn.execute(SCHEMA, ())
             .await
             .context("Failed to create conversation table")?;
 
-        Ok(Self { id, conn })
-    }
-
-    pub async fn load(sessions_dir: &Path, session_id: &str) -> Result<Self> {
-        ensure_sessions_dir(sessions_dir)?;
-        validate_uuidv7(session_id)?;
-
-        let db_path = sessions_dir.join(format!("{session_id}.db"));
-        if !db_path.exists() {
-            bail!("Session file not found: {}", db_path.display());
-        }
-
-        let db = Builder::new_local(db_path.to_string_lossy().as_ref())
-            .build()
-            .await
-            .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
-        let conn = db.connect()?;
-
-        Ok(Self {
-            id: session_id.to_string(),
-            conn,
-        })
-    }
-
-    pub async fn create_or_load(session_id: String) -> Result<Self> {
-        let sessions_dir = sessions_dir()?;
-        let db_path = sessions_dir.join(format!("{session_id}.db"));
-        if db_path.exists() {
-            Self::load(&sessions_dir, &session_id).await
-        } else {
-            Self::new(Some(session_id.to_string())).await
-        }
+        Ok(Self { id: sess_id, conn })
     }
 
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        insert_message_with_conn(&self.conn, message).await
+        //insert_message_with_conn(&self.conn, message).await
+        let content_json = serde_json::to_string(&message.content)
+            .context("Failed to serialize message content")?;
+        let role_str = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        self.conn
+            .execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [Value::Text(role_str.to_string()), Value::Text(content_json)],
+            )
+            .await
+            .context("Failed to insert message into session")?;
+        Ok(())
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
-        load_history_from_conn(&self.conn).await
+        //load_history_from_conn(&self.conn).await
+        let mut rows = self
+            .conn
+            .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
+            .await
+            .context("Failed to query conversation history")?;
+
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let role_str = match row.get_value(0)? {
+                Value::Text(s) => s,
+                other => bail!("Unexpected role type in DB: {:?}", other),
+            };
+            let content_str = match row.get_value(1)? {
+                Value::Text(s) => s,
+                other => bail!("Unexpected content type in DB: {:?}", other),
+            };
+
+            let role = match role_str.as_str() {
+                "user" => Role::User,
+                "assistant" => Role::Assistant,
+                other => bail!("Unknown role in DB: {}", other),
+            };
+
+            let content: Vec<ContentBlock> =
+                serde_json::from_str(&content_str).context("Failed to deserialize content")?;
+
+            messages.push(Message { role, content });
+        }
+
+        Ok(messages)
     }
 }
 
@@ -116,14 +129,6 @@ pub async fn load_history_from_conn(conn: &Connection) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
-fn ensure_sessions_dir(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create sessions directory: {}", dir.display()))?;
-    }
-    Ok(())
-}
-
 fn lock_session(m: &Mutex<Session>) -> std::sync::MutexGuard<'_, Session> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -155,19 +160,6 @@ async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Resul
 #[cfg(test)]
 thread_local! {
     static TEST_SESSIONS_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-pub fn sessions_dir() -> Result<PathBuf> {
-    #[cfg(test)]
-    {
-        let overridden = TEST_SESSIONS_DIR.with(|d| d.borrow().clone());
-        if let Some(dir) = overridden {
-            return Ok(dir);
-        }
-    }
-    let config_dir =
-        dirs::config_dir().context("Could not determine config directory for sessions")?;
-    Ok(config_dir.join("illustrious-manager").join("sessions"))
 }
 
 fn generate_uuidv7() -> String {

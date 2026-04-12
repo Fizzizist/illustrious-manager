@@ -17,6 +17,7 @@ use std::time::SystemTime;
 use agent::Agent;
 use futures::channel::mpsc;
 use logging::Logger;
+use session::Session;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
@@ -116,9 +117,10 @@ async fn main() -> Result<()> {
         tools: registry.definitions(),
     };
 
+    let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
+
     let agent = Arc::new(
-        Agent::new(selection.backend, request_config, cli.session_id.clone())
-            .await?
+        Agent::new(selection.backend, request_config, session)
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
             .with_context_files()?
