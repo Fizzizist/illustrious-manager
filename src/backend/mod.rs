@@ -5,6 +5,7 @@ use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 pub mod ollama;
+pub mod openai_compat;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
