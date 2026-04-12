@@ -29,12 +29,13 @@ impl Session {
         };
 
         let db_path = session_dir.join(format!("{}.db", &sess_id));
+        let needs_migration = !db_path.exists();
         let db = Builder::new_local(db_path.to_string_lossy().as_ref())
             .build()
             .await
             .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
         let conn = db.connect()?;
-        if db_path.exists() {
+        if !needs_migration {
             return Ok(Self { id: sess_id, conn });
         }
         conn.execute(SCHEMA, ())

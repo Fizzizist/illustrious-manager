@@ -121,10 +121,13 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(
         Agent::new(selection.backend, request_config, session)
+            .await
             .with_tools(registry)
             .with_tool_config(&app_config.tools)
-            .with_context_files()?
-            .with_skills(&skills),
+            // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
+            // because initial history is set from the input session
+            .with_skills(&skills)
+            .with_context_files()?,
     );
 
     let mut logger = if cli.debug {
