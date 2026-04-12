@@ -1,8 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-use futures::StreamExt;
-use futures::channel::mpsc;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
@@ -12,6 +9,9 @@ use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
     StreamEvent,
 };
+use anyhow::Result;
+use futures::StreamExt;
+use futures::channel::mpsc;
 
 struct PendingToolCall {
     id: String,
@@ -37,16 +37,8 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
 }
 
 impl Agent {
-    pub async fn new(
-        backend: Box<dyn LlmBackend>,
-        config: RequestConfig,
-        session_id: Option<String>,
-    ) -> Result<Self> {
-        let session = match session_id {
-            Some(id) => Session::create_or_load(id).await?,
-            None => Session::new(None).await?,
-        };
-        Ok(Self {
+    pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig, session: Session) -> Self {
+        Self {
             backend: Arc::from(backend),
             history: Arc::new(Mutex::new(Vec::new())),
             config,
@@ -54,7 +46,7 @@ impl Agent {
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session: Arc::new(Mutex::new(session)),
-        })
+        }
     }
 
     pub fn with_tools(mut self, tools: ToolRegistry) -> Self {
