@@ -557,6 +557,10 @@ mod tests {
             }
         }
 
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("test session");
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -565,10 +569,9 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                 },
-                None,
+                session,
             )
-            .await
-            .expect("agent creation failed"),
+            .await,
         );
 
         let mut app = app_with_content(10);
