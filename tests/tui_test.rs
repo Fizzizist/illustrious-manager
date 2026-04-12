@@ -161,6 +161,7 @@ async fn user_message_appears_immediately() {
     use async_trait::async_trait;
     use illustrious_manager::agent::Agent;
     use illustrious_manager::backend::LlmBackend;
+    use illustrious_manager::session::Session;
     use illustrious_manager::types::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -200,11 +201,9 @@ async fn user_message_appears_immediately() {
         delay_ms: 5000,
         call_count: call_count.clone(),
     });
-    let agent = Arc::new(
-        Agent::new(backend, config, None)
-            .await
-            .expect("agent creation fail"),
-    );
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session = Session::new(None, dir.keep()).await.expect("test session");
+    let agent = Arc::new(Agent::new(backend, config, session).await);
 
     // Create app with user input
     let mut app = App::new(std::sync::Arc::new(

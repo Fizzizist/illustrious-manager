@@ -94,9 +94,9 @@ const DEFAULT_BACKEND: &str = "vertex";
 
 const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex" or "zai"
 backend = "vertex"
-# where the session database files or stored. Defaults to $HOME/.config/illustrious-manager/sessions 
+# where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
 # or a local `illustrious-manager-sessions` directory if $HOME is not found.
-sessions_dir =
+# sessions_dir = "/path/to/sessions"
 
 [vertex]
 # Required: your GCP project ID
@@ -361,6 +361,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -378,6 +379,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -394,6 +396,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -414,6 +417,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -434,6 +438,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -450,6 +455,7 @@ mod tests {
             },
             zai: None,
             tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());

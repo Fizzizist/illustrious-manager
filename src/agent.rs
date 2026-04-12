@@ -401,6 +401,11 @@ mod tests {
     use async_trait::async_trait;
     use futures::{StreamExt, channel::mpsc, stream};
 
+    async fn test_session() -> Session {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        Session::new(None, dir.keep()).await.expect("test session")
+    }
+
     struct SequencedBackend {
         responses: Arc<tokio::sync::Mutex<Vec<Vec<Result<StreamEvent>>>>>,
     }
@@ -513,9 +518,8 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config, None)
+        Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config)
     }
@@ -625,9 +629,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -670,9 +673,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -716,9 +718,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -763,9 +764,8 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -819,9 +819,8 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -936,9 +935,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -981,9 +979,8 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_skills(&skills);
 
         let history = agent.history();
@@ -1009,9 +1006,8 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config, None)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
             .await
-            .expect("agent creation fail")
             .with_skills(&std::collections::HashMap::new());
 
         assert!(
