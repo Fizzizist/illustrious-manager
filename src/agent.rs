@@ -1,17 +1,18 @@
 use std::sync::{Arc, Mutex};
-
-use anyhow::Result;
-use futures::StreamExt;
-use futures::channel::mpsc;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
+use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
     StreamEvent,
 };
+use anyhow::Result;
+use futures::StreamExt;
+use futures::channel::mpsc;
 
 struct PendingToolCall {
     id: String,
@@ -26,6 +27,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
+    session: Arc<TokioMutex<Session>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -36,14 +38,21 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
 }
 
 impl Agent {
-    pub fn new(backend: Box<dyn LlmBackend>, config: RequestConfig) -> Self {
+    pub async fn new(
+        backend: Box<dyn LlmBackend>,
+        config: RequestConfig,
+        session: Session,
+    ) -> Self {
+        let history: Vec<Message> = session.load_history().await.unwrap_or_default();
+
         Self {
             backend: Arc::from(backend),
-            history: Arc::new(Mutex::new(Vec::new())),
+            history: Arc::new(Mutex::new(history)),
             config,
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
+            session: Arc::new(TokioMutex::new(session)),
         }
     }
 
@@ -64,11 +73,12 @@ impl Agent {
         Ok(self)
     }
 
-    // TODO: synthetic User messages are a design smell; use Role::System or a metadata
-    // mechanism if one is added in future.
-    pub fn load_skills(&self, skills: &std::collections::HashMap<String, std::path::PathBuf>) {
+    pub fn with_skills(
+        self,
+        skills: &std::collections::HashMap<String, std::path::PathBuf>,
+    ) -> Self {
         if skills.is_empty() {
-            return;
+            return self;
         }
 
         let mut names: Vec<&str> = skills.keys().map(String::as_str).collect();
@@ -83,7 +93,9 @@ impl Agent {
             content.push_str(&format!("- {}: {}\n", name, desc));
         }
 
-        lock(&self.history).push(Message::text(Role::User, content));
+        let msg = Message::text(Role::User, content);
+        lock(&self.history).insert(0, msg.clone());
+        self
     }
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
@@ -92,6 +104,14 @@ impl Agent {
 
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
+    }
+
+    pub async fn session_id(&self) -> String {
+        self.session.lock().await.id.clone()
+    }
+
+    pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
+        self.session.lock().await.load_history().await
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -108,7 +128,9 @@ impl Agent {
             ));
         }
 
-        lock(&self.history).push(Message::text(Role::User, content));
+        let msg = Message::text(Role::User, content);
+        // prepend context files and don't persist them to the DB
+        lock(&self.history).insert(0, msg.clone());
     }
 
     pub async fn send(
@@ -117,7 +139,8 @@ impl Agent {
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
         let pre_send_len = lock(&self.history).len();
-        lock(&self.history).push(Message::text(Role::User, input));
+        let user_msg = Message::text(Role::User, input);
+        lock(&self.history).push(user_msg.clone());
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         let history_arc = Arc::clone(&self.history);
@@ -126,6 +149,9 @@ impl Agent {
         let config = self.config.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
+        let session = Arc::clone(&self.session);
+
+        self.session.lock().await.insert_message(&user_msg).await?;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -204,10 +230,12 @@ impl Agent {
                     if !text_accumulated.is_empty() {
                         content.push(ContentBlock::Text(text_accumulated.clone()));
                     }
-                    lock(&history_arc).push(Message {
+                    let assistant_msg = Message {
                         role: Role::Assistant,
                         content,
-                    });
+                    };
+                    lock(&history_arc).push(assistant_msg.clone());
+                    let _ = session.lock().await.insert_message(&assistant_msg).await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -222,14 +250,19 @@ impl Agent {
                 )
                 .await;
 
-                lock(&history_arc).push(Message {
+                let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
-                });
-                lock(&history_arc).push(Message {
+                };
+                lock(&history_arc).push(assistant_msg.clone());
+                let _ = session.lock().await.insert_message(&assistant_msg).await;
+
+                let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
-                });
+                };
+                lock(&history_arc).push(tool_result_msg.clone());
+                let _ = session.lock().await.insert_message(&tool_result_msg).await;
             }
         });
 
@@ -362,6 +395,11 @@ mod tests {
     use async_trait::async_trait;
     use futures::{StreamExt, channel::mpsc, stream};
 
+    async fn test_session() -> Session {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        Session::new(None, dir.keep()).await.expect("test session")
+    }
+
     struct SequencedBackend {
         responses: Arc<tokio::sync::Mutex<Vec<Vec<Result<StreamEvent>>>>>,
     }
@@ -456,7 +494,7 @@ mod tests {
         }
     }
 
-    fn agent_with_mode(
+    async fn agent_with_mode(
         backend: impl LlmBackend + 'static,
         tool: Option<Box<dyn crate::tools::Tool>>,
         mode: ConfirmationMode,
@@ -474,7 +512,8 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config)
+        Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config)
     }
@@ -491,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn pure_text_response_emits_response_complete_without_tool_loop() {
         let backend = SequencedBackend::new(vec![text_response("hello world")]);
-        let agent = agent_with_mode(backend, None, ConfirmationMode::Never);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
             .send("hi".to_string(), None)
@@ -529,7 +568,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "ls output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run ls".to_string(), None)
@@ -583,7 +623,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -626,7 +667,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -670,7 +712,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -715,7 +758,8 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -769,7 +813,8 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -808,7 +853,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run".to_string(), None)
@@ -840,7 +886,8 @@ mod tests {
             backend,
             Some(Box::new(EchoTool::new("bash", "output"))),
             ConfirmationMode::Never,
-        );
+        )
+        .await;
 
         let stream = agent
             .send("run".to_string(), None)
@@ -882,7 +929,8 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config)
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
@@ -907,15 +955,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn load_skills_adds_skill_names_to_history() {
+    #[tokio::test]
+    async fn load_skills_adds_skill_names_to_history() {
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config);
 
         let mut skills = std::collections::HashMap::new();
         skills.insert(
@@ -926,7 +973,9 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        agent.load_skills(&skills);
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
+            .with_skills(&skills);
 
         let history = agent.history();
         assert_eq!(history.len(), 1);
@@ -943,17 +992,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn load_skills_with_empty_map_adds_nothing_to_history() {
+    #[tokio::test]
+    async fn load_skills_with_empty_map_adds_nothing_to_history() {
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config);
-
-        agent.load_skills(&std::collections::HashMap::new());
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
+            .with_skills(&std::collections::HashMap::new());
 
         assert!(
             agent.history().is_empty(),

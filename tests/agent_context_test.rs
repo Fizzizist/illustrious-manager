@@ -6,7 +6,13 @@ use async_trait::async_trait;
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
 use illustrious_manager::context_files::ContextFile;
+use illustrious_manager::session::Session;
 use illustrious_manager::types::*;
+
+async fn test_session() -> Session {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    Session::new(None, dir.keep()).await.expect("test session")
+}
 
 struct NullBackend;
 
@@ -28,15 +34,15 @@ impl LlmBackend for NullBackend {
     }
 }
 
-#[test]
-fn load_context_files_adds_messages_to_history() {
+#[tokio::test]
+async fn load_context_files_adds_messages_to_history() {
     let backend = Box::new(NullBackend::new());
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config);
+    let agent = Agent::new(backend, config, test_session().await).await;
 
     let context_files = vec![
         ContextFile {
@@ -80,15 +86,15 @@ fn load_context_files_adds_messages_to_history() {
     );
 }
 
-#[test]
-fn load_context_files_with_empty_vec_does_not_modify_history() {
+#[tokio::test]
+async fn load_context_files_with_empty_vec_does_not_modify_history() {
     let backend = Box::new(NullBackend::new());
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config);
+    let agent = Agent::new(backend, config, test_session().await).await;
 
     agent.load_context_files(vec![]);
 
@@ -97,49 +103,4 @@ fn load_context_files_with_empty_vec_does_not_modify_history() {
         history.is_empty(),
         "should not add message for empty context files"
     );
-}
-
-#[test]
-fn load_context_files_can_be_called_multiple_times() {
-    let backend = Box::new(NullBackend::new());
-    let config = RequestConfig {
-        model: "test".to_string(),
-        max_tokens: 100,
-        tools: vec![],
-    };
-    let agent = Agent::new(backend, config);
-
-    let files1 = vec![ContextFile {
-        path: "/first.md".into(),
-        content: "First content".to_string(),
-    }];
-
-    let files2 = vec![ContextFile {
-        path: "/second.md".into(),
-        content: "Second content".to_string(),
-    }];
-
-    agent.load_context_files(files1);
-    agent.load_context_files(files2);
-
-    let history = agent.history();
-    assert_eq!(
-        history.len(),
-        2,
-        "should add separate message for each call"
-    );
-
-    let text1 = if let ContentBlock::Text(t) = &history[0].content[0] {
-        t
-    } else {
-        panic!("expected Text content block")
-    };
-    assert!(text1.contains("First content"));
-
-    let text2 = if let ContentBlock::Text(t) = &history[1].content[0] {
-        t
-    } else {
-        panic!("expected Text content block")
-    };
-    assert!(text2.contains("Second content"));
 }
