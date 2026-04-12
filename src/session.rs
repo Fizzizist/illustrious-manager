@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
-use tokio::sync::Mutex;
 use turso::{Builder, Connection, Value};
 
 use crate::types::{ContentBlock, Message, Role};
@@ -45,7 +44,20 @@ impl Session {
     }
 
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        insert_message_with_conn(&self.conn, message).await
+        let content_json = serde_json::to_string(&message.content)
+            .context("Failed to serialize message content")?;
+        let role_str = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        self.conn
+            .execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [Value::Text(role_str.to_string()), Value::Text(content_json)],
+            )
+            .await
+            .context("Failed to insert message into session")?;
+        Ok(())
     }
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
@@ -81,30 +93,6 @@ impl Session {
 
         Ok(messages)
     }
-}
-
-pub async fn persist_to_session(session: &Mutex<Session>, message: &Message) {
-    let owned_conn = {
-        let guard = session.lock().await;
-        guard.conn.clone()
-    };
-    let _ = insert_message_with_conn(&owned_conn, message).await;
-}
-
-async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Result<()> {
-    let content_json =
-        serde_json::to_string(&message.content).context("Failed to serialize message content")?;
-    let role_str = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-    };
-    conn.execute(
-        "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
-        [Value::Text(role_str.to_string()), Value::Text(content_json)],
-    )
-    .await
-    .context("Failed to insert message into session")?;
-    Ok(())
 }
 
 fn generate_uuidv7() -> String {
