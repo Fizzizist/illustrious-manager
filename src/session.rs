@@ -24,7 +24,10 @@ impl Session {
         ensure_sessions_dir(&sessions_dir)?;
 
         let id = match id {
-            Some(sess_id) => sess_id,
+            Some(sess_id) => {
+                validate_uuidv7(&sess_id)?;
+                sess_id
+            }
             None => generate_uuidv7(),
         };
 
@@ -146,7 +149,19 @@ async fn insert_message_with_conn(conn: &Connection, message: &Message) -> Resul
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SESSIONS_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 pub fn sessions_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    {
+        let overridden = TEST_SESSIONS_DIR.with(|d| d.borrow().clone());
+        if let Some(dir) = overridden {
+            return Ok(dir);
+        }
+    }
     let config_dir =
         dirs::config_dir().context("Could not determine config directory for sessions")?;
     Ok(config_dir.join("illustrious-manager").join("sessions"))
@@ -172,6 +187,14 @@ fn validate_uuidv7(id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn set_test_sessions_dir(dir: &Path) {
+        TEST_SESSIONS_DIR.with(|d| *d.borrow_mut() = Some(dir.to_path_buf()));
+    }
+
+    fn clear_test_sessions_dir() {
+        TEST_SESSIONS_DIR.with(|d| *d.borrow_mut() = None);
+    }
 
     #[test]
     fn validate_uuidv7_accepts_valid_uuidv7() {
@@ -200,22 +223,27 @@ mod tests {
     #[tokio::test]
     async fn create_session_initializes_db_with_schema() {
         let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let session = Session::new(None).await.expect("create session");
 
         let db_path = dir.path().join(format!("{}.db", session.id));
         assert!(db_path.exists(), "DB file should be created");
 
-        // Verify the table exists by inserting and querying
         let msg = Message::text(Role::User, "hello".to_string());
         session.insert_message(&msg).await.expect("insert");
         let history = session.load_history().await.expect("load");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, Role::User);
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn create_session_with_custom_id_uses_that_id() {
         let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let id = uuid::Uuid::now_v7().to_string();
         let session = Session::new(Some(id.clone()))
             .await
@@ -223,17 +251,26 @@ mod tests {
 
         assert_eq!(session.id, id);
         assert!(dir.path().join(format!("{id}.db")).exists());
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn create_session_rejects_invalid_id() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let result = Session::new(Some("garbage".to_string())).await;
         assert!(result.is_err());
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn load_session_reads_existing_db() {
         let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let id = uuid::Uuid::now_v7().to_string();
 
         {
@@ -250,6 +287,8 @@ mod tests {
             ContentBlock::Text(t) => assert_eq!(t, "saved message"),
             _ => panic!("expected text block"),
         }
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
@@ -263,6 +302,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_or_load_loads_existing() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let id = uuid::Uuid::now_v7().to_string();
 
         {
@@ -276,10 +318,15 @@ mod tests {
         let session = Session::create_or_load(id).await.expect("create_or_load");
         let history = session.load_history().await.expect("history");
         assert_eq!(history.len(), 1);
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn create_or_load_creates_when_missing() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let id = uuid::Uuid::now_v7().to_string();
 
         let session = Session::create_or_load(id.clone())
@@ -288,10 +335,15 @@ mod tests {
         assert_eq!(session.id, id);
         let history = session.load_history().await.expect("history");
         assert!(history.is_empty());
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn insert_and_load_multiple_messages() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let session = Session::new(None).await.expect("create");
 
         session
@@ -312,10 +364,15 @@ mod tests {
         assert_eq!(history[0].role, Role::User);
         assert_eq!(history[1].role, Role::Assistant);
         assert_eq!(history[2].role, Role::User);
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn insert_message_with_tool_use_content() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let session = Session::new(None).await.expect("create");
 
         let msg = Message {
@@ -342,10 +399,15 @@ mod tests {
             ContentBlock::ToolUse { name, .. } => assert_eq!(name, "bash"),
             _ => panic!("expected tool_use"),
         }
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn insert_message_with_tool_result_content() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let session = Session::new(None).await.expect("create");
 
         let msg = Message {
@@ -372,15 +434,22 @@ mod tests {
             }
             _ => panic!("expected tool_result"),
         }
+
+        clear_test_sessions_dir();
     }
 
     #[tokio::test]
     async fn session_id_is_uuidv7() {
+        let dir = TempDir::new().expect("temp dir");
+        set_test_sessions_dir(dir.path());
+
         let session = Session::new(None).await.expect("create");
         assert!(
             validate_uuidv7(&session.id).is_ok(),
             "auto-generated session ID should be valid UUIDv7"
         );
+
+        clear_test_sessions_dir();
     }
 
     #[test]
