@@ -472,7 +472,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.set_mode(InputMode::Streaming);
-        input.set_mode(InputMode::Input);
+        input.set_mode(InputMode::Insert);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn mode_defaults_to_input() {
         let input = InputArea::new();
-        assert_eq!(input.mode(), &InputMode::Input);
+        assert_eq!(input.mode(), &InputMode::Insert);
     }
 
     #[test]
