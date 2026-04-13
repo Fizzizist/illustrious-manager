@@ -487,6 +487,77 @@ mod tests {
     }
 
     #[test]
+    fn esc_switches_to_normal_mode() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('i'));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.mode(), &InputMode::Normal);
+        assert_eq!(input.text(), "hi");
+    }
+
+    #[test]
+    fn i_returns_to_insert_mode() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('i'));
+        assert_eq!(input.mode(), &InputMode::Insert);
+    }
+
+    #[test]
+    fn normal_mode_ignores_typing() {
+        let mut input = InputArea::new();
+        input.input(char_key('a'));
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('x'));
+        input.input(char_key('y'));
+        assert_eq!(input.text(), "a");
+    }
+
+    #[test]
+    fn o_opens_line_below_and_enters_insert() {
+        let mut input = InputArea::new();
+        input.set_text("first");
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('o'));
+        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.lines().len(), 2);
+        assert_eq!(input.lines()[0], "first");
+        assert_eq!(input.lines()[1], "");
+    }
+
+    #[test]
+    fn upper_o_opens_line_above_and_enters_insert() {
+        let mut input = InputArea::new();
+        input.set_text("first");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.lines().len(), 2);
+        assert_eq!(input.lines()[0], "");
+        assert_eq!(input.lines()[1], "first");
+    }
+
+    #[test]
+    fn render_normal_mode_shows_title() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('i'));
+        input.set_mode(InputMode::Normal);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_normal_mode", terminal.backend());
+    }
+
+    #[test]
     fn mode_defaults_to_input() {
         let input = InputArea::new();
         assert_eq!(input.mode(), &InputMode::Insert);
