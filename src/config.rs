@@ -116,7 +116,7 @@ model = "glm-5.1"
 # Required: your Ollama Cloud API key
 # api_key = ""
 # Model to use
-# model = "llama3.2"
+# model = "glm-5.1"
 
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
@@ -178,7 +178,7 @@ fn default_zai_model() -> String {
 }
 
 fn default_ollama_model() -> String {
-    "llama3.2".to_string()
+    "glm-5.1".to_string()
 }
 
 fn default_region() -> String {
@@ -547,7 +547,7 @@ mod tests {
             zai: None,
             ollama: Some(OllamaConfig {
                 api_key: "".to_string(),
-                model: "llama3.2".to_string(),
+                model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -569,7 +569,7 @@ mod tests {
             zai: None,
             ollama: Some(OllamaConfig {
                 api_key: "test-key".to_string(),
-                model: "llama3.2".to_string(),
+                model: "glm-5.1".to_string(),
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),

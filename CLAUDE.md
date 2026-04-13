@@ -80,7 +80,7 @@ model = "glm-5.1"
 
 # [ollama]
 # api_key = ""                        # Ollama Cloud API key (required for ollama backend)
-# model = "llama3.2"
+# model = "glm-5.1"
 
 # [tools]
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never
