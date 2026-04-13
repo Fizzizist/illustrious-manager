@@ -104,30 +104,52 @@ impl<'a> ConversationArea<'a> {
     }
 
     pub fn max_scroll(&self, text_width: u16) -> u16 {
-        let paragraph = self.build_paragraph();
-        let total_visual = paragraph.line_count(text_width) as u16;
-        total_visual.saturating_sub(self.viewport_height)
-    }
-
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
-        let visible_height = area.height.saturating_sub(2);
-        let paragraph = self.build_paragraph();
-        let total_visual = paragraph.line_count(text_width) as u16;
-        let auto_scroll = total_visual.saturating_sub(visible_height);
-        let scroll_row = auto_scroll.saturating_sub(self.scroll_offset.min(auto_scroll));
-
-        let conversation = paragraph.scroll((scroll_row, 0));
-        frame.render_widget(conversation, area);
-    }
-
-    fn build_paragraph(&self) -> Paragraph<'_> {
-        Paragraph::new(self.lines())
+        let paragraph = Paragraph::new(self.lines())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(CONVERSATION_TITLE),
             )
-            .wrap(Wrap { trim: false })
+            .wrap(Wrap { trim: false });
+        let total_visual = paragraph.line_count(text_width) as u16;
+        total_visual.saturating_sub(self.viewport_height)
+    }
+
+    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
+        let visible_height = area.height.saturating_sub(2) as usize;
+
+        // Collect all logical lines (cheap: pre-rendered cache clones).
+        let all_lines = self.lines();
+        let total = all_lines.len();
+
+        // Take a window of at most WINDOW_FACTOR × visible_height logical lines from the
+        // end. Word-wrap can expand a logical line by at most ~width visual rows; a factor
+        // of 4 is conservative enough for any realistic terminal width.
+        // Crucially this bounds the cost of line_count to O(visible_height), not O(conversation).
+        const WINDOW_FACTOR: usize = 4;
+        let offset = self.scroll_offset as usize;
+        let window_end = total.saturating_sub(offset);
+        let window_size = (visible_height * WINDOW_FACTOR).max(visible_height + 1);
+        let window_start = window_end.saturating_sub(window_size);
+        let window: Vec<Line<'_>> = all_lines
+            .into_iter()
+            .skip(window_start)
+            .take(window_end - window_start)
+            .collect();
+
+        // Run line_count only on the small window, not the whole conversation.
+        let window_para = Paragraph::new(window)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(CONVERSATION_TITLE),
+            )
+            .wrap(Wrap { trim: false });
+        let window_visual = window_para.line_count(text_width);
+        let scroll_row = window_visual.saturating_sub(visible_height) as u16;
+
+        let conversation = window_para.scroll((scroll_row, 0));
+        frame.render_widget(conversation, area);
     }
 }
 
