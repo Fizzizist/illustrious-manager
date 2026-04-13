@@ -105,6 +105,10 @@ impl<'a> InputArea<'a> {
         self.textarea.clear();
     }
 
+    pub fn insert_paste(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+    }
+
     pub fn set_mode(&mut self, mode: InputMode) {
         self.mode = mode;
         self.apply_block();
