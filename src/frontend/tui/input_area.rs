@@ -1,16 +1,20 @@
+use arboard;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
-use ratatui_textarea::{TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-const INPUT_TITLE: &str = "Input (Enter to send, Ctrl+C to quit)";
+const INSERT_TITLE: &str = " -- INSERT -- ";
+const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const STREAMING_TITLE: &str = "Streaming...";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
-    Input,
+    Insert,
+    Normal,
     Streaming,
     ToolConfirmation {
         name: String,
@@ -28,7 +32,7 @@ impl<'a> InputArea<'a> {
         let textarea = TextArea::default();
         let mut input = Self {
             textarea,
-            mode: InputMode::Input,
+            mode: InputMode::Insert,
         };
         input.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         input
@@ -39,7 +43,38 @@ impl<'a> InputArea<'a> {
     }
 
     pub fn input(&mut self, event: crossterm::event::KeyEvent) -> bool {
-        self.textarea.input(event)
+        match self.mode {
+            InputMode::Insert => match event {
+                KeyEvent {
+                    code: KeyCode::Esc, ..
+                } => {
+                    self.set_mode(InputMode::Normal);
+                    true
+                }
+                // todo get past working. Figure out how `ratatui-textarea` is getting data from clipboard
+                _ => self.textarea.input(event),
+            },
+            InputMode::Normal => match event {
+                KeyEvent {
+                    code: KeyCode::Char('i'),
+                    ..
+                } => {
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('o'),
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::End);
+                    self.textarea.insert_newline();
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     pub fn lines(&self) -> &[String] {
@@ -82,7 +117,8 @@ impl<'a> InputArea<'a> {
 
     fn apply_block(&mut self) {
         let block = match &self.mode {
-            InputMode::Input => Block::default().borders(Borders::ALL).title(INPUT_TITLE),
+            InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
+            InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
             InputMode::Streaming => Block::default()
                 .borders(Borders::ALL)
                 .title(STREAMING_TITLE),
@@ -105,7 +141,8 @@ impl<'a> InputArea<'a> {
                     .min(max_height)
             }
             InputMode::Streaming => MIN_HEIGHT,
-            InputMode::Input => self.text_height_for_width(width, max_height),
+            InputMode::Insert => self.text_height_for_width(width, max_height),
+            InputMode::Normal => self.text_height_for_width(width, max_height),
         }
     }
 

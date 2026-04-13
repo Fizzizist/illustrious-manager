@@ -46,7 +46,7 @@ impl App {
     pub fn set_state(&mut self, state: AppState) {
         self.state = state;
         match &self.state {
-            AppState::Input => self.input.set_mode(InputMode::Input),
+            AppState::Input => self.input.set_mode(InputMode::Insert),
             AppState::Streaming => self.input.set_mode(InputMode::Streaming),
             AppState::ToolConfirmation { name, input } => {
                 self.input.set_mode(InputMode::ToolConfirmation {
@@ -353,9 +353,6 @@ async fn run_app(
                                     code: KeyCode::Char('c'),
                                     modifiers: KeyModifiers::CONTROL,
                                     ..
-                                }
-                                | KeyEvent {
-                                    code: KeyCode::Esc, ..
                                 } => break,
                                 KeyEvent {
                                     code: KeyCode::Enter,
