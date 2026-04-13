@@ -70,6 +70,16 @@ impl<'a> InputArea<'a> {
                     self.set_mode(InputMode::Insert);
                     true
                 }
+                KeyEvent {
+                    code: KeyCode::Char('O'),
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::Head);
+                    self.textarea.insert_newline();
+                    self.textarea.move_cursor(CursorMove::Up);
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
                 _ => false,
             },
             _ => false,
