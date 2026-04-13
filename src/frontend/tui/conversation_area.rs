@@ -83,68 +83,28 @@ impl<'a> ConversationArea<'a> {
     }
 
     pub fn max_scroll(&self, text_width: u16) -> u16 {
-        let paragraph = Paragraph::new(self.lines())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(CONVERSATION_TITLE),
-            )
-            .wrap(Wrap { trim: false });
-        let total_visual = paragraph.line_count(text_width) as u16;
+        let total_visual = self.build_paragraph().line_count(text_width) as u16;
         total_visual.saturating_sub(self.viewport_height)
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
         let visible_height = area.height.saturating_sub(2) as usize;
+        let paragraph = self.build_paragraph();
+        // Compute scroll_row in visual-line space, consistent with max_scroll().
+        let total_visual = paragraph.line_count(text_width);
+        let bottom = total_visual.saturating_sub(visible_height);
+        let scroll_row = bottom.saturating_sub(self.scroll_offset as usize) as u16;
+        frame.render_widget(paragraph.scroll((scroll_row, 0)), area);
+    }
 
-        // We need at most WINDOW_FACTOR × visible_height logical lines ending at
-        // `scroll_offset` lines before the bottom. Walk entries from the tail,
-        // rendering only what's needed — entries before the window are never touched.
-        const WINDOW_FACTOR: usize = 4;
-        let window_size = (visible_height * WINDOW_FACTOR).max(visible_height + 1);
-        let offset = self.scroll_offset as usize;
-        // Total lines we need to collect: the visible window plus the offset above it.
-        let budget = window_size + offset;
-
-        let mut tail_chunks: Vec<Vec<Line<'_>>> = Vec::new();
-        let mut collected = 0;
-
-        let response_lines = current_response_lines(self.current_response);
-        if !response_lines.is_empty() && collected < budget {
-            collected += response_lines.len();
-            tail_chunks.push(response_lines);
-        }
-
-        for entry in self.entries.iter().rev() {
-            if collected >= budget {
-                break;
-            }
-            let chunk = entry_lines(entry);
-            collected += chunk.len();
-            tail_chunks.push(chunk);
-        }
-
-        tail_chunks.reverse();
-        let all_tail: Vec<Line<'_>> = tail_chunks.into_iter().flatten().collect();
-
-        // `all_tail` ends at the true bottom. Drop `offset` lines from the end to
-        // implement user scroll-up, then take only `window_size` lines.
-        let end = all_tail.len().saturating_sub(offset);
-        let start = end.saturating_sub(window_size);
-        let window: Vec<Line<'_>> = all_tail.into_iter().skip(start).take(end - start).collect();
-
-        // line_count only over the small window — O(visible_height), not O(conversation).
-        let window_para = Paragraph::new(window)
+    fn build_paragraph(&self) -> Paragraph<'_> {
+        Paragraph::new(self.lines())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(CONVERSATION_TITLE),
             )
-            .wrap(Wrap { trim: false });
-        let window_visual = window_para.line_count(text_width);
-        let scroll_row = window_visual.saturating_sub(visible_height) as u16;
-
-        frame.render_widget(window_para.scroll((scroll_row, 0)), area);
+            .wrap(Wrap { trim: false })
     }
 }
 

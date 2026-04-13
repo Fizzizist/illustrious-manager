@@ -283,6 +283,54 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
 }
 
 #[test]
+fn test_tui_scrolled_up_with_wrapping_content_shows_correct_messages() {
+    // Regression test for logical-vs-visual line space mismatch during scroll-up.
+    // Each entry wraps across multiple visual lines; scroll_offset is in visual-line
+    // space. The viewport must be fully filled with real content, no blank lines.
+    let mut app = App::new(std::sync::Arc::new(
+        illustrious_manager::tools::ToolRegistry::new(),
+    ));
+    app.viewport_height = 22;
+    app.viewport_width = 78;
+    for i in 0..15 {
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            format!(
+                "WRAP_MSG_{i} this line is long enough to word-wrap at eighty columns wide terminal"
+            ),
+        ));
+    }
+    // Scroll up 10 visual lines from the bottom.
+    app.scroll_offset = 10;
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
+    terminal
+        .draw(|frame| render_app(&app, frame))
+        .expect("draw must succeed");
+
+    let buffer = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().to_string())
+        .collect::<String>();
+    // With wrapping, the viewport must be fully filled — no two consecutive blank
+    // lines (the border + a blank interior row would suggest the window fell short).
+    assert!(
+        !buffer.contains("│                                                                              │\n│                                                                              │"),
+        "two consecutive blank interior lines indicate the viewport was not filled:\n{buffer}"
+    );
+    // Scrolled up 10 visual lines: the last visible message must not be the very
+    // last entry (that would mean scroll-up had no effect).
+    assert!(
+        !buffer.contains("WRAP_MSG_14"),
+        "with scroll_offset=10 the last entry should be scrolled off-screen:\n{buffer}"
+    );
+}
+
+#[test]
 fn test_tui_scrolled_up_shows_earlier_content() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
