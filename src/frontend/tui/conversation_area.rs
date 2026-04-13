@@ -194,8 +194,9 @@ impl<'a> ConversationArea<'a> {
         let auto_scroll = total_visual.saturating_sub(visible_height);
         let scroll_row = auto_scroll.saturating_sub(self.scroll_offset.min(auto_scroll));
 
-        // Windowed approach: find which entries are visible and only collect those lines
-        let window_lines = self.collect_window_lines(
+        // Windowed approach: find which entries are visible and only collect those lines,
+        // plus compute how many wrapped lines to skip at the top of the window.
+        let (window_lines, lines_to_skip) = self.collect_window_lines(
             &entry_counts,
             &response_lines,
             scroll_row,
@@ -209,7 +210,8 @@ impl<'a> ConversationArea<'a> {
                     .borders(Borders::ALL)
                     .title(CONVERSATION_TITLE),
             )
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((lines_to_skip, 0));
         frame.render_widget(conversation, area);
     }
 
@@ -220,11 +222,16 @@ impl<'a> ConversationArea<'a> {
         scroll_row: u16,
         visible_height: u16,
         text_width: u16,
-    ) -> Vec<Line<'static>> {
+    ) -> (Vec<Line<'static>>, u16) {
         let window_end = scroll_row.saturating_add(visible_height);
 
         let mut result = Vec::new();
         let mut cumulative: u16 = 0;
+        // Track wrapped lines from entries fully above the viewport that were
+        // skipped — the difference between scroll_row and the start of the
+        // first included entry tells us how many wrapped lines to skip via
+        // Paragraph::scroll.
+        let mut first_included_start: Option<u16> = None;
 
         for (i, &count) in entry_counts.iter().enumerate() {
             let entry_start = cumulative;
@@ -238,16 +245,11 @@ impl<'a> ConversationArea<'a> {
                 break;
             }
 
-            // This entry overlaps the visible window — include its lines
-            let entry_lines = self.entries[i].lines();
-            if entry_start >= scroll_row && entry_end <= window_end {
-                result.extend(entry_lines.iter().cloned());
-            } else {
-                // Partial visibility: need to figure out which wrapped sub-lines to include
-                // For simplicity and correctness, include all lines and let the scroll handle it.
-                // The key optimization is that we skip entries entirely outside the window.
-                result.extend(entry_lines.iter().cloned());
+            if first_included_start.is_none() {
+                first_included_start = Some(entry_start);
             }
+
+            result.extend(self.entries[i].lines().iter().cloned());
 
             cumulative = entry_end;
         }
@@ -259,11 +261,16 @@ impl<'a> ConversationArea<'a> {
             let response_end = cumulative.saturating_add(response_count);
 
             if response_end > scroll_row && response_start < window_end {
+                if first_included_start.is_none() {
+                    first_included_start = Some(response_start);
+                }
                 result.extend(response_lines.iter().cloned());
             }
         }
 
-        result
+        let lines_to_skip = scroll_row.saturating_sub(first_included_start.unwrap_or(scroll_row));
+
+        (result, lines_to_skip)
     }
 }
 
@@ -751,6 +758,100 @@ mod tests {
         assert!(
             rendered.contains("message 19"),
             "latest message should be visible with scroll_offset=0, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn regression_large_entry_scrollable_through_middle() {
+        let text_width = 30u16;
+        let viewport = 6u16;
+        let long_text = (0..20)
+            .map(|i| format!("Line number {i} of the response"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            long_text,
+        )];
+
+        let mut area = ConversationArea::new(&mut entries, "", 0, viewport);
+        let max = area.max_scroll(text_width);
+        assert!(max > 0, "should have scrollable content");
+
+        // Render at different scroll positions and collect what's visible
+        let mut all_visible_content: Vec<String> = Vec::new();
+        let mut scroll = max;
+        loop {
+            let backend = ratatui::backend::TestBackend::new(text_width + 2, viewport + 2);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+            terminal
+                .draw(|frame| {
+                    let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
+                    let mut area = ConversationArea::new(&mut entries, "", scroll, viewport);
+                    area.render(frame, rect, text_width);
+                })
+                .expect("draw");
+            let rendered = format!("{:?}", terminal.backend());
+            all_visible_content.push(rendered);
+
+            if scroll == 0 {
+                break;
+            }
+            scroll = scroll.saturating_sub(viewport);
+        }
+
+        // Every line of the entry should appear in at least one scroll position
+        for i in 0..20 {
+            let needle = format!("Line number {i} ");
+            let found = all_visible_content
+                .iter()
+                .any(|content| content.contains(&needle));
+            assert!(
+                found,
+                "Line {i} should be visible at some scroll position but was not found"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_adjacent_scroll_positions_differ() {
+        let text_width = 58u16;
+        let viewport = 8u16;
+        let long_text = "word ".repeat(200);
+        let mut entries = vec![
+            ConversationEntry::new(ConversationRole::Assistant, long_text),
+            ConversationEntry::new(ConversationRole::User, "final message".to_string()),
+        ];
+
+        let mut area = ConversationArea::new(&mut entries, "", 0, viewport);
+        let max = area.max_scroll(text_width);
+        assert!(
+            max > viewport,
+            "need enough content to scroll multiple pages"
+        );
+
+        // Render at two adjacent half-page scroll positions
+        let scroll_a = max;
+        let scroll_b = max.saturating_sub(viewport / 2);
+
+        let render_at = |entries: &mut Vec<ConversationEntry>, scroll: u16| -> String {
+            let backend = ratatui::backend::TestBackend::new(60, viewport + 2);
+            let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+            terminal
+                .draw(|frame| {
+                    let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
+                    let mut area = ConversationArea::new(entries, "", scroll, viewport);
+                    area.render(frame, rect, text_width);
+                })
+                .expect("draw");
+            format!("{:?}", terminal.backend())
+        };
+
+        let content_a = render_at(&mut entries, scroll_a);
+        let content_b = render_at(&mut entries, scroll_b);
+        assert_ne!(
+            content_a, content_b,
+            "adjacent scroll positions should show different content"
         );
     }
 }
