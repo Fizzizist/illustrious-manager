@@ -17,7 +17,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
+use super::conversation_area::{
+    ConversationArea, ConversationEntry, ConversationRole, LineCountCache,
+};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
@@ -42,7 +44,9 @@ pub struct App {
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
     pub scroll_offset: u16,
     pub viewport_height: u16,
+    pub text_width: u16,
     tools: std::sync::Arc<ToolRegistry>,
+    line_cache: LineCountCache,
 }
 
 impl App {
@@ -69,7 +73,9 @@ impl App {
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+            text_width: 0,
             tools,
+            line_cache: LineCountCache::new(),
         }
     }
 
@@ -168,15 +174,16 @@ impl App {
         }
     }
 
-    fn max_scroll(&self) -> u16 {
-        let text_width = 0;
+    fn max_scroll(&mut self) -> u16 {
+        let cached_count = self.line_cache.get(&self.conversation, self.text_width);
         let conv_area = ConversationArea::new(
-            &self.conversation,
+            self.line_cache.lines(),
             &self.current_response,
             0,
             self.viewport_height,
+            cached_count,
         );
-        conv_area.max_scroll(text_width)
+        conv_area.max_scroll(self.text_width)
     }
 }
 
@@ -187,7 +194,7 @@ impl Default for App {
 }
 
 /// Render the app to a frame. Includes scroll and cursor positioning.
-pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
+pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let input_height = app
         .input
         .height_for_width(frame.area().width, frame.area().height);
@@ -198,11 +205,14 @@ pub fn render_app(app: &App, frame: &mut ratatui::Frame) {
         .split(frame.area());
 
     let text_width = chunks[0].width.saturating_sub(2);
+    app.text_width = text_width;
+    let cached_count = app.line_cache.get(&app.conversation, text_width);
     let conv_area = ConversationArea::new(
-        &app.conversation,
+        app.line_cache.lines(),
         &app.current_response,
         app.scroll_offset,
         chunks[0].height.saturating_sub(2),
+        cached_count,
     );
     conv_area.render(frame, chunks[0], text_width);
 
@@ -346,7 +356,7 @@ async fn run_app(
 
     loop {
         app.viewport_height = terminal.size()?.height.saturating_sub(5);
-        terminal.draw(|frame| render_app(&app, frame))?;
+        terminal.draw(|frame| render_app(&mut app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
