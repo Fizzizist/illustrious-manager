@@ -1,16 +1,19 @@
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
-use ratatui_textarea::{TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
-const INPUT_TITLE: &str = "Input (Enter to send, Ctrl+C to quit)";
+const INSERT_TITLE: &str = " -- INSERT -- ";
+const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const STREAMING_TITLE: &str = "Streaming...";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputMode {
-    Input,
+    Insert,
+    Normal,
     Streaming,
     ToolConfirmation {
         name: String,
@@ -28,7 +31,7 @@ impl<'a> InputArea<'a> {
         let textarea = TextArea::default();
         let mut input = Self {
             textarea,
-            mode: InputMode::Input,
+            mode: InputMode::Insert,
         };
         input.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         input
@@ -39,7 +42,48 @@ impl<'a> InputArea<'a> {
     }
 
     pub fn input(&mut self, event: crossterm::event::KeyEvent) -> bool {
-        self.textarea.input(event)
+        match self.mode {
+            InputMode::Insert => match event {
+                KeyEvent {
+                    code: KeyCode::Esc, ..
+                } => {
+                    self.set_mode(InputMode::Normal);
+                    true
+                }
+                // todo get past working. Figure out how `ratatui-textarea` is getting data from clipboard
+                _ => self.textarea.input(event),
+            },
+            InputMode::Normal => match event {
+                KeyEvent {
+                    code: KeyCode::Char('i'),
+                    ..
+                } => {
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('o'),
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::End);
+                    self.textarea.insert_newline();
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('O'),
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::Head);
+                    self.textarea.insert_newline();
+                    self.textarea.move_cursor(CursorMove::Up);
+                    self.set_mode(InputMode::Insert);
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     pub fn lines(&self) -> &[String] {
@@ -71,6 +115,10 @@ impl<'a> InputArea<'a> {
         self.textarea.clear();
     }
 
+    pub fn insert_paste(&mut self, text: &str) {
+        self.textarea.insert_str(text);
+    }
+
     pub fn set_mode(&mut self, mode: InputMode) {
         self.mode = mode;
         self.apply_block();
@@ -82,7 +130,8 @@ impl<'a> InputArea<'a> {
 
     fn apply_block(&mut self) {
         let block = match &self.mode {
-            InputMode::Input => Block::default().borders(Borders::ALL).title(INPUT_TITLE),
+            InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
+            InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
             InputMode::Streaming => Block::default()
                 .borders(Borders::ALL)
                 .title(STREAMING_TITLE),
@@ -105,7 +154,8 @@ impl<'a> InputArea<'a> {
                     .min(max_height)
             }
             InputMode::Streaming => MIN_HEIGHT,
-            InputMode::Input => self.text_height_for_width(width, max_height),
+            InputMode::Insert => self.text_height_for_width(width, max_height),
+            InputMode::Normal => self.text_height_for_width(width, max_height),
         }
     }
 
@@ -422,7 +472,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.set_mode(InputMode::Streaming);
-        input.set_mode(InputMode::Input);
+        input.set_mode(InputMode::Insert);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -437,9 +487,80 @@ mod tests {
     }
 
     #[test]
+    fn esc_switches_to_normal_mode() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('i'));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.mode(), &InputMode::Normal);
+        assert_eq!(input.text(), "hi");
+    }
+
+    #[test]
+    fn i_returns_to_insert_mode() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('i'));
+        assert_eq!(input.mode(), &InputMode::Insert);
+    }
+
+    #[test]
+    fn normal_mode_ignores_typing() {
+        let mut input = InputArea::new();
+        input.input(char_key('a'));
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('x'));
+        input.input(char_key('y'));
+        assert_eq!(input.text(), "a");
+    }
+
+    #[test]
+    fn o_opens_line_below_and_enters_insert() {
+        let mut input = InputArea::new();
+        input.set_text("first");
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('o'));
+        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.lines().len(), 2);
+        assert_eq!(input.lines()[0], "first");
+        assert_eq!(input.lines()[1], "");
+    }
+
+    #[test]
+    fn upper_o_opens_line_above_and_enters_insert() {
+        let mut input = InputArea::new();
+        input.set_text("first");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
+        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.lines().len(), 2);
+        assert_eq!(input.lines()[0], "");
+        assert_eq!(input.lines()[1], "first");
+    }
+
+    #[test]
+    fn render_normal_mode_shows_title() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('i'));
+        input.set_mode(InputMode::Normal);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_normal_mode", terminal.backend());
+    }
+
+    #[test]
     fn mode_defaults_to_input() {
         let input = InputArea::new();
-        assert_eq!(input.mode(), &InputMode::Input);
+        assert_eq!(input.mode(), &InputMode::Insert);
     }
 
     #[test]
