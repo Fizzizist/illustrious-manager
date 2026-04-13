@@ -1,5 +1,8 @@
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -301,14 +304,18 @@ pub async fn run(
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, agent, initial_prompt, logger).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -345,7 +352,11 @@ async fn run_app(
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
-                if let Event::Key(key) = terminal_event && !app.handle_scroll_key(&key) {
+                if let Event::Paste(text) = &terminal_event {
+                    if matches!(app.state, AppState::Input) {
+                        app.input.insert_paste(text);
+                    }
+                } else if let Event::Key(key) = terminal_event && !app.handle_scroll_key(&key) {
                     match app.state {
                         AppState::Input => {
                             match key {
