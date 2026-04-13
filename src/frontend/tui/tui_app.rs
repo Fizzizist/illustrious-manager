@@ -42,6 +42,7 @@ pub struct App {
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
     pub scroll_offset: u16,
     pub viewport_height: u16,
+    pub viewport_width: u16,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -69,6 +70,7 @@ impl App {
             confirmation_tx: None,
             scroll_offset: 0,
             viewport_height: 0,
+            viewport_width: 0,
             tools,
         }
     }
@@ -169,14 +171,13 @@ impl App {
     }
 
     fn max_scroll(&self) -> u16 {
-        let text_width = 0;
         let conv_area = ConversationArea::new(
             &self.conversation,
             &self.current_response,
             0,
             self.viewport_height,
         );
-        conv_area.max_scroll(text_width)
+        conv_area.max_scroll(self.viewport_width)
     }
 }
 
@@ -345,7 +346,9 @@ async fn run_app(
     let mut terminal_events = EventStream::new();
 
     loop {
-        app.viewport_height = terminal.size()?.height.saturating_sub(5);
+        let size = terminal.size()?;
+        app.viewport_height = size.height.saturating_sub(5);
+        app.viewport_width = size.width.saturating_sub(2);
         terminal.draw(|frame| render_app(&app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
@@ -501,6 +504,7 @@ mod tests {
     fn app_with_content(viewport_height: u16) -> App {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.viewport_height = viewport_height;
+        app.viewport_width = 58;
         for i in 0..40 {
             app.conversation.push(ConversationEntry {
                 role: ConversationRole::User,

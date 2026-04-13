@@ -105,47 +105,30 @@ impl<'a> ConversationArea<'a> {
     }
 
     pub fn max_scroll(&self, text_width: u16) -> u16 {
-        let conv_lines = self.lines();
-        let total_visual: u16 = conv_lines
-            .iter()
-            .map(|line| {
-                if text_width == 0 {
-                    1u16
-                } else {
-                    let w = line.width() as u16;
-                    if w == 0 { 1u16 } else { w.div_ceil(text_width) }
-                }
-            })
-            .sum();
+        let paragraph = self.build_paragraph();
+        let total_visual = paragraph.line_count(text_width) as u16;
         total_visual.saturating_sub(self.viewport_height)
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
-        let conv_lines = self.lines();
         let visible_height = area.height.saturating_sub(2);
-        let total_visual: u16 = conv_lines
-            .iter()
-            .map(|line| {
-                if text_width == 0 {
-                    1u16
-                } else {
-                    let w = line.width() as u16;
-                    if w == 0 { 1u16 } else { w.div_ceil(text_width) }
-                }
-            })
-            .sum();
+        let paragraph = self.build_paragraph();
+        let total_visual = paragraph.line_count(text_width) as u16;
         let auto_scroll = total_visual.saturating_sub(visible_height);
         let scroll_row = auto_scroll.saturating_sub(self.scroll_offset.min(auto_scroll));
 
-        let conversation = Paragraph::new(conv_lines)
+        let conversation = paragraph.scroll((scroll_row, 0));
+        frame.render_widget(conversation, area);
+    }
+
+    fn build_paragraph(&self) -> Paragraph<'_> {
+        Paragraph::new(self.lines())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(CONVERSATION_TITLE),
             )
             .wrap(Wrap { trim: false })
-            .scroll((scroll_row, 0));
-        frame.render_widget(conversation, area);
     }
 }
 
@@ -468,6 +451,67 @@ mod tests {
         insta::assert_snapshot!(
             "render_tool_entry_not_rendered_as_markdown",
             terminal.backend()
+        );
+    }
+
+    #[test]
+    fn auto_scroll_shows_latest_entry_with_word_wrapped_content() {
+        let mut entries: Vec<ConversationEntry> = (0..10)
+            .map(|i| ConversationEntry {
+                role: ConversationRole::Assistant,
+                content: format!(
+                    "Message {i} with enough words to trigger word wrapping behavior in a narrow terminal"
+                ),
+            })
+            .collect();
+        entries.push(ConversationEntry {
+            role: ConversationRole::User,
+            content: "FINAL_USER_MESSAGE".to_string(),
+        });
+        let backend = ratatui::backend::TestBackend::new(40, 12);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        let area_widget = ConversationArea::new(&entries, "", 0, 10);
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 40, 12);
+                area_widget.render(frame, rect, 38);
+            })
+            .expect("draw");
+
+        let buffer = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol().to_string())
+            .collect::<String>();
+        assert!(
+            buffer.contains("FINAL_USER_MESSAGE"),
+            "auto-scroll must show the latest message at the bottom; buffer was:\n{}",
+            buffer
+        );
+    }
+
+    #[test]
+    fn max_scroll_accounts_for_word_wrapping() {
+        let entries: Vec<ConversationEntry> = (0..5)
+            .map(|i| ConversationEntry {
+                role: ConversationRole::User,
+                content: format!(
+                    "Message {i} with several words that will definitely wrap at narrow width"
+                ),
+            })
+            .collect();
+        let area_narrow = ConversationArea::new(&entries, "", 0, 5);
+        let area_wide = ConversationArea::new(&entries, "", 0, 5);
+
+        let max_narrow = area_narrow.max_scroll(15);
+        let max_wide = area_wide.max_scroll(200);
+
+        assert!(
+            max_narrow > max_wide,
+            "narrow width (max_scroll={max_narrow}) should produce more scrollable content \
+             than wide width (max_scroll={max_wide}) due to word wrapping"
         );
     }
 }
