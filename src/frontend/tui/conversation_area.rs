@@ -43,19 +43,11 @@ impl ConversationRole {
 pub struct ConversationEntry {
     pub role: ConversationRole,
     pub content: String,
-    /// Pre-rendered ratatui lines (role header + indented content + blank separator).
-    /// Built once at construction so markdown parsing never happens on the render hot-path.
-    rendered_lines: Vec<Line<'static>>,
 }
 
 impl ConversationEntry {
     pub fn new(role: ConversationRole, content: String) -> Self {
-        let rendered_lines = build_entry_lines(&role, &content);
-        Self {
-            role,
-            content,
-            rendered_lines,
-        }
+        Self { role, content }
     }
 }
 
@@ -84,22 +76,9 @@ impl<'a> ConversationArea<'a> {
     pub fn lines(&self) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         for entry in self.entries {
-            lines.extend(entry.rendered_lines.iter().cloned());
+            lines.extend(entry_lines(entry));
         }
-
-        if !self.current_response.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "Assistant:",
-                Style::default().fg(Color::Blue),
-            )));
-            let rendered = markdown_to_text(self.current_response);
-            for line in rendered.lines {
-                let mut prefixed = Line::from(Span::raw("  "));
-                prefixed.spans.extend(line.spans);
-                lines.push(prefixed);
-            }
-        }
-
+        lines.extend(current_response_lines(self.current_response));
         lines
     }
 
@@ -118,26 +97,43 @@ impl<'a> ConversationArea<'a> {
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
         let visible_height = area.height.saturating_sub(2) as usize;
 
-        // Collect all logical lines (cheap: pre-rendered cache clones).
-        let all_lines = self.lines();
-        let total = all_lines.len();
-
-        // Take a window of at most WINDOW_FACTOR × visible_height logical lines from the
-        // end. Word-wrap can expand a logical line by at most ~width visual rows; a factor
-        // of 4 is conservative enough for any realistic terminal width.
-        // Crucially this bounds the cost of line_count to O(visible_height), not O(conversation).
+        // We need at most WINDOW_FACTOR × visible_height logical lines ending at
+        // `scroll_offset` lines before the bottom. Walk entries from the tail,
+        // rendering only what's needed — entries before the window are never touched.
         const WINDOW_FACTOR: usize = 4;
-        let offset = self.scroll_offset as usize;
-        let window_end = total.saturating_sub(offset);
         let window_size = (visible_height * WINDOW_FACTOR).max(visible_height + 1);
-        let window_start = window_end.saturating_sub(window_size);
-        let window: Vec<Line<'_>> = all_lines
-            .into_iter()
-            .skip(window_start)
-            .take(window_end - window_start)
-            .collect();
+        let offset = self.scroll_offset as usize;
+        // Total lines we need to collect: the visible window plus the offset above it.
+        let budget = window_size + offset;
 
-        // Run line_count only on the small window, not the whole conversation.
+        let mut tail_chunks: Vec<Vec<Line<'_>>> = Vec::new();
+        let mut collected = 0;
+
+        let response_lines = current_response_lines(self.current_response);
+        if !response_lines.is_empty() && collected < budget {
+            collected += response_lines.len();
+            tail_chunks.push(response_lines);
+        }
+
+        for entry in self.entries.iter().rev() {
+            if collected >= budget {
+                break;
+            }
+            let chunk = entry_lines(entry);
+            collected += chunk.len();
+            tail_chunks.push(chunk);
+        }
+
+        tail_chunks.reverse();
+        let all_tail: Vec<Line<'_>> = tail_chunks.into_iter().flatten().collect();
+
+        // `all_tail` ends at the true bottom. Drop `offset` lines from the end to
+        // implement user scroll-up, then take only `window_size` lines.
+        let end = all_tail.len().saturating_sub(offset);
+        let start = end.saturating_sub(window_size);
+        let window: Vec<Line<'_>> = all_tail.into_iter().skip(start).take(end - start).collect();
+
+        // line_count only over the small window — O(visible_height), not O(conversation).
         let window_para = Paragraph::new(window)
             .block(
                 Block::default()
@@ -148,18 +144,17 @@ impl<'a> ConversationArea<'a> {
         let window_visual = window_para.line_count(text_width);
         let scroll_row = window_visual.saturating_sub(visible_height) as u16;
 
-        let conversation = window_para.scroll((scroll_row, 0));
-        frame.render_widget(conversation, area);
+        frame.render_widget(window_para.scroll((scroll_row, 0)), area);
     }
 }
 
-fn build_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
+fn entry_lines<'a>(entry: &'a ConversationEntry) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line<'a>> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!("{}:", role.display_label()),
-        Style::default().fg(role.color()),
+        format!("{}:", entry.role.display_label()),
+        Style::default().fg(entry.role.color()),
     )));
-    let display_content = maybe_truncate(content, role);
+    let display_content = maybe_truncate(&entry.content, &entry.role);
     let rendered = markdown_to_text(&display_content);
     for line in rendered.lines {
         let mut prefixed = Line::from(Span::raw("  "));
@@ -171,6 +166,24 @@ fn build_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static
         lines.push(prefixed);
     }
     lines.push(Line::from(""));
+    lines
+}
+
+fn current_response_lines(current_response: &str) -> Vec<Line<'_>> {
+    if current_response.is_empty() {
+        return vec![];
+    }
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Assistant:",
+        Style::default().fg(Color::Blue),
+    )));
+    let rendered = markdown_to_text(current_response);
+    for line in rendered.lines {
+        let mut prefixed = Line::from(Span::raw("  "));
+        prefixed.spans.extend(line.spans);
+        lines.push(prefixed);
+    }
     lines
 }
 
