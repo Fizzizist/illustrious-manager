@@ -3,7 +3,6 @@ source: src/frontend/tui/conversation_area.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│You:                                                      │"
 "│  message 47                                              │"
 "│                                                          │"
 "│You:                                                      │"
@@ -11,4 +10,5 @@ expression: terminal.backend()
 "│                                                          │"
 "│You:                                                      │"
 "│  message 49                                              │"
+"│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
