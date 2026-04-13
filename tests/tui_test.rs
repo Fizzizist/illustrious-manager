@@ -10,14 +10,14 @@ fn test_tui_tool_call_renders_inline() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: "Run ls".to_string(),
-    });
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::ToolUse,
-        content: "bash\n  {\"command\":\"ls\"}".to_string(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::User,
+        "Run ls".to_string(),
+    ));
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::ToolUse,
+        "bash\n  {\"command\":\"ls\"}".to_string(),
+    ));
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -32,14 +32,14 @@ fn test_tui_tool_result_renders_below_invocation() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::ToolUse,
-        content: "bash\n  {\"command\":\"ls\"}".to_string(),
-    });
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::ToolResult,
-        content: "file1.txt\nfile2.txt".to_string(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::ToolUse,
+        "bash\n  {\"command\":\"ls\"}".to_string(),
+    ));
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::ToolResult,
+        "file1.txt\nfile2.txt".to_string(),
+    ));
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -55,10 +55,10 @@ fn test_tui_long_tool_result_is_truncated() {
         illustrious_manager::tools::ToolRegistry::new(),
     ));
     let long_output = "x".repeat(500);
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::ToolResult,
-        content: long_output,
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::ToolResult,
+        long_output,
+    ));
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -73,10 +73,10 @@ fn test_tui_confirmation_prompt_state_renders() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: "Write a file".to_string(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::User,
+        "Write a file".to_string(),
+    ));
     app.set_state(AppState::ToolConfirmation {
         name: "write_file".to_string(),
         input: serde_json::json!({"path": "/tmp/test.txt", "content": "hello"}),
@@ -109,14 +109,14 @@ fn test_tui_with_conversation() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: "Hello!".to_string(),
-    });
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::Assistant,
-        content: "Hi there! How can I help you?".to_string(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::User,
+        "Hello!".to_string(),
+    ));
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::Assistant,
+        "Hi there! How can I help you?".to_string(),
+    ));
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).expect("terminal creation must succeed");
@@ -132,10 +132,10 @@ fn test_tui_streaming_state() {
     let mut app = App::new(std::sync::Arc::new(
         illustrious_manager::tools::ToolRegistry::new(),
     ));
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: "Tell me a story".to_string(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::User,
+        "Tell me a story".to_string(),
+    ));
     app.current_response = "Once upon a time".to_string();
     app.set_state(AppState::Streaming);
 
@@ -257,14 +257,14 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
     // Each assistant response is 100 chars, which wraps at 78 chars (80 wide - 2 borders)
     let long_response = "x".repeat(100);
     for i in 0..10 {
-        app.conversation.push(ConversationEntry {
-            role: ConversationRole::User,
-            content: format!("Message {i}"),
-        });
-        app.conversation.push(ConversationEntry {
-            role: ConversationRole::Assistant,
-            content: long_response.clone(),
-        });
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            format!("Message {i}"),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            long_response.clone(),
+        ));
     }
     // scroll_offset=0 means auto-scroll to bottom — the last entry must be visible
     app.scroll_offset = 0;
@@ -288,10 +288,10 @@ fn test_tui_scrolled_up_shows_earlier_content() {
         illustrious_manager::tools::ToolRegistry::new(),
     ));
     for i in 0..20 {
-        app.conversation.push(ConversationEntry {
-            role: ConversationRole::User,
-            content: format!("Message {i}"),
-        });
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            format!("Message {i}"),
+        ));
     }
     app.scroll_offset = 10;
 

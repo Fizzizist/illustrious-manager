@@ -83,26 +83,25 @@ impl App {
             };
             for block in &message.content {
                 let entry = match block {
-                    crate::types::ContentBlock::Text(text) => Some(ConversationEntry {
-                        role: role.clone(),
-                        content: text.clone(),
-                    }),
+                    crate::types::ContentBlock::Text(text) => {
+                        Some(ConversationEntry::new(role.clone(), text.clone()))
+                    }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        Some(ConversationEntry {
-                            role: ConversationRole::ToolUse,
-                            content: self.tool_use_markdown(name, input),
-                        })
+                        Some(ConversationEntry::new(
+                            ConversationRole::ToolUse,
+                            self.tool_use_markdown(name, input),
+                        ))
                     }
                     crate::types::ContentBlock::ToolResult {
                         content, is_error, ..
-                    } => Some(ConversationEntry {
-                        role: if *is_error {
+                    } => Some(ConversationEntry::new(
+                        if *is_error {
                             ConversationRole::Error
                         } else {
                             ConversationRole::ToolResult
                         },
-                        content: content.clone(),
-                    }),
+                        content.clone(),
+                    )),
                 };
                 if let Some(e) = entry {
                     self.conversation.push(e);
@@ -225,20 +224,16 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
         }
         AgentEvent::ResponseComplete(full) => {
-            app.conversation.push(ConversationEntry {
-                role: ConversationRole::Assistant,
-                content: full,
-            });
+            app.conversation
+                .push(ConversationEntry::new(ConversationRole::Assistant, full));
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
         }
         AgentEvent::Error(msg) => {
-            app.conversation.push(ConversationEntry {
-                role: ConversationRole::Error,
-                content: msg,
-            });
+            app.conversation
+                .push(ConversationEntry::new(ConversationRole::Error, msg));
             app.current_response.clear();
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
@@ -246,15 +241,15 @@ pub fn handle_agent_event(
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry {
-                    role: ConversationRole::Assistant,
-                    content: std::mem::take(&mut app.current_response),
-                });
+                app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Assistant,
+                    std::mem::take(&mut app.current_response),
+                ));
             }
-            app.conversation.push(ConversationEntry {
-                role: ConversationRole::ToolUse,
-                content: app.tool_use_markdown(&name, &input),
-            });
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::ToolUse,
+                app.tool_use_markdown(&name, &input),
+            ));
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
@@ -277,18 +272,15 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry {
-                role,
-                content: display,
-            });
+            app.conversation.push(ConversationEntry::new(role, display));
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry {
-                    role: ConversationRole::Assistant,
-                    content: std::mem::take(&mut app.current_response),
-                });
+                app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Assistant,
+                    std::mem::take(&mut app.current_response),
+                ));
             }
             app.set_state(AppState::ToolConfirmation { name, input });
         }
@@ -409,10 +401,7 @@ async fn run_app(
                                     AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
                                     _ => unreachable!(),
                                 };
-                                app.conversation.push(ConversationEntry {
-                                    role: ConversationRole::ToolUse,
-                                    content: app.tool_use_markdown(&name, &input),
-                                });
+                                app.conversation.push(ConversationEntry::new(ConversationRole::ToolUse, app.tool_use_markdown(&name, &input)));
                                 let sent = app
                                     .confirmation_tx
                                     .as_ref()
@@ -420,10 +409,7 @@ async fn run_app(
                                 if sent {
                                     app.set_state(AppState::Streaming);
                                 } else {
-                                    app.conversation.push(ConversationEntry {
-                                        role: ConversationRole::Error,
-                                        content: "Confirmation channel closed unexpectedly.".to_string(),
-                                    });
+                                    app.conversation.push(ConversationEntry::new(ConversationRole::Error, "Confirmation channel closed unexpectedly.".to_string()));
                                     app.confirmation_tx = None;
                                     app.set_state(AppState::Input);
                                 }
@@ -460,10 +446,10 @@ pub async fn submit_message(
     let input = app.input_text();
     app.input.clear();
 
-    app.conversation.push(ConversationEntry {
-        role: ConversationRole::User,
-        content: input.clone(),
-    });
+    app.conversation.push(ConversationEntry::new(
+        ConversationRole::User,
+        input.clone(),
+    ));
 
     app.scroll_offset = 0;
     app.set_state(AppState::Streaming);
@@ -506,10 +492,10 @@ mod tests {
         app.viewport_height = viewport_height;
         app.viewport_width = 58;
         for i in 0..40 {
-            app.conversation.push(ConversationEntry {
-                role: ConversationRole::User,
-                content: format!("line {i}"),
-            });
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::User,
+                format!("line {i}"),
+            ));
         }
         app
     }
