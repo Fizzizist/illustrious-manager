@@ -2,7 +2,7 @@
 source: src/frontend/tui/input_area.rs
 expression: terminal.backend()
 ---
-"┌Input (Enter to se┐"
+"┌ -- INSERT -- ────┐"
 "│abcdefghijklmnopqr│"
 "│stuvwxyz0123456789│"
 "└──────────────────┘"
