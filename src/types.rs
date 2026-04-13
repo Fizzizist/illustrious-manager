@@ -42,7 +42,13 @@ impl Serialize for ContentBlock {
         S: serde::Serializer,
     {
         match self {
-            ContentBlock::Text(s) => s.serialize(serializer),
+            ContentBlock::Text(s) => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "text")?;
+                map.serialize_entry("text", s)?;
+                map.end()
+            }
             ContentBlock::ToolUse { id, name, input } => {
                 use serde::ser::SerializeMap;
                 let mut map = serializer.serialize_map(Some(4))?;
@@ -111,11 +117,15 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let mut tool_use_id = None;
                 let mut content = None;
                 let mut is_error = None;
+                let mut text = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "type" => {
                             type_field = Some(map.next_value()?);
+                        }
+                        "text" => {
+                            text = Some(map.next_value()?);
                         }
                         "id" => {
                             id = Some(map.next_value()?);
@@ -142,6 +152,9 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 }
 
                 match type_field.as_deref() {
+                    Some("text") => Ok(ContentBlock::Text(
+                        text.ok_or_else(|| de::Error::missing_field("text"))?,
+                    )),
                     Some("tool_use") => Ok(ContentBlock::ToolUse {
                         id: id.ok_or_else(|| de::Error::missing_field("id"))?,
                         name: name.ok_or_else(|| de::Error::missing_field("name"))?,
@@ -155,7 +168,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     }),
                     Some(other) => Err(de::Error::unknown_variant(
                         other,
-                        &["tool_use", "tool_result"],
+                        &["text", "tool_use", "tool_result"],
                     )),
                     None => Err(de::Error::missing_field("type")),
                 }
@@ -349,21 +362,37 @@ mod tests {
     }
 
     #[test]
-    fn content_block_text_serializes_to_string() {
+    fn content_block_text_serializes_to_object() {
         let block = ContentBlock::Text("Hello".to_string());
         let json = serde_json::to_string(&block).expect("ContentBlock should serialize");
-        assert_eq!(json, r#""Hello""#);
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
+        assert_eq!(parsed["type"], "text");
+        assert_eq!(parsed["text"], "Hello");
     }
 
     #[test]
-    fn content_block_text_deserializes_from_string() {
-        let json = r#""Hello""#;
+    fn content_block_text_deserializes_from_object() {
+        let json = r#"{"type":"text","text":"Hello"}"#;
         let block: ContentBlock =
             serde_json::from_str(json).expect("Should deserialize to ContentBlock::Text");
         assert!(matches!(block, ContentBlock::Text(_)));
         if let ContentBlock::Text(text) = block {
             assert_eq!(text, "Hello");
         }
+    }
+
+    #[test]
+    fn content_block_text_produces_object_not_string_for_api_compatibility() {
+        // Regression test: Vertex AI / Anthropic API requires content blocks to be
+        // dictionaries, not plain strings. ContentBlock::Text must serialize as
+        // {"type":"text","text":"..."} rather than a bare string.
+        let block = ContentBlock::Text("hello".to_string());
+        let value = serde_json::to_value(&block).expect("should serialize");
+        assert!(
+            value.is_object(),
+            "ContentBlock::Text must serialize as an object, got: {}",
+            value
+        );
     }
 
     #[test]
@@ -424,7 +453,8 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
         assert_eq!(parsed["role"], "assistant");
         assert_eq!(parsed["content"].as_array().unwrap().len(), 2);
-        assert_eq!(parsed["content"][0], "Thinking...");
+        assert_eq!(parsed["content"][0]["type"], "text");
+        assert_eq!(parsed["content"][0]["text"], "Thinking...");
         assert_eq!(parsed["content"][1]["type"], "tool_use");
     }
 
