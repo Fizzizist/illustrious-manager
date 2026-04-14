@@ -1,0 +1,10 @@
+---
+source: src/frontend/tui/diff.rs
+expression: "rendered.join(\"\\n\")"
+---
+--- src/greet.rs (modified, +1 -1)
+       @@ -1,3 +1,3 @@
+  1  1  fn greet(name: &str) {
+  2    -    println!("Hello, {}!", name);
+     2 +    println!("Hi, {}!", name);
+  3  3  }

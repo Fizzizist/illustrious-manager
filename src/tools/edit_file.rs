@@ -146,16 +146,17 @@ impl Tool for EditFile {
 
         let new_content = content.replacen(old_string, new_string, 1);
 
-        fs::write(&validated_path, new_content).map_err(|e| ToolError::Execution {
+        fs::write(&validated_path, &new_content).map_err(|e| ToolError::Execution {
             tool_name: self.name().to_string(),
             message: format!("Failed to write file: {}", e),
         })?;
 
+        let diff_payload = format!(
+            "DIFF:{}\n{}---BEFORE/AFTER---\n{}",
+            path_str, content, new_content
+        );
         Ok(ToolResult {
-            content: vec![ContentBlock::Text(format!(
-                "Successfully replaced string in {:?}",
-                validated_path
-            ))],
+            content: vec![ContentBlock::Text(diff_payload)],
             is_error: false,
         })
     }
@@ -341,8 +342,16 @@ mod tests {
         let result = tool.execute(input).expect("should succeed");
         let md = tool.markdown_output(&result);
         assert!(
-            md.contains("Successfully replaced"),
-            "should contain success message"
+            md.starts_with("DIFF:"),
+            "output should be a diff payload starting with DIFF:"
+        );
+        assert!(
+            md.contains("hello world"),
+            "diff payload should contain the old content"
+        );
+        assert!(
+            md.contains("goodbye"),
+            "diff payload should contain the new content"
         );
     }
 }

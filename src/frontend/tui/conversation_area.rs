@@ -5,6 +5,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
 use tui_markdown::from_str as markdown_to_text;
 
+use super::diff::{build_diff_lines, is_diff_output, parse_diff_payload};
+
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
 const CONVERSATION_TITLE: &str = "Conversation";
@@ -86,6 +88,23 @@ fn render_role_lines(
         format!("{}:", role.display_label()),
         Style::default().fg(role.color()),
     )));
+
+    if role == &ConversationRole::ToolResult
+        && is_diff_output(content)
+        && let Some(file_diff) = parse_diff_payload(content)
+    {
+        let diff_lines = build_diff_lines(&file_diff, 120);
+        for line in diff_lines {
+            let mut prefixed = Line::from(Span::raw("  "));
+            prefixed.spans.extend(line.spans);
+            lines.push(prefixed);
+        }
+        if trailing_blank {
+            lines.push(Line::from(""));
+        }
+        return lines;
+    }
+
     let display_content = maybe_truncate(content, role);
     let rendered = markdown_to_text(&display_content);
     for line in rendered.lines {
@@ -462,6 +481,50 @@ mod tests {
         let result = tool_use_display_content("bash", &serde_json::json!({"command": "ls"}));
         assert!(result.contains("bash"));
         assert!(result.contains("command"));
+    }
+
+    #[test]
+    fn tool_result_diff_output_renders_via_diff_renderer() {
+        let before = "fn hello() {\n    println!(\"hello\");\n}\n";
+        let after = "fn hello() {\n    println!(\"world\");\n}\n";
+        let diff_content = format!("DIFF:src/main.rs\n{before}---BEFORE/AFTER---\n{after}");
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::ToolResult,
+            diff_content,
+        )];
+
+        // The entry should render without panicking and produce lines that look like a diff
+        let lines = entries[0].lines();
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            all_text.contains("src/main.rs"),
+            "diff rendering should include the file path: {all_text}"
+        );
+        // "hello" is removed, "world" is added
+        assert!(
+            all_text.contains("hello") || all_text.contains("world"),
+            "diff content should be present: {all_text}"
+        );
+    }
+
+    #[test]
+    fn tool_result_non_diff_output_still_uses_markdown() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::ToolResult,
+            "Wrote 42 bytes to /tmp/foo.txt".to_string(),
+        )];
+        let lines = entries[0].lines();
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            all_text.contains("Wrote 42 bytes"),
+            "non-diff content should pass through unchanged: {all_text}"
+        );
     }
 
     #[test]
