@@ -1,0 +1,16 @@
+---
+source: src/frontend/tui/conversation_area.rs
+expression: terminal.backend()
+---
+"┌Conversation──────────────────────────────────────────────┐"
+"│You:                                                      │"
+"│  message 10                                              │"
+"│                                                          │"
+"│You:                                                      │"
+"│  message 11                                              │"
+"│                                                          │"
+"│You:                                                      │"
+"│  message 12                                              │"
+"│                                                          │"
+"│You:                                                      │"
+"└──────────────────────────────────────────────────────────┘"
