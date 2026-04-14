@@ -159,10 +159,7 @@ impl Agent {
             'outer: loop {
                 if iterations >= max_iterations {
                     let error_msg = format!("Max tool iterations ({max_iterations}) exceeded");
-                    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
-                    lock(&history_arc).push(error_user_msg.clone());
-                    let _ = session.lock().await.insert_message(&error_user_msg).await;
-                    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
+                    record_error(&error_msg, &history_arc, &session, &event_tx).await;
                     break;
                 }
                 iterations += 1;
@@ -171,12 +168,7 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        let error_msg = e.to_string();
-                        let error_user_msg =
-                            Message::text(Role::User, format!("[ERROR] {error_msg}"));
-                        lock(&history_arc).push(error_user_msg.clone());
-                        let _ = session.lock().await.insert_message(&error_user_msg).await;
-                        let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
+                        record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                         break;
                     }
                 };
@@ -225,17 +217,12 @@ impl Agent {
                             if !text_accumulated.is_empty() {
                                 let partial_msg = Message {
                                     role: Role::Assistant,
-                                    content: vec![ContentBlock::Text(text_accumulated)],
+                                    content: vec![ContentBlock::Text(text_accumulated.clone())],
                                 };
                                 lock(&history_arc).push(partial_msg.clone());
                                 let _ = session.lock().await.insert_message(&partial_msg).await;
                             }
-                            let error_msg = e.to_string();
-                            let error_user_msg =
-                                Message::text(Role::User, format!("[ERROR] {error_msg}"));
-                            lock(&history_arc).push(error_user_msg.clone());
-                            let _ = session.lock().await.insert_message(&error_user_msg).await;
-                            let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
+                            record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
                         }
                     }
@@ -284,6 +271,18 @@ impl Agent {
 
         Ok(Box::pin(event_rx))
     }
+}
+
+async fn record_error(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
+    lock(history).push(error_user_msg.clone());
+    let _ = session.lock().await.insert_message(&error_user_msg).await;
+    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
 async fn execute_tool_calls(
@@ -930,7 +929,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_send_error_preserves_user_message_in_history() {
+    async fn stream_error_preserves_user_message_in_history() {
         let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection refused"))]]);
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
@@ -947,7 +946,7 @@ mod tests {
         let history = agent.history();
         assert!(
             !history.is_empty(),
-            "history must not be cleared on backend error"
+            "history must not be cleared on stream error"
         );
         assert!(
             history.iter().any(|m| m.role == Role::User
@@ -955,6 +954,61 @@ mod tests {
                     .iter()
                     .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
             "user message must be retained"
+        );
+    }
+
+    struct FailingBackend {
+        error_message: String,
+    }
+
+    #[async_trait]
+    impl LlmBackend for FailingBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(anyhow::anyhow!("{}", self.error_message))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_send_error_preserves_user_message_in_history() {
+        let backend = FailingBackend {
+            error_message: "connection refused".to_string(),
+        };
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("connection refused"))),
+            "expected Error event with connection refused message"
+        );
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must not be cleared on send_message error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
+            "user message must be retained"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("connection refused"))
+                )),
+            "error message with [ERROR] prefix must be in history"
         );
     }
 
@@ -1007,13 +1061,13 @@ mod tests {
         let history = agent.history();
         let has_error_in_history = history.iter().any(|m| {
             m.role == Role::User
-                && m.content
-                    .iter()
-                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("max_tokens reached")))
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t == "[ERROR] max_tokens reached"),
+                )
         });
         assert!(
             has_error_in_history,
-            "error message must be added to history so the agent knows why a stoppage occurred"
+            "error message with [ERROR] prefix must be added to history so the agent knows why a stoppage occurred"
         );
     }
 
@@ -1060,6 +1114,31 @@ mod tests {
                     .iter()
                     .any(|b| matches!(b, ContentBlock::Text(t) if t == "run"))),
             "original user message must be retained"
+        );
+        let tool_use_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count();
+        assert_eq!(
+            tool_use_count, 3,
+            "completed tool call iterations must be preserved in history"
+        );
+        let tool_result_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            tool_result_count, 3,
+            "completed tool result iterations must be preserved in history"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("Max tool iterations"))
+                )),
+            "error message with [ERROR] prefix must be in history"
         );
     }
 
