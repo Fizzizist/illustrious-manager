@@ -170,6 +170,9 @@ impl App {
     }
 
     fn max_scroll(&mut self) -> u16 {
+        if self.text_width == 0 {
+            return 0;
+        }
         let mut conv_area = ConversationArea::new(
             &mut self.conversation,
             &self.current_response,
@@ -512,6 +515,20 @@ mod tests {
         assert_eq!(app.scroll_offset, 10);
         app.scroll_up(5);
         assert_eq!(app.scroll_offset, 15);
+    }
+
+    #[test]
+    fn max_scroll_returns_zero_when_text_width_not_set() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.viewport_height = 10;
+        for i in 0..40 {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::User,
+                format!("line {i}"),
+            ));
+        }
+        assert_eq!(app.text_width, 0);
+        assert_eq!(app.max_scroll(), 0);
     }
 
     #[test]

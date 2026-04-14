@@ -76,7 +76,11 @@ impl ConversationEntry {
     }
 }
 
-fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
+fn render_role_lines(
+    role: &ConversationRole,
+    content: &str,
+    trailing_blank: bool,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("{}:", role.display_label()),
@@ -93,27 +97,20 @@ fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'stati
         );
         lines.push(prefixed);
     }
-    lines.push(Line::from(""));
+    if trailing_blank {
+        lines.push(Line::from(""));
+    }
     lines
 }
 
+fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
+    render_role_lines(role, content, true)
+}
+
+// TODO: For long responses with complex markdown, this O(response_size) per-frame
+// cost during streaming could become a bottleneck. Consider caching if it becomes an issue.
 fn render_current_response_lines(current_response: &str) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "Assistant:",
-        Style::default().fg(Color::Blue),
-    )));
-    let rendered = markdown_to_text(current_response);
-    for line in rendered.lines {
-        let mut prefixed = Line::from(Span::raw("  "));
-        prefixed.spans.extend(
-            line.spans
-                .into_iter()
-                .map(|span| Span::styled(span.content.into_owned(), span.style)),
-        );
-        lines.push(prefixed);
-    }
-    lines
+    render_role_lines(&ConversationRole::Assistant, current_response, false)
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
@@ -811,6 +808,79 @@ mod tests {
                 "Line {i} should be visible at some scroll position but was not found"
             );
         }
+    }
+
+    #[test]
+    fn regression_viewport_boundary_between_entries_and_streaming_response() {
+        let text_width = 58u16;
+        let viewport = 10u16;
+
+        // Create entries whose total lines *almost* fill the viewport, so the
+        // streaming response straddles the boundary.
+        let mut entries: Vec<ConversationEntry> = (0..3)
+            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .collect();
+
+        // Verify entries exist so the boundary scenario is meaningful.
+        let mut area = ConversationArea::new(&mut entries, "", 0, viewport);
+        let entry_only_max = area.max_scroll(text_width);
+        assert!(
+            entry_only_max == 0,
+            "entries should fit within viewport for this test"
+        );
+
+        // The current response should start at total_entry_lines.
+        // Use a streaming response long enough to span beyond the viewport.
+        let streaming = (0..30)
+            .map(|i| format!("streaming line {i} with enough text to avoid wrapping at width 58"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Render with scroll_offset=0 (auto-scroll to bottom) and verify the
+        // window includes lines from both the last entry and the streaming response.
+        let backend = ratatui::backend::TestBackend::new(text_width + 2, viewport + 2);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
+                let mut area = ConversationArea::new(&mut entries, &streaming, 0, viewport);
+                area.render(frame, rect, text_width);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+
+        // The streaming response should be visible at the bottom.
+        assert!(
+            rendered.contains("streaming line 29"),
+            "last streaming line should be visible, got:\n{rendered}"
+        );
+
+        // Now scroll up one viewport so the window overlaps the entry/streaming boundary.
+        let scroll_up_amount = viewport;
+        let backend2 = ratatui::backend::TestBackend::new(text_width + 2, viewport + 2);
+        let mut terminal2 = ratatui::Terminal::new(backend2).expect("terminal creation");
+        terminal2
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
+                let mut area =
+                    ConversationArea::new(&mut entries, &streaming, scroll_up_amount, viewport);
+                area.render(frame, rect, text_width);
+            })
+            .expect("draw");
+
+        let rendered2 = format!("{:?}", terminal2.backend());
+
+        // When scrolled up by one viewport, we should see earlier streaming lines
+        // but NOT the very last one.
+        assert!(
+            !rendered2.contains("streaming line 29"),
+            "scrolled-up view should not show last streaming line, got:\n{rendered2}"
+        );
+        assert!(
+            rendered2.contains("streaming line"),
+            "scrolled-up view should still show some streaming lines, got:\n{rendered2}"
+        );
     }
 
     #[test]
