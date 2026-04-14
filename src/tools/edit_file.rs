@@ -55,15 +55,7 @@ impl Tool for EditFile {
 
     fn markdown_input(&self, input: &Value) -> String {
         let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-        let old = input
-            .get("old_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let new = input
-            .get("new_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        format!("**Edit:** `{}`\n```diff\n- {}\n+ {}\n```", path, old, new)
+        format!("**Edit:** `{}`", path)
     }
 
     fn markdown_output(&self, result: &ToolResult) -> String {
@@ -311,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_input_formats_as_diff() {
+    fn markdown_input_shows_path_only() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -322,10 +314,11 @@ mod tests {
             "new_string": "goodbye world"
         });
         let md = tool.markdown_input(&input);
-        assert!(md.contains("```diff"), "should format as diff code block");
-        assert!(md.contains("- hello world"), "should show removed line");
-        assert!(md.contains("+ goodbye world"), "should show added line");
         assert!(md.contains("`test.txt`"), "should show file path");
+        assert!(
+            !md.contains("```diff"),
+            "should not contain diff block (diff is in the result now)"
+        );
     }
 
     #[test]
