@@ -122,6 +122,15 @@ impl Agent {
         self.session.lock().await.load_history().await
     }
 
+    /// If the current session has no messages, delete its DB file from disk.
+    pub async fn cleanup_empty_session(&self) -> Result<()> {
+        let session = self.session.lock().await;
+        if session.is_empty().await? {
+            session.delete_db()?;
+        }
+        Ok(())
+    }
+
     /// Replace the current session with a new one and reload the conversation history.
     /// Non-persisted context messages (context files, skill definitions) are preserved
     /// at the front of history; only the persisted portion is replaced.
@@ -1399,5 +1408,48 @@ mod tests {
         assert_eq!(agent.session_id().await, id_a);
         agent.load_session(session_b).await;
         assert_eq!(agent.session_id().await, id_b);
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_session_deletes_db_when_no_messages() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+        assert!(db_path.exists());
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(!db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_session_preserves_db_when_has_messages() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        session
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(db_path.exists());
     }
 }
