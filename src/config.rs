@@ -1,11 +1,10 @@
 use dirs;
-use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum ConfirmationMode {
     Always,
@@ -46,7 +45,7 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
     pub confirmation: ConfirmationMode,
@@ -126,7 +125,7 @@ model = "glm-5.1"
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 "#;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -139,7 +138,7 @@ pub struct AppConfig {
     pub tools: ToolsConfig,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct VertexConfig {
     pub project: String,
     #[serde(default = "default_region")]
@@ -148,8 +147,9 @@ pub struct VertexConfig {
     pub model: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ZaiConfig {
+    #[serde(skip_serializing)]
     pub api_key: String,
     #[serde(default = "default_zai_model")]
     pub model: String,
@@ -243,34 +243,8 @@ pub fn apply_overrides(
 
 /// Generate a markdown intro message displaying the currently loaded configuration.
 pub fn generate_intro_message(config: &AppConfig) -> String {
-    let mut msg = String::from("# Illustrious Manager\n\n");
-
-    let _ = writeln!(msg, "- **Backend:** {}", config.backend);
-
-    match config.backend.as_str() {
-        "vertex" => {
-            let _ = writeln!(msg, "- **Project:** {}", config.vertex.project);
-            let _ = writeln!(msg, "- **Region:** {}", config.vertex.region);
-            let _ = writeln!(msg, "- **Model:** {}", config.vertex.model);
-        }
-        "zai" => {
-            if let Some(ref zai) = config.zai {
-                let _ = writeln!(msg, "- **Model:** {}", zai.model);
-            }
-        }
-        _ => {}
-    }
-
-    let _ = writeln!(msg, "- **Confirmation:** {:?}", config.tools.confirmation);
-    let _ = writeln!(msg, "- **Sandbox Root:** {}", config.tools.sandbox_root);
-    let _ = writeln!(
-        msg,
-        "- **Max Tool Iterations:** {}",
-        config.tools.max_tool_iterations
-    );
-    let _ = writeln!(msg, "- **Sessions Dir:** {}", config.sessions_dir.display());
-
-    msg
+    let toml = toml::to_string_pretty(config).unwrap_or_else(|e| format!("(error: {e})"));
+    format!("# Illustrious Manager\n\n```toml\n{toml}```")
 }
 
 /// Validate that the config has all required fields for the selected backend.
