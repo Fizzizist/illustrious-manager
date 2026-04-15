@@ -566,10 +566,22 @@ mod tests {
 
     #[test]
     fn render_intro_entry() {
+        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::path::PathBuf::from("/sessions"),
+        };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Intro,
-            "# Illustrious Manager\n\n- **Backend:** vertex\n- **Model:** claude-sonnet-4-20250514\n"
-                .to_string(),
+            generate_intro_message(&config),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");

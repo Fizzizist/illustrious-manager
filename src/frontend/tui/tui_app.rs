@@ -873,11 +873,21 @@ mod tests {
 
     #[test]
     fn render_intro_message_snapshot() {
+        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::path::PathBuf::from("/sessions"),
+        };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        app.set_intro_message(
-            "# Illustrious Manager\n\n- **Backend:** vertex\n- **Model:** claude-sonnet-4-20250514\n"
-                .to_string(),
-        );
+        app.set_intro_message(generate_intro_message(&config));
 
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
