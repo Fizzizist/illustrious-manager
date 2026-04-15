@@ -20,9 +20,11 @@ use tokio::task::JoinHandle;
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
+use super::session_picker::{SessionPicker, SessionPickerAction};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
+use crate::session::list_sessions;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -34,6 +36,7 @@ pub enum AppState {
         name: String,
         input: serde_json::Value,
     },
+    SessionPicker,
 }
 
 pub struct App {
@@ -45,6 +48,7 @@ pub struct App {
     pub scroll_offset: u16,
     pub viewport_height: u16,
     pub text_width: u16,
+    pub session_picker: Option<SessionPicker>,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -60,6 +64,7 @@ impl App {
                     input: input.clone(),
                 });
             }
+            AppState::SessionPicker => self.input.set_mode(InputMode::SessionPicker),
         }
     }
 
@@ -73,6 +78,7 @@ impl App {
             scroll_offset: 0,
             viewport_height: 0,
             text_width: 0,
+            session_picker: None,
             tools,
         }
     }
@@ -254,6 +260,10 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     conv_area.render(frame, chunks[0], text_width);
 
     app.input.render(frame, chunks[1]);
+
+    if let Some(ref mut picker) = app.session_picker {
+        picker.render(frame, frame.area());
+    }
 }
 
 pub fn handle_agent_event(
@@ -413,7 +423,21 @@ async fn run_app(
                                     ..
                                 } => {
                                     let text = app.input_text();
-                                    if !text.trim().is_empty() {
+                                    if text.trim() == "/sessions" {
+                                        app.input.clear();
+                                        match list_sessions(&config.sessions_dir).await {
+                                            Ok(sessions) => {
+                                                app.session_picker = Some(SessionPicker::new(sessions));
+                                                app.set_state(AppState::SessionPicker);
+                                            }
+                                            Err(e) => {
+                                                app.conversation.push(ConversationEntry::new(
+                                                    ConversationRole::Error,
+                                                    format!("Failed to list sessions: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    } else if !text.trim().is_empty() {
                                         if let Some(ref mut log) = logger {
                                             log.log_user_input(&text)?;
                                         }
@@ -423,6 +447,67 @@ async fn run_app(
                                 }
                                 _ => {
                                     app.input.input(key);
+                                }
+                            }
+                        },
+                        AppState::SessionPicker => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key {
+                                break;
+                            }
+                            if let Some(ref mut picker) = app.session_picker {
+                                let action = picker.handle_key(key);
+                                match action {
+                                    SessionPickerAction::Close => {
+                                        app.session_picker = None;
+                                        app.set_state(AppState::Input);
+                                    }
+                                    SessionPickerAction::Select(session_id) => {
+                                        app.session_picker = None;
+                                        app.set_state(AppState::Input);
+                                        // Clean up current session if empty
+                                        if let Err(e) = agent.cleanup_empty_session().await {
+                                            app.conversation.push(ConversationEntry::new(
+                                                ConversationRole::Error,
+                                                format!("Failed to clean up empty session: {e}"),
+                                            ));
+                                        }
+                                        // Reload the selected session
+                                        match crate::session::Session::new(
+                                            Some(session_id.clone()),
+                                            config.sessions_dir.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(session) => {
+                                                match session.load_history().await {
+                                                    Ok(history) => {
+                                                        app.conversation.clear();
+                                                        app.current_response.clear();
+                                                        app.scroll_offset = 0;
+                                                        app.load_history(&history);
+                                                        agent.load_session(session).await;
+                                                    }
+                                                    Err(e) => {
+                                                        app.conversation.push(ConversationEntry::new(
+                                                            ConversationRole::Error,
+                                                            format!("Failed to load session history: {e}"),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                app.conversation.push(ConversationEntry::new(
+                                                    ConversationRole::Error,
+                                                    format!("Failed to open session: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    SessionPickerAction::None => {}
                                 }
                             }
                         },
@@ -876,6 +961,158 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+    }
+
+    #[test]
+    fn sessions_command_transitions_app_to_session_picker_state() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![]));
+        app.set_state(AppState::SessionPicker);
+        assert_eq!(app.state, AppState::SessionPicker);
+        assert!(app.session_picker.is_some());
+    }
+
+    #[test]
+    fn session_picker_close_transitions_back_to_input() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(summaries));
+        app.set_state(AppState::SessionPicker);
+
+        // simulate Close action
+        let picker = app.session_picker.as_mut().expect("picker");
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, SessionPickerAction::Close);
+
+        // apply the action
+        if matches!(action, SessionPickerAction::Close) {
+            app.session_picker = None;
+            app.set_state(AppState::Input);
+        }
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(app.session_picker.is_none());
+    }
+
+    #[test]
+    fn session_picker_esc_also_closes() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, SessionPickerAction::Close);
+    }
+
+    #[tokio::test]
+    async fn session_picker_select_clears_conversation_and_reloads_history() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        // Create session with a known message
+        let session = crate::session::Session::new(None, dir_path.clone())
+            .await
+            .expect("session");
+        session
+            .insert_message(&Message::text(Role::User, "loaded message".to_string()))
+            .await
+            .expect("insert");
+
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                crate::session::Session::new(None, dir_path.clone())
+                    .await
+                    .expect("initial session"),
+            )
+            .await,
+        );
+
+        let mut app = App::new(agent.tools());
+        // pre-populate conversation with stale data
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "old message".to_string(),
+        ));
+        app.scroll_offset = 10;
+
+        // simulate selecting the session
+        let history = session.load_history().await.expect("load history");
+        app.conversation.clear();
+        app.current_response.clear();
+        app.scroll_offset = 0;
+        app.load_history(&history);
+        agent.load_session(session).await;
+
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].content, "loaded message");
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn session_picker_select_returns_selected_id() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            action,
+            SessionPickerAction::Select("01900000-0000-7000-0000-000000000001".to_string())
+        );
     }
 
     #[test]

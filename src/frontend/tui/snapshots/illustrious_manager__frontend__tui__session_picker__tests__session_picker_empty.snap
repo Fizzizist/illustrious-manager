@@ -1,0 +1,28 @@
+---
+source: src/frontend/tui/session_picker.rs
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"        ┌ Sessions (j/k to navigate, Enter to open, q to close) ───────┐        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        └──────────────────────────────────────────────────────────────┘        "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
