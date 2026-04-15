@@ -27,7 +27,7 @@ impl ConversationRole {
             ConversationRole::Error => "Error",
             ConversationRole::ToolUse => "[Tool]",
             ConversationRole::ToolResult => "[Result]",
-            ConversationRole::Intro => "Welcome",
+            ConversationRole::Intro => "Info",
         }
     }
 
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(ConversationRole::Error.display_label(), "Error");
         assert_eq!(ConversationRole::ToolUse.display_label(), "[Tool]");
         assert_eq!(ConversationRole::ToolResult.display_label(), "[Result]");
-        assert_eq!(ConversationRole::Intro.display_label(), "Welcome");
+        assert_eq!(ConversationRole::Intro.display_label(), "Info");
     }
 
     #[test]
