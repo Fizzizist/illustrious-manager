@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
-use super::diff::{render_edit_file_diff, render_write_file_diff};
+use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
@@ -165,7 +165,7 @@ impl App {
                 }
             }
             "write_file" => {
-                if let Some(lines) = render_write_file_diff(input, width) {
+                if let Some(lines) = render_write_file(input, width) {
                     return ConversationEntry::new_with_lines(
                         ConversationRole::ToolUse,
                         content,
@@ -898,14 +898,14 @@ mod tests {
         });
         let entry = app.tool_use_entry("write_file", &input, 80);
         assert_eq!(entry.role, ConversationRole::ToolUse);
-        let has_coloured_span = entry.lines().iter().any(|l| {
-            l.spans
-                .iter()
-                .any(|s| s.style.fg.is_some() || s.style.bg.is_some())
-        });
+        // write_file renders as a syntax-highlighted code block (green + markers)
+        let has_plus_marker = entry
+            .lines()
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.as_ref() == "+"));
         assert!(
-            has_coloured_span,
-            "write_file tool use should produce diff-styled spans"
+            has_plus_marker,
+            "write_file tool use should render with '+' markers"
         );
     }
 

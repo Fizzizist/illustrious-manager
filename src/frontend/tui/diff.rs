@@ -10,7 +10,8 @@ use syntect::parsing::SyntaxSet;
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
-const GUTTER_WIDTH: usize = 10;
+/// Minimum digits reserved for each line-number column in the gutter.
+const MIN_LINE_NO_DIGITS: usize = 1;
 
 /// Kind of a line in a diff.
 #[derive(Debug, Clone, PartialEq)]
@@ -236,7 +237,21 @@ pub fn build_inline_diff_spans(
 ///
 /// `width` is the available terminal width; content is truncated to fit.
 pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
-    let content_width = width.saturating_sub(GUTTER_WIDTH + 2);
+    // Compute the number of digits needed for line numbers from the max line
+    // number present in this diff, so the gutter is as narrow as possible.
+    let max_line_no = file
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .flat_map(|dl| [dl.old_line_no, dl.new_line_no])
+        .flatten()
+        .max()
+        .unwrap_or(1);
+    let digits = max_line_no.to_string().len().max(MIN_LINE_NO_DIGITS);
+    // gutter = <digits> + space + <digits> + trailing space
+    let gutter_width = digits + 1 + digits + 1;
+
+    let content_width = width.saturating_sub(gutter_width + 2);
 
     let header_style = Style::default()
         .fg(Color::Cyan)
@@ -272,7 +287,7 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                     i += 1;
                 }
                 DiffLineKind::Context => {
-                    let gutter = format_gutter(dl.old_line_no, dl.new_line_no);
+                    let gutter = format_gutter(dl.old_line_no, dl.new_line_no, digits);
                     let mut spans = vec![Span::styled(gutter, context_style)];
                     let code_spans = highlight_code_line(&dl.content, &file.path, context_style);
                     spans.extend(code_spans);
@@ -292,7 +307,7 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                             build_inline_diff_spans(&dl.content, &added_dl.content);
 
                         // Removed line with inline word highlights
-                        let gutter = format_gutter(dl.old_line_no, None);
+                        let gutter = format_gutter(dl.old_line_no, None, digits);
                         let mut removed_spans = vec![
                             Span::styled(gutter, removed_style),
                             Span::styled("-", removed_style),
@@ -302,7 +317,7 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                         lines.push(Line::from(removed_spans));
 
                         // Added line with inline word highlights
-                        let gutter = format_gutter(None, added_dl.new_line_no);
+                        let gutter = format_gutter(None, added_dl.new_line_no, digits);
                         let mut added_spans = vec![
                             Span::styled(gutter, added_style),
                             Span::styled("+", added_style),
@@ -314,7 +329,7 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                         i += 2;
                     } else {
                         // Standalone removed line — syntax-highlighted with red base
-                        let gutter = format_gutter(dl.old_line_no, None);
+                        let gutter = format_gutter(dl.old_line_no, None, digits);
                         let mut spans = vec![
                             Span::styled(gutter, removed_style),
                             Span::styled("-", removed_style),
@@ -328,7 +343,7 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                     }
                 }
                 DiffLineKind::Added => {
-                    let gutter = format_gutter(None, dl.new_line_no);
+                    let gutter = format_gutter(None, dl.new_line_no, digits);
                     let mut spans = vec![
                         Span::styled(gutter, added_style),
                         Span::styled("+", added_style),
@@ -346,12 +361,12 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn format_gutter(old: Option<usize>, new: Option<usize>) -> String {
+fn format_gutter(old: Option<usize>, new: Option<usize>, digits: usize) -> String {
     match (old, new) {
-        (Some(o), Some(n)) => format!("{o:>4} {n:>4} "),
-        (Some(o), None) => format!("{o:>4}      "),
-        (None, Some(n)) => format!("     {n:>4} "),
-        (None, None) => "          ".to_string(),
+        (Some(o), Some(n)) => format!("{o:>digits$} {n:>digits$} "),
+        (Some(o), None) => format!("{o:>digits$} {:>digits$} ", ""),
+        (None, Some(n)) => format!("{:>digits$} {n:>digits$} ", ""),
+        (None, None) => " ".repeat(digits + 1 + digits + 1),
     }
 }
 
@@ -405,15 +420,103 @@ pub fn render_edit_file_diff(
     Some(build_diff_lines(&file_diff, width))
 }
 
-/// Render a `write_file` tool call (new file) as diff `Line`s.
-pub fn render_write_file_diff(
-    input: &serde_json::Value,
-    width: usize,
-) -> Option<Vec<Line<'static>>> {
+/// Infer a syntect-compatible language name from a file path's extension.
+///
+/// Returns `None` if the extension is unknown or not present, in which case
+/// callers should fall back to plain-text rendering.
+fn language_from_path(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?;
+    let lang = match ext {
+        "rs" => "Rust",
+        "py" => "Python",
+        "js" | "mjs" | "cjs" => "JavaScript",
+        "ts" | "mts" | "cts" => "TypeScript",
+        "json" => "JSON",
+        "toml" => "TOML",
+        "yaml" | "yml" => "YAML",
+        "sh" | "bash" => "Bash",
+        "html" | "htm" => "HTML",
+        "css" => "CSS",
+        "go" => "Go",
+        "c" | "h" => "C",
+        "cpp" | "cc" | "cxx" | "hpp" => "C++",
+        "java" => "Java",
+        "rb" => "Ruby",
+        "md" | "markdown" => "Markdown",
+        "sql" => "SQL",
+        "xml" => "XML",
+        _ => return None,
+    };
+    Some(lang)
+}
+
+/// Render a `write_file` tool call as a syntax-highlighted code block.
+///
+/// The language is inferred from the file extension; if unknown the block is
+/// rendered as plain text.  No diff gutter is shown — there is no previous
+/// version to compare against.
+pub fn render_write_file(input: &serde_json::Value, width: usize) -> Option<Vec<Line<'static>>> {
     let path = input.get("path").and_then(|v| v.as_str())?;
     let content = input.get("content").and_then(|v| v.as_str())?;
-    let file_diff = build_file_diff_from_snapshots(path, "", content);
-    Some(build_diff_lines(&file_diff, width))
+
+    let added_style = Style::default().fg(Color::Green);
+    let label_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+
+    let file_label = format!("New file: {path}");
+    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(file_label, label_style))];
+
+    let syntax = language_from_path(path)
+        .and_then(|lang| SYNTAX_SET.find_syntax_by_name(lang))
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+
+    let theme = THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.values().next())
+        .expect("at least one theme is always available in default-themes");
+
+    let mut highlighter = HighlightLines::new(syntax, theme);
+
+    let max_line_no = content.lines().count().max(1);
+    let digits = max_line_no.to_string().len().max(MIN_LINE_NO_DIGITS);
+    // gutter: line number + trailing space (no old-column for new files)
+    let gutter_width = digits + 1;
+    let content_width = width.saturating_sub(gutter_width + 1); // +1 for "+" marker
+
+    for (idx, source_line) in content.lines().enumerate() {
+        let line_no = idx + 1;
+        let gutter = format!("{line_no:>digits$} ");
+
+        let line_with_newline = format!("{source_line}\n");
+        let ranges = highlighter
+            .highlight_line(&line_with_newline, &SYNTAX_SET)
+            .unwrap_or_default();
+
+        let mut spans: Vec<Span<'static>> = vec![
+            Span::styled(gutter, added_style),
+            Span::styled("+", added_style),
+        ];
+
+        if ranges.is_empty() {
+            spans.push(Span::styled(source_line.to_string(), added_style));
+        } else {
+            for (hl_style, text) in ranges {
+                let content_part = text.trim_end_matches('\n').to_string();
+                if content_part.is_empty() {
+                    continue;
+                }
+                let fg = syntect_to_ratatui_color(hl_style.foreground);
+                spans.push(Span::styled(content_part, added_style.fg(fg)));
+            }
+        }
+
+        truncate_spans(&mut spans, content_width);
+        lines.push(Line::from(spans));
+    }
+
+    Some(lines)
 }
 
 #[cfg(test)]
@@ -594,7 +697,7 @@ mod tests {
         );
     }
 
-    // ── render_edit_file_diff / render_write_file_diff ───────────────────────
+    // ── render_edit_file_diff / render_write_file ────────────────────────────
 
     #[test]
     fn render_edit_file_diff_returns_none_for_missing_fields() {
@@ -603,9 +706,9 @@ mod tests {
     }
 
     #[test]
-    fn render_write_file_diff_returns_none_for_missing_fields() {
+    fn render_write_file_returns_none_for_missing_fields() {
         let input = serde_json::json!({"path": "f.txt"});
-        assert!(render_write_file_diff(&input, 80).is_none());
+        assert!(render_write_file(&input, 80).is_none());
     }
 
     #[test]
@@ -621,14 +724,71 @@ mod tests {
     }
 
     #[test]
-    fn render_write_file_diff_returns_lines_for_valid_input() {
+    fn render_write_file_returns_lines_for_valid_input() {
         let input = serde_json::json!({
             "path": "hello.txt",
             "content": "Hello, world!\n"
         });
-        let result = render_write_file_diff(&input, 80);
+        let result = render_write_file(&input, 80);
         assert!(result.is_some());
         assert!(!result.expect("some").is_empty());
+    }
+
+    #[test]
+    fn render_write_file_shows_file_label_with_path() {
+        let input = serde_json::json!({
+            "path": "src/foo.py",
+            "content": "print('hello')\n"
+        });
+        let lines = render_write_file(&input, 80).expect("should render");
+        let first: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            first.contains("src/foo.py"),
+            "first line should contain the file path, got: {first}"
+        );
+        assert!(
+            first.contains("New file"),
+            "first line should say 'New file', got: {first}"
+        );
+    }
+
+    #[test]
+    fn render_write_file_each_content_line_has_plus_marker() {
+        let input = serde_json::json!({
+            "path": "hello.rs",
+            "content": "fn main() {}\n"
+        });
+        let lines = render_write_file(&input, 80).expect("should render");
+        // Skip header line; every content line should have a "+" span
+        for line in lines.iter().skip(1) {
+            let has_plus = line.spans.iter().any(|s| s.content.as_ref() == "+");
+            assert!(has_plus, "content line should have '+' marker: {line:?}");
+        }
+    }
+
+    #[test]
+    fn render_write_file_no_diff_gutter_two_columns() {
+        // write_file has no old-column, just a single line-number column.
+        // Verify the gutter doesn't have the old "     N " two-column format.
+        let input = serde_json::json!({
+            "path": "a.txt",
+            "content": "line one\nline two\n"
+        });
+        let lines = render_write_file(&input, 80).expect("should render");
+        // Content lines (skip header): gutter should be just "N " (one number)
+        for line in lines.iter().skip(1) {
+            let gutter_text: String = line
+                .spans
+                .iter()
+                .take(1)
+                .map(|s| s.content.as_ref())
+                .collect();
+            // Should be a short number + space, not two numbers
+            assert!(
+                !gutter_text.contains("  "),
+                "gutter should not have two-column padding, got: {gutter_text:?}"
+            );
+        }
     }
 
     // ── extract_file_path ────────────────────────────────────────────────────
@@ -676,9 +836,11 @@ mod tests {
 
     #[test]
     fn snapshot_diff_lines_new_file() {
-        let content = "fn main() {\n    println!(\"Hello!\");\n}\n";
-        let diff = build_file_diff_from_snapshots("src/main.rs", "", content);
-        let lines = build_diff_lines(&diff, 80);
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "content": "fn main() {\n    println!(\"Hello!\");\n}\n"
+        });
+        let lines = render_write_file(&input, 80).expect("should render");
 
         let rendered: Vec<String> = lines
             .iter()
