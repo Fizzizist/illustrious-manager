@@ -519,7 +519,6 @@ mod tests {
             name,
             content,
             is_error,
-            ..
         } = event
         {
             assert_eq!(name, "bash");

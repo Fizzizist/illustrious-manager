@@ -109,7 +109,6 @@ impl Logger {
                 name,
                 content,
                 is_error,
-                ..
             } => {
                 self.log_tool_result(name, content, *is_error)?;
             }

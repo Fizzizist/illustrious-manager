@@ -344,11 +344,11 @@ async fn execute_tool_calls(
             true
         };
 
-        let (result_content, display_content, is_error) = if approved {
+        let (result_content, is_error) = if approved {
             match tools.lookup(&call.name) {
                 Ok(tool) => match tool.execute(input) {
                     Ok(result) => {
-                        let display_content = result
+                        let content = result
                             .content
                             .iter()
                             .filter_map(|b| {
@@ -360,37 +360,19 @@ async fn execute_tool_calls(
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let llm_content = result
-                            .content
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text(s) = b
-                                    && !s.starts_with("DIFF:")
-                                {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (llm_content, display_content, result.is_error)
+                        (content, result.is_error)
                     }
-                    Err(e) => (e.to_string(), e.to_string(), true),
+                    Err(e) => (e.to_string(), true),
                 },
-                Err(e) => (e.to_string(), e.to_string(), true),
+                Err(e) => (e.to_string(), true),
             }
         } else {
-            (
-                "User declined to execute this tool.".to_string(),
-                "User declined to execute this tool.".to_string(),
-                true,
-            )
+            ("User declined to execute this tool.".to_string(), true)
         };
 
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
             name: call.name.clone(),
-            content: display_content,
+            content: result_content.clone(),
             is_error,
         });
 
@@ -604,7 +586,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AgentEvent::ToolResult { name, content, is_error, .. }
+                AgentEvent::ToolResult { name, content, is_error }
                     if name == "bash" && content == "ls output" && !is_error
             )),
             "expected ToolResult with ls output"
