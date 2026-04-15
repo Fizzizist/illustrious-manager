@@ -147,16 +147,20 @@ impl App {
     ///
     /// For `edit_file` and `write_file`, a word-level diff renderer is used.
     /// All other tools fall back to the standard markdown rendering.
+    ///
+    /// `width` may be 0 if called before the first render (e.g. from
+    /// `load_history`); 80 is used as a sensible default in that case.
     fn tool_use_entry(
         &self,
         name: &str,
         input: &serde_json::Value,
         width: usize,
     ) -> ConversationEntry {
+        let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
         match name {
             "edit_file" => {
-                if let Some(lines) = render_edit_file_diff(input, width) {
+                if let Some(lines) = render_edit_file_diff(input, effective_width) {
                     return ConversationEntry::new_with_lines(
                         ConversationRole::ToolUse,
                         content,
@@ -165,7 +169,7 @@ impl App {
                 }
             }
             "write_file" => {
-                if let Some(lines) = render_write_file(input, width) {
+                if let Some(lines) = render_write_file(input, effective_width) {
                     return ConversationEntry::new_with_lines(
                         ConversationRole::ToolUse,
                         content,
@@ -863,6 +867,45 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+    }
+
+    #[test]
+    fn regression_load_history_edit_file_with_zero_text_width_does_not_mangle_diff() {
+        // Regression: load_history is called before the first render, so text_width
+        // is 0. Previously this caused hunk headers to be truncated to "…".
+        use crate::types::{ContentBlock, Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.text_width, 0, "text_width starts at 0");
+
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "edit_file".to_string(),
+                input: serde_json::json!({
+                    "path": "src/main.rs",
+                    "old_string": "let x = 1;",
+                    "new_string": "let x = 42;"
+                }),
+            }],
+        }];
+
+        app.load_history(&messages);
+
+        assert_eq!(app.conversation.len(), 1);
+        // The diff entry must contain "@@" somewhere (not "…") — verifies the
+        // hunk header was not mangled by truncation at width=0.
+        let all_content: String = app.conversation[0]
+            .lines()
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            all_content.contains("@@"),
+            "hunk header should contain '@@', got: {all_content:?}"
+        );
     }
 
     #[test]
