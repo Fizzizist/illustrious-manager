@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
+use super::diff::{render_edit_file_diff, render_write_file_diff};
 use super::input_area::{InputArea, InputMode};
 use crate::agent::Agent;
 use crate::logging::Logger;
@@ -87,10 +88,7 @@ impl App {
                         Some(ConversationEntry::new(role.clone(), text.clone()))
                     }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        Some(ConversationEntry::new(
-                            ConversationRole::ToolUse,
-                            self.tool_use_markdown(name, input),
-                        ))
+                        Some(self.tool_use_entry(name, input, self.text_width as usize))
                     }
                     crate::types::ContentBlock::ToolResult {
                         content, is_error, ..
@@ -143,6 +141,41 @@ impl App {
                 serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
             ),
         }
+    }
+
+    /// Build a `ConversationEntry` for a tool use event.
+    ///
+    /// For `edit_file` and `write_file`, a word-level diff renderer is used.
+    /// All other tools fall back to the standard markdown rendering.
+    fn tool_use_entry(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        width: usize,
+    ) -> ConversationEntry {
+        let content = self.tool_use_markdown(name, input);
+        match name {
+            "edit_file" => {
+                if let Some(lines) = render_edit_file_diff(input, width) {
+                    return ConversationEntry::new_with_lines(
+                        ConversationRole::ToolUse,
+                        content,
+                        lines,
+                    );
+                }
+            }
+            "write_file" => {
+                if let Some(lines) = render_write_file_diff(input, width) {
+                    return ConversationEntry::new_with_lines(
+                        ConversationRole::ToolUse,
+                        content,
+                        lines,
+                    );
+                }
+            }
+            _ => {}
+        }
+        ConversationEntry::new(ConversationRole::ToolUse, content)
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -250,10 +283,9 @@ pub fn handle_agent_event(
                     std::mem::take(&mut app.current_response),
                 ));
             }
-            app.conversation.push(ConversationEntry::new(
-                ConversationRole::ToolUse,
-                app.tool_use_markdown(&name, &input),
-            ));
+            let width = app.text_width as usize;
+            let entry = app.tool_use_entry(&name, &input, width);
+            app.conversation.push(entry);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
@@ -403,10 +435,9 @@ async fn run_app(
                                     AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
                                     _ => unreachable!(),
                                 };
-                                app.conversation.push(ConversationEntry::new(
-                                    ConversationRole::ToolUse,
-                                    app.tool_use_markdown(&name, &input),
-                                ));
+                                let width = app.text_width as usize;
+                                let entry = app.tool_use_entry(&name, &input, width);
+                                app.conversation.push(entry);
                                 let sent = app
                                     .confirmation_tx
                                     .as_ref()
@@ -832,5 +863,92 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+    }
+
+    #[test]
+    fn edit_file_tool_use_entry_produces_diff_rendered_lines() {
+        let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let input = serde_json::json!({
+            "path": "src/main.rs",
+            "old_string": "let x = 1;",
+            "new_string": "let x = 42;"
+        });
+        let entry = app.tool_use_entry("edit_file", &input, 80);
+        assert_eq!(entry.role, ConversationRole::ToolUse);
+        // The diff renderer produces spans with colour styles; verify that
+        // at least one span has a coloured foreground (indicating diff styling)
+        // rather than plain un-styled content.
+        let has_coloured_span = entry.lines().iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg.is_some() || s.style.bg.is_some())
+        });
+        assert!(
+            has_coloured_span,
+            "edit_file tool use should produce diff-styled spans"
+        );
+    }
+
+    #[test]
+    fn write_file_tool_use_entry_produces_diff_rendered_lines() {
+        let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let input = serde_json::json!({
+            "path": "hello.txt",
+            "content": "Hello, world!\n"
+        });
+        let entry = app.tool_use_entry("write_file", &input, 80);
+        assert_eq!(entry.role, ConversationRole::ToolUse);
+        let has_coloured_span = entry.lines().iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg.is_some() || s.style.bg.is_some())
+        });
+        assert!(
+            has_coloured_span,
+            "write_file tool use should produce diff-styled spans"
+        );
+    }
+
+    #[test]
+    fn regression_non_diff_tool_use_still_renders_via_markdown() {
+        let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let input = serde_json::json!({"command": "ls -la"});
+        let entry = app.tool_use_entry("bash", &input, 80);
+        assert_eq!(entry.role, ConversationRole::ToolUse);
+        // The content (markdown string) should mention the tool name.
+        assert!(
+            entry.content.contains("bash") || entry.content.contains("ls"),
+            "bash tool use content should contain command info"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_edit_file_uses_diff_renderer() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.text_width = 80;
+
+        let event = AgentEvent::ToolUseReceived {
+            id: "t1".to_string(),
+            name: "edit_file".to_string(),
+            input: serde_json::json!({
+                "path": "src/lib.rs",
+                "old_string": "fn old() {}",
+                "new_string": "fn new() {}"
+            }),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].role, ConversationRole::ToolUse);
+        // Diff rendering uses coloured spans; at least one must have colour
+        let has_coloured = app.conversation[0].lines().iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.fg.is_some() || s.style.bg.is_some())
+        });
+        assert!(
+            has_coloured,
+            "edit_file event should render with diff colours"
+        );
     }
 }
