@@ -1,0 +1,5 @@
+---
+source: src/frontend/tui/status_line.rs
+expression: terminal.backend()
+---
+" 0  $0.0000   feature/long-branch-name  "
