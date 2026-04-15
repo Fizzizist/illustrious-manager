@@ -568,7 +568,7 @@ mod tests {
     fn render_intro_entry() {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Intro,
-            "# Illustrious Manager\n\n**Backend:** vertex\n**Model:** claude-sonnet-4-20250514"
+            "# Illustrious Manager\n\n- **Backend:** vertex\n- **Model:** claude-sonnet-4-20250514\n"
                 .to_string(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
