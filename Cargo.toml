@@ -20,6 +20,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 similar = "3.1.0"
 syntect = { version = "5.3.0", features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+syntect-assets = "0.23.6"
 tokio = { version = "1.50.0", features = ["full"] }
 toml = "1.1.0"
 tui-markdown = "0.3.7"
