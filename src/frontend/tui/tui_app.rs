@@ -117,7 +117,7 @@ impl App {
 
     pub fn set_intro_message(&mut self, message: String) {
         self.conversation
-            .push(ConversationEntry::new(ConversationRole::Intro, message));
+            .push(ConversationEntry::new(ConversationRole::Info, message));
     }
 
     pub fn input_text(&self) -> String {
@@ -448,7 +448,7 @@ async fn run_app(
                                         } else {
                                             agent.set_model(model.clone());
                                             app.conversation.push(ConversationEntry::new(
-                                                ConversationRole::Intro,
+                                                ConversationRole::Info,
                                                 format!("Model switched to `{model}`"),
                                             ));
                                         }
@@ -1135,7 +1135,7 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message("# Welcome\n\nHello!".to_string());
         assert_eq!(app.conversation.len(), 1);
-        assert_eq!(app.conversation[0].role, ConversationRole::Intro);
+        assert_eq!(app.conversation[0].role, ConversationRole::Info);
         assert_eq!(app.conversation[0].content, "# Welcome\n\nHello!");
     }
 
@@ -1155,7 +1155,7 @@ mod tests {
         assert_eq!(app.conversation.len(), 3);
         assert_eq!(app.conversation[0].role, ConversationRole::User);
         assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
-        assert_eq!(app.conversation[2].role, ConversationRole::Intro);
+        assert_eq!(app.conversation[2].role, ConversationRole::Info);
     }
 
     #[test]
