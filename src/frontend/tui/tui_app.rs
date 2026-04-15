@@ -259,7 +259,6 @@ pub fn handle_agent_event(
         AgentEvent::ToolResult {
             name: _,
             content,
-            display,
             is_error,
         } => {
             let role = if is_error {
@@ -267,8 +266,7 @@ pub fn handle_agent_event(
             } else {
                 ConversationRole::ToolResult
             };
-            let text = display.unwrap_or(content);
-            app.conversation.push(ConversationEntry::new(role, text));
+            app.conversation.push(ConversationEntry::new(role, content));
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {

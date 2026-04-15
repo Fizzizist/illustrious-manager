@@ -263,7 +263,6 @@ mod tests {
             let event = AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "output".to_string(),
-                display: None,
                 is_error: false,
             };
             logger.log_event(&event).expect("Failed to log event");

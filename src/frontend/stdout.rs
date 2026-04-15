@@ -194,7 +194,6 @@ mod tests {
             AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "file1.txt".to_string(),
-                display: None,
                 is_error: false,
             },
             AgentEvent::ResponseComplete(String::new()),
@@ -224,7 +223,6 @@ mod tests {
             AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "permission denied".to_string(),
-                display: None,
                 is_error: true,
             },
             AgentEvent::ResponseComplete(String::new()),
