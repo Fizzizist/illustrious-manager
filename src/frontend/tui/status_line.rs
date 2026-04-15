@@ -4,9 +4,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::path::PathBuf;
 
-const COST_PER_INPUT_TOKEN: f64 = 3.0 / 1_000_000.0;
-const COST_PER_OUTPUT_TOKEN: f64 = 15.0 / 1_000_000.0;
-
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -18,11 +15,6 @@ impl TokenUsage {
         self.input_tokens += input as u64;
         self.output_tokens += output as u64;
     }
-
-    pub fn estimated_cost(&self) -> f64 {
-        self.input_tokens as f64 * COST_PER_INPUT_TOKEN
-            + self.output_tokens as f64 * COST_PER_OUTPUT_TOKEN
-    }
 }
 
 pub struct StatusLineInfo {
@@ -32,23 +24,22 @@ pub struct StatusLineInfo {
     pub usage: TokenUsage,
 }
 
-fn format_tokens(usage: &TokenUsage) -> String {
-    let total = usage.input_tokens + usage.output_tokens;
-    if total >= 1_000_000 {
-        format!("{:.1}M", total as f64 / 1_000_000.0)
-    } else if total >= 1_000 {
-        format!("{:.1}k", total as f64 / 1_000.0)
+fn format_token_count(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1_000.0)
     } else {
-        format!("{total}")
+        format!("{count}")
     }
 }
 
-fn format_cost(cost: f64) -> String {
-    if cost < 0.01 {
-        format!("${:.4}", cost)
-    } else {
-        format!("${:.2}", cost)
-    }
+fn format_token_usage(usage: &TokenUsage) -> String {
+    format!(
+        "↑{} ↓{}",
+        format_token_count(usage.input_tokens),
+        format_token_count(usage.output_tokens)
+    )
 }
 
 fn compact_path(path: &std::path::Path) -> String {
@@ -67,19 +58,14 @@ pub fn render_status_line(info: &StatusLineInfo, frame: &mut ratatui::Frame, are
 }
 
 pub fn build_status_line(info: &StatusLineInfo, width: u16) -> Line<'static> {
-    let tokens_str = format_tokens(&info.usage);
-    let cost_str = format_cost(info.usage.estimated_cost());
+    let usage_str = format_token_usage(&info.usage);
     let branch_str = info.git_branch.as_deref().unwrap_or("no git").to_string();
     let dir_str = compact_path(&info.working_dir);
 
     let left_spans = vec![
         Span::styled(
-            format!(" {tokens_str} "),
+            format!(" {usage_str} "),
             Style::default().fg(Color::White).bg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!(" {cost_str} "),
-            Style::default().fg(Color::Green).bg(Color::DarkGray),
         ),
         Span::styled(
             format!("  {branch_str} "),
@@ -161,63 +147,50 @@ mod tests {
         let usage = TokenUsage::default();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
-        assert_eq!(usage.estimated_cost(), 0.0);
     }
 
     #[test]
-    fn estimated_cost_uses_correct_rates() {
-        let mut usage = TokenUsage::default();
-        usage.add(1_000_000, 0);
-        let cost = usage.estimated_cost();
-        assert!(
-            (cost - 3.0).abs() < 0.001,
-            "1M input tokens = $3, got {cost}"
-        );
-
-        let mut usage2 = TokenUsage::default();
-        usage2.add(0, 1_000_000);
-        let cost2 = usage2.estimated_cost();
-        assert!(
-            (cost2 - 15.0).abs() < 0.001,
-            "1M output tokens = $15, got {cost2}"
-        );
+    fn format_token_count_plain() {
+        assert_eq!(format_token_count(500), "500");
     }
 
     #[test]
-    fn format_tokens_small() {
+    fn format_token_count_thousands() {
+        assert_eq!(format_token_count(5_000), "5.0k");
+    }
+
+    #[test]
+    fn format_token_count_thousands_with_remainder() {
+        assert_eq!(format_token_count(15_300), "15.3k");
+    }
+
+    #[test]
+    fn format_token_count_millions() {
+        assert_eq!(format_token_count(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn format_token_usage_zero() {
+        let usage = TokenUsage::default();
+        assert_eq!(format_token_usage(&usage), "↑0 ↓0");
+    }
+
+    #[test]
+    fn format_token_usage_mixed_scale() {
         let usage = TokenUsage {
-            input_tokens: 500,
-            output_tokens: 200,
+            input_tokens: 15_000,
+            output_tokens: 500,
         };
-        assert_eq!(format_tokens(&usage), "700");
+        assert_eq!(format_token_usage(&usage), "↑15.0k ↓500");
     }
 
     #[test]
-    fn format_tokens_thousands() {
+    fn format_token_usage_large() {
         let usage = TokenUsage {
-            input_tokens: 5_000,
-            output_tokens: 3_000,
+            input_tokens: 1_200_000,
+            output_tokens: 350_000,
         };
-        assert_eq!(format_tokens(&usage), "8.0k");
-    }
-
-    #[test]
-    fn format_tokens_millions() {
-        let usage = TokenUsage {
-            input_tokens: 1_500_000,
-            output_tokens: 500_000,
-        };
-        assert_eq!(format_tokens(&usage), "2.0M");
-    }
-
-    #[test]
-    fn format_cost_small_amount() {
-        assert_eq!(format_cost(0.0003), "$0.0003");
-    }
-
-    #[test]
-    fn format_cost_larger_amount() {
-        assert_eq!(format_cost(1.50), "$1.50");
+        assert_eq!(format_token_usage(&usage), "↑1.2M ↓350.0k");
     }
 
     #[test]
@@ -240,7 +213,8 @@ mod tests {
             text.contains("/home/user/project"),
             "should contain directory"
         );
-        assert!(text.contains('$'), "should contain cost");
+        assert!(text.contains('↑'), "should contain input token indicator");
+        assert!(text.contains('↓'), "should contain output token indicator");
     }
 
     #[test]
@@ -258,7 +232,8 @@ mod tests {
         info.usage.add(5000, 1000);
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(text.contains("6.0k"), "should contain token count");
+        assert!(text.contains("↑5.0k"), "should contain input token count");
+        assert!(text.contains("↓1.0k"), "should contain output token count");
     }
 
     #[test]
@@ -273,8 +248,8 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<_> = colors.iter().collect();
         assert!(
-            unique.len() >= 4,
-            "should have at least 4 distinct colors, got {unique:?}"
+            unique.len() >= 3,
+            "should have at least 3 distinct colors, got {unique:?}"
         );
     }
 
@@ -340,7 +315,6 @@ mod tests {
     #[test]
     fn detect_git_branch_returns_some_in_git_repo() {
         let branch = detect_git_branch();
-        // We're running tests inside a git repo, so this should work
         assert!(branch.is_some(), "should detect a git branch");
         let name = branch.expect("branch should exist");
         assert!(!name.is_empty(), "branch name should not be empty");
