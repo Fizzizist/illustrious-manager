@@ -19,8 +19,10 @@ use tokio::task::JoinHandle;
 
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::input_area::{InputArea, InputMode};
+use super::session_picker::{SessionPicker, SessionPickerAction};
 use crate::agent::Agent;
 use crate::logging::Logger;
+use crate::session::list_sessions;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -32,6 +34,7 @@ pub enum AppState {
         name: String,
         input: serde_json::Value,
     },
+    SessionPicker,
 }
 
 pub struct App {
@@ -43,6 +46,7 @@ pub struct App {
     pub scroll_offset: u16,
     pub viewport_height: u16,
     pub text_width: u16,
+    pub session_picker: Option<SessionPicker>,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -58,6 +62,7 @@ impl App {
                     input: input.clone(),
                 });
             }
+            AppState::SessionPicker => self.input.set_mode(InputMode::Streaming),
         }
     }
 
@@ -71,6 +76,7 @@ impl App {
             scroll_offset: 0,
             viewport_height: 0,
             text_width: 0,
+            session_picker: None,
             tools,
         }
     }
@@ -211,6 +217,10 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     conv_area.render(frame, chunks[0], text_width);
 
     app.input.render(frame, chunks[1]);
+
+    if let Some(ref mut picker) = app.session_picker {
+        picker.render(frame, frame.area());
+    }
 }
 
 pub fn handle_agent_event(
@@ -298,6 +308,7 @@ pub async fn run(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     logger: Option<Logger>,
+    sessions_dir: std::path::PathBuf,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -305,7 +316,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt, logger).await;
+    let result = run_app(&mut terminal, agent, initial_prompt, logger, sessions_dir).await;
 
     disable_raw_mode()?;
     execute!(
@@ -323,6 +334,7 @@ async fn run_app(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
+    sessions_dir: std::path::PathBuf,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
     // we load just the session history here to avoid printing the loaded context messages from
@@ -368,7 +380,21 @@ async fn run_app(
                                     ..
                                 } => {
                                     let text = app.input_text();
-                                    if !text.trim().is_empty() {
+                                    if text.trim() == "/sessions" {
+                                        app.input.clear();
+                                        match list_sessions(&sessions_dir).await {
+                                            Ok(sessions) => {
+                                                app.session_picker = Some(SessionPicker::new(sessions));
+                                                app.set_state(AppState::SessionPicker);
+                                            }
+                                            Err(e) => {
+                                                app.conversation.push(ConversationEntry::new(
+                                                    ConversationRole::Error,
+                                                    format!("Failed to list sessions: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    } else if !text.trim().is_empty() {
                                         if let Some(ref mut log) = logger {
                                             log.log_user_input(&text)?;
                                         }
@@ -378,6 +404,60 @@ async fn run_app(
                                 }
                                 _ => {
                                     app.input.input(key);
+                                }
+                            }
+                        },
+                        AppState::SessionPicker => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key {
+                                break;
+                            }
+                            if let Some(ref mut picker) = app.session_picker {
+                                let action = picker.handle_key(key);
+                                match action {
+                                    SessionPickerAction::Close => {
+                                        app.session_picker = None;
+                                        app.set_state(AppState::Input);
+                                    }
+                                    SessionPickerAction::Select(session_id) => {
+                                        app.session_picker = None;
+                                        app.set_state(AppState::Input);
+                                        // Reload the selected session
+                                        match crate::session::Session::new(
+                                            Some(session_id.clone()),
+                                            sessions_dir.clone(),
+                                        )
+                                        .await
+                                        {
+                                            Ok(session) => {
+                                                match session.load_history().await {
+                                                    Ok(history) => {
+                                                        app.conversation.clear();
+                                                        app.current_response.clear();
+                                                        app.scroll_offset = 0;
+                                                        app.load_history(&history);
+                                                        agent.load_session(session).await;
+                                                    }
+                                                    Err(e) => {
+                                                        app.conversation.push(ConversationEntry::new(
+                                                            ConversationRole::Error,
+                                                            format!("Failed to load session history: {e}"),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                app.conversation.push(ConversationEntry::new(
+                                                    ConversationRole::Error,
+                                                    format!("Failed to open session: {e}"),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    SessionPickerAction::None => {}
                                 }
                             }
                         },

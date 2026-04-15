@@ -114,6 +114,14 @@ impl Agent {
         self.session.lock().await.load_history().await
     }
 
+    /// Replace the current session with a new one and reload the conversation history.
+    /// The in-memory history is reset to only what is in the new session's database.
+    pub async fn load_session(&self, session: Session) {
+        let history = session.load_history().await.unwrap_or_default();
+        *lock(&self.history) = history;
+        *self.session.lock().await = session;
+    }
+
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
         if files.is_empty() {
             return;
