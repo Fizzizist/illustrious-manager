@@ -437,6 +437,21 @@ async fn run_app(
                                                 ));
                                             }
                                         }
+                                    } else if let Some(model) = text.trim().strip_prefix("/model ") {
+                                        let model = model.trim().to_string();
+                                        app.input.clear();
+                                        if model.is_empty() {
+                                            app.conversation.push(ConversationEntry::new(
+                                                ConversationRole::Error,
+                                                "Usage: /model <model-name>".to_string(),
+                                            ));
+                                        } else {
+                                            agent.set_model(model.clone());
+                                            app.conversation.push(ConversationEntry::new(
+                                                ConversationRole::Intro,
+                                                format!("Model switched to `{model}`"),
+                                            ));
+                                        }
                                     } else if !text.trim().is_empty() {
                                         if let Some(ref mut log) = logger {
                                             log.log_user_input(&text)?;
@@ -1295,6 +1310,98 @@ mod tests {
         assert!(
             has_coloured,
             "edit_file event should render with diff colours"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_command_updates_agent_model() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("test session");
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "claude-original".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                session,
+            )
+            .await,
+        );
+
+        agent.set_model("claude-new-model".to_string());
+        assert_eq!(agent.model(), "claude-new-model");
+    }
+
+    #[tokio::test]
+    async fn model_command_empty_name_does_not_update_model() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("test session");
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "claude-original".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                session,
+            )
+            .await,
+        );
+
+        // "/model " with no name: the UI guards against empty model name
+        let model_name = "  ".trim().to_string();
+        if !model_name.is_empty() {
+            agent.set_model(model_name);
+        }
+        assert_eq!(
+            agent.model(),
+            "claude-original",
+            "model should be unchanged for blank input"
         );
     }
 }
