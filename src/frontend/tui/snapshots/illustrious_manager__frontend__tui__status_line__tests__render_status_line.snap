@@ -2,4 +2,4 @@
 source: src/frontend/tui/status_line.rs
 expression: terminal.backend()
 ---
-" 15.7k  $0.09   main               claude-sonnet-4-20250514  /home/user/project "
+" ↑12.5k ↓3.2k   main               claude-sonnet-4-20250514  /home/user/project "

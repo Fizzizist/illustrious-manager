@@ -894,8 +894,12 @@ mod tests {
             "status line should show git branch"
         );
         assert!(
-            rendered.contains("1.5k"),
-            "status line should show token count"
+            rendered.contains("↑1.0k"),
+            "status line should show input tokens"
+        );
+        assert!(
+            rendered.contains("↓500"),
+            "status line should show output tokens"
         );
     }
 
