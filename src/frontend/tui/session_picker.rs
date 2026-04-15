@@ -65,7 +65,7 @@ impl SessionPicker {
                 Some(id) => SessionPickerAction::Select(id.to_string()),
                 None => SessionPickerAction::None,
             },
-            KeyCode::Char('q') => SessionPickerAction::Close,
+            KeyCode::Char('q') | KeyCode::Esc => SessionPickerAction::Close,
             _ => SessionPickerAction::None,
         }
     }
@@ -90,7 +90,7 @@ impl SessionPicker {
                         truncated
                     }
                 };
-                ListItem::new(format!("{}  {}", &s.id[..8], preview))
+                ListItem::new(format!("{}  {}", s.id.get(..8).unwrap_or(&s.id), preview))
             })
             .collect();
 
@@ -265,6 +265,17 @@ mod tests {
         )];
         let mut picker = SessionPicker::new(sessions);
         let action = picker.handle_key(key(KeyCode::Char('q')));
+        assert_eq!(action, SessionPickerAction::Close);
+    }
+
+    #[test]
+    fn esc_returns_close_action() {
+        let sessions = vec![make_session(
+            "01900000-0000-7000-0000-000000000001",
+            "hello",
+        )];
+        let mut picker = SessionPicker::new(sessions);
+        let action = picker.handle_key(key(KeyCode::Esc));
         assert_eq!(action, SessionPickerAction::Close);
     }
 

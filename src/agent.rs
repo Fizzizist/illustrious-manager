@@ -23,6 +23,9 @@ struct PendingToolCall {
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     history: Arc<Mutex<Vec<Message>>>,
+    /// Number of messages prepended to `history` that are never persisted to the DB
+    /// (context files, skill definitions). Preserved across session switches.
+    context_prefix_len: Arc<Mutex<usize>>,
     config: RequestConfig,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
@@ -48,6 +51,7 @@ impl Agent {
         Self {
             backend: Arc::from(backend),
             history: Arc::new(Mutex::new(history)),
+            context_prefix_len: Arc::new(Mutex::new(0)),
             config,
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
@@ -95,6 +99,10 @@ impl Agent {
 
         let msg = Message::text(Role::User, content);
         lock(&self.history).insert(0, msg.clone());
+        *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
         self
     }
 
@@ -115,10 +123,21 @@ impl Agent {
     }
 
     /// Replace the current session with a new one and reload the conversation history.
-    /// The in-memory history is reset to only what is in the new session's database.
+    /// Non-persisted context messages (context files, skill definitions) are preserved
+    /// at the front of history; only the persisted portion is replaced.
     pub async fn load_session(&self, session: Session) {
-        let history = session.load_history().await.unwrap_or_default();
-        *lock(&self.history) = history;
+        let new_history = session.load_history().await.unwrap_or_default();
+        {
+            let prefix_len = *self
+                .context_prefix_len
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut history = lock(&self.history);
+            let take = prefix_len.min(history.len());
+            let prefix: Vec<Message> = history.drain(..take).collect();
+            *history = prefix;
+            history.extend(new_history);
+        }
         *self.session.lock().await = session;
     }
 
@@ -139,6 +158,10 @@ impl Agent {
         let msg = Message::text(Role::User, content);
         // prepend context files and don't persist them to the DB
         lock(&self.history).insert(0, msg.clone());
+        *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
     }
 
     pub async fn send(
@@ -1253,5 +1276,128 @@ mod tests {
             agent.history().is_empty(),
             "empty skills map should not add history entry"
         );
+    }
+
+    #[tokio::test]
+    async fn load_session_replaces_persisted_history() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        session_a
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .await
+            .expect("insert");
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        session_b
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .await
+            .expect("insert");
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+
+        assert_eq!(agent.history().len(), 1);
+        assert!(
+            matches!(&agent.history()[0].content[0], crate::types::ContentBlock::Text(t) if t == "session a message")
+        );
+
+        agent.load_session(session_b).await;
+
+        assert_eq!(agent.history().len(), 1);
+        assert!(
+            matches!(&agent.history()[0].content[0], crate::types::ContentBlock::Text(t) if t == "session b message")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_preserves_context_prefix() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        session_a
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .await
+            .expect("insert");
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        session_b
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .await
+            .expect("insert");
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let mut skills = std::collections::HashMap::new();
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let skill_path = tmp.path().join("test-skill.md");
+        std::fs::write(&skill_path, "---\ndescription: A test skill\n---\nContent").expect("write");
+        skills.insert("test-skill".to_string(), skill_path);
+
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a)
+            .await
+            .with_skills(&skills);
+
+        // history should be: [skill_prefix, session_a_message]
+        assert_eq!(agent.history().len(), 2);
+
+        agent.load_session(session_b).await;
+
+        // history should be: [skill_prefix, session_b_message] — prefix preserved
+        let history = agent.history();
+        assert_eq!(history.len(), 2, "context prefix should be preserved");
+        assert!(
+            matches!(&history[0].content[0], crate::types::ContentBlock::Text(t) if t.contains("test-skill")),
+            "first entry should still be the skills prefix"
+        );
+        assert!(
+            matches!(&history[1].content[0], crate::types::ContentBlock::Text(t) if t == "session b message"),
+            "second entry should be new session's message"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_updates_session_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        let id_a = session_a.id.clone();
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        let id_b = session_b.id.clone();
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+
+        assert_eq!(agent.session_id().await, id_a);
+        agent.load_session(session_b).await;
+        assert_eq!(agent.session_id().await, id_b);
     }
 }

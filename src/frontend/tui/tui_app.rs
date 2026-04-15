@@ -62,7 +62,7 @@ impl App {
                     input: input.clone(),
                 });
             }
-            AppState::SessionPicker => self.input.set_mode(InputMode::Streaming),
+            AppState::SessionPicker => self.input.set_mode(InputMode::SessionPicker),
         }
     }
 
@@ -912,5 +912,158 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+    }
+
+    #[test]
+    fn sessions_command_transitions_app_to_session_picker_state() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![]));
+        app.set_state(AppState::SessionPicker);
+        assert_eq!(app.state, AppState::SessionPicker);
+        assert!(app.session_picker.is_some());
+    }
+
+    #[test]
+    fn session_picker_close_transitions_back_to_input() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(summaries));
+        app.set_state(AppState::SessionPicker);
+
+        // simulate Close action
+        let picker = app.session_picker.as_mut().expect("picker");
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, SessionPickerAction::Close);
+
+        // apply the action
+        if matches!(action, SessionPickerAction::Close) {
+            app.session_picker = None;
+            app.set_state(AppState::Input);
+        }
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(app.session_picker.is_none());
+    }
+
+    #[test]
+    fn session_picker_esc_also_closes() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, SessionPickerAction::Close);
+    }
+
+    #[tokio::test]
+    async fn session_picker_select_clears_conversation_and_reloads_history() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::session::SessionSummary;
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        // Create session with a known message
+        let session = crate::session::Session::new(None, dir_path.clone())
+            .await
+            .expect("session");
+        session
+            .insert_message(&Message::text(Role::User, "loaded message".to_string()))
+            .await
+            .expect("insert");
+
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                crate::session::Session::new(None, dir_path.clone())
+                    .await
+                    .expect("initial session"),
+            )
+            .await,
+        );
+
+        let mut app = App::new(agent.tools());
+        // pre-populate conversation with stale data
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "old message".to_string(),
+        ));
+        app.scroll_offset = 10;
+
+        // simulate selecting the session
+        let history = session.load_history().await.expect("load history");
+        app.conversation.clear();
+        app.current_response.clear();
+        app.scroll_offset = 0;
+        app.load_history(&history);
+        agent.load_session(session).await;
+
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].content, "loaded message");
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn session_picker_select_returns_selected_id() {
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::SessionSummary;
+        use std::time::SystemTime;
+
+        let summaries = vec![SessionSummary {
+            id: "01900000-0000-7000-0000-000000000001".to_string(),
+            first_user_message: "hello".to_string(),
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(
+            action,
+            SessionPickerAction::Select("01900000-0000-7000-0000-000000000001".to_string())
+        );
     }
 }
