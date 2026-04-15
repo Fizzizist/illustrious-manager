@@ -21,6 +21,7 @@ use super::conversation_area::{ConversationArea, ConversationEntry, Conversation
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
 use super::session_picker::{SessionPicker, SessionPickerAction};
+use super::status_line::{self, StatusLineInfo, TokenUsage};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
@@ -49,6 +50,10 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
+    pub usage: TokenUsage,
+    pub model: String,
+    pub git_branch: Option<String>,
+    pub working_dir: std::path::PathBuf,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -79,6 +84,10 @@ impl App {
             viewport_height: 0,
             text_width: 0,
             session_picker: None,
+            usage: TokenUsage::default(),
+            model: String::new(),
+            git_branch: status_line::detect_git_branch(),
+            working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
             tools,
         }
     }
@@ -238,6 +247,16 @@ impl Default for App {
     }
 }
 
+/// Build a `StatusLineInfo` from the current app state.
+fn status_info(app: &App) -> StatusLineInfo {
+    StatusLineInfo {
+        model: app.model.clone(),
+        git_branch: app.git_branch.clone(),
+        working_dir: app.working_dir.clone(),
+        usage: app.usage.clone(),
+    }
+}
+
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let input_height = app
@@ -246,7 +265,11 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
     let text_width = chunks[0].width.saturating_sub(2);
@@ -260,6 +283,9 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     conv_area.render(frame, chunks[0], text_width);
 
     app.input.render(frame, chunks[1]);
+
+    let info = status_info(app);
+    status_line::render_status_line(&info, frame, chunks[2]);
 
     if let Some(ref mut picker) = app.session_picker {
         picker.render(frame, frame.area());
@@ -340,7 +366,13 @@ pub fn handle_agent_event(
             }
             app.set_state(AppState::ToolConfirmation { name, input });
         }
-        AgentEvent::Usage { .. } => {}
+        AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            app.usage.add(input_tokens, output_tokens);
+        }
     }
     Ok(())
 }
@@ -379,6 +411,7 @@ async fn run_app(
     config: &AppConfig,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
+    app.model = agent.model();
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
@@ -447,6 +480,7 @@ async fn run_app(
                                             ));
                                         } else {
                                             agent.set_model(model.clone());
+                                            app.model = model.clone();
                                             app.conversation.push(ConversationEntry::new(
                                                 ConversationRole::Info,
                                                 format!("Model switched to `{model}`"),
@@ -805,6 +839,64 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let event = AgentEvent::ResponseComplete("test".to_string());
         handle_agent_event(&mut app, event, None).expect("should not error without logger");
+    }
+
+    #[test]
+    fn usage_event_accumulates_token_counts() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+
+        let event = AgentEvent::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle usage event");
+
+        assert_eq!(app.usage.input_tokens, 100);
+        assert_eq!(app.usage.output_tokens, 50);
+
+        let event2 = AgentEvent::Usage {
+            input_tokens: 200,
+            output_tokens: 75,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event2, None).expect("handle second usage event");
+
+        assert_eq!(app.usage.input_tokens, 300);
+        assert_eq!(app.usage.output_tokens, 125);
+    }
+
+    #[test]
+    fn render_app_includes_status_line() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.model = "test-model".to_string();
+        app.usage.add(1000, 500);
+        app.git_branch = Some("main".to_string());
+        app.working_dir = std::path::PathBuf::from("/test/project");
+
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains("test-model"),
+            "status line should show model name"
+        );
+        assert!(
+            rendered.contains("main"),
+            "status line should show git branch"
+        );
+        assert!(
+            rendered.contains("1.5k"),
+            "status line should show token count"
+        );
     }
 
     #[test]
