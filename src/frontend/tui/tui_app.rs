@@ -879,7 +879,7 @@ mod tests {
     fn render_intro_message_snapshot() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(
-            "# Illustrious Manager\n\n**Backend:** vertex\n**Model:** claude-sonnet-4-20250514"
+            "# Illustrious Manager\n\n- **Backend:** vertex\n- **Model:** claude-sonnet-4-20250514\n"
                 .to_string(),
         );
 

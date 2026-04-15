@@ -245,30 +245,30 @@ pub fn apply_overrides(
 pub fn generate_intro_message(config: &AppConfig) -> String {
     let mut msg = String::from("# Illustrious Manager\n\n");
 
-    let _ = writeln!(msg, "**Backend:** {}", config.backend);
+    let _ = writeln!(msg, "- **Backend:** {}", config.backend);
 
     match config.backend.as_str() {
         "vertex" => {
-            let _ = writeln!(msg, "**Project:** {}", config.vertex.project);
-            let _ = writeln!(msg, "**Region:** {}", config.vertex.region);
-            let _ = writeln!(msg, "**Model:** {}", config.vertex.model);
+            let _ = writeln!(msg, "- **Project:** {}", config.vertex.project);
+            let _ = writeln!(msg, "- **Region:** {}", config.vertex.region);
+            let _ = writeln!(msg, "- **Model:** {}", config.vertex.model);
         }
         "zai" => {
             if let Some(ref zai) = config.zai {
-                let _ = writeln!(msg, "**Model:** {}", zai.model);
+                let _ = writeln!(msg, "- **Model:** {}", zai.model);
             }
         }
         _ => {}
     }
 
-    let _ = writeln!(msg, "**Confirmation:** {:?}", config.tools.confirmation);
-    let _ = writeln!(msg, "**Sandbox Root:** {}", config.tools.sandbox_root);
+    let _ = writeln!(msg, "- **Confirmation:** {:?}", config.tools.confirmation);
+    let _ = writeln!(msg, "- **Sandbox Root:** {}", config.tools.sandbox_root);
     let _ = writeln!(
         msg,
-        "**Max Tool Iterations:** {}",
+        "- **Max Tool Iterations:** {}",
         config.tools.max_tool_iterations
     );
-    let _ = writeln!(msg, "**Sessions Dir:** {}", config.sessions_dir.display());
+    let _ = writeln!(msg, "- **Sessions Dir:** {}", config.sessions_dir.display());
 
     msg
 }
