@@ -86,8 +86,8 @@ impl App {
             session_picker: None,
             usage: TokenUsage::default(),
             model: String::new(),
-            git_branch: status_line::detect_git_branch(),
-            working_dir: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            git_branch: None,
+            working_dir: std::path::PathBuf::new(),
             tools,
         }
     }
@@ -412,6 +412,8 @@ async fn run_app(
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
     app.model = agent.model();
+    app.git_branch = status_line::detect_git_branch();
+    app.working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
