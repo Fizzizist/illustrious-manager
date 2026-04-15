@@ -16,7 +16,7 @@ pub enum ConversationRole {
     Error,
     ToolUse,
     ToolResult,
-    Intro,
+    Info,
 }
 
 impl ConversationRole {
@@ -27,7 +27,7 @@ impl ConversationRole {
             ConversationRole::Error => "Error",
             ConversationRole::ToolUse => "[Tool]",
             ConversationRole::ToolResult => "[Result]",
-            ConversationRole::Intro => "Info",
+            ConversationRole::Info => "Info",
         }
     }
 
@@ -38,7 +38,7 @@ impl ConversationRole {
             ConversationRole::Error => Color::Red,
             ConversationRole::ToolUse => Color::Cyan,
             ConversationRole::ToolResult => Color::Yellow,
-            ConversationRole::Intro => Color::Magenta,
+            ConversationRole::Info => Color::Magenta,
         }
     }
 }
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(ConversationRole::Error.display_label(), "Error");
         assert_eq!(ConversationRole::ToolUse.display_label(), "[Tool]");
         assert_eq!(ConversationRole::ToolResult.display_label(), "[Result]");
-        assert_eq!(ConversationRole::Intro.display_label(), "Info");
+        assert_eq!(ConversationRole::Info.display_label(), "Info");
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
         assert_eq!(ConversationRole::Error.color(), Color::Red);
         assert_eq!(ConversationRole::ToolUse.color(), Color::Cyan);
         assert_eq!(ConversationRole::ToolResult.color(), Color::Yellow);
-        assert_eq!(ConversationRole::Intro.color(), Color::Magenta);
+        assert_eq!(ConversationRole::Info.color(), Color::Magenta);
     }
 
     #[test]
@@ -609,7 +609,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
         };
         let mut entries = vec![ConversationEntry::new(
-            ConversationRole::Intro,
+            ConversationRole::Info,
             generate_intro_message(&config),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
