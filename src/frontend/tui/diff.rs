@@ -140,6 +140,15 @@ pub fn build_file_diff_from_snapshots(path: &str, before: &str, after: &str) -> 
     }
 }
 
+/// Return the default syntect theme used throughout this module.
+fn default_theme() -> &'static syntect::highlighting::Theme {
+    THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.values().next())
+        .expect("at least one theme is always available in default-themes")
+}
+
 /// Convert a syntect `Color` to a ratatui `Color`.
 fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
     Color::Rgb(c.r, c.g, c.b)
@@ -149,6 +158,11 @@ fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
 /// base_style's background preserved and foreground colours from the theme.
 ///
 /// Falls back to a single unstyled span if the extension is unknown.
+///
+/// Note: a fresh `HighlightLines` is created per call, which is correct for
+/// single-line use (e.g. diff context lines) but loses multi-line state.
+/// `render_write_file` maintains its own `HighlightLines` across all lines
+/// for correct stateful highlighting of a complete file.
 fn highlight_code_line(line: &str, path: &str, base_style: Style) -> Vec<Span<'static>> {
     let syntax = SYNTAX_SET
         .find_syntax_for_file(Path::new(path))
@@ -156,13 +170,7 @@ fn highlight_code_line(line: &str, path: &str, base_style: Style) -> Vec<Span<'s
         .flatten()
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| THEME_SET.themes.values().next())
-        .expect("at least one theme is always available in default-themes");
-
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut highlighter = HighlightLines::new(syntax, default_theme());
 
     let line_with_newline = format!("{line}\n");
     let ranges = highlighter
@@ -297,6 +305,14 @@ pub fn build_diff_lines(file: &FileDiff, width: usize) -> Vec<Line<'static>> {
                 }
                 DiffLineKind::Removed => {
                     // Look ahead: is the very next line an insertion?
+                    // This pairs single adjacent Removed→Added lines for word-level
+                    // highlighting, which covers the most common case (single-line edits).
+                    // For multi-line replacements (N removed + N added), `similar`
+                    // emits all deletions before all insertions, so only the first
+                    // removed/added pair is matched here; the rest fall through to
+                    // standalone rendering. A more sophisticated approach would
+                    // collect all consecutive Removed lines, then all consecutive Added
+                    // lines, and pair them positionally.
                     let next_is_added = hunk_lines
                         .get(i + 1)
                         .is_some_and(|n| n.kind == DiffLineKind::Added);
@@ -397,17 +413,6 @@ fn truncate_spans(spans: &mut Vec<Span<'static>>, max_content_chars: usize) {
     spans.truncate(cut_at);
 }
 
-/// Extract the file path from an `edit_file` or `write_file` tool input JSON.
-pub fn extract_file_path(tool_name: &str, input: &serde_json::Value) -> Option<String> {
-    match tool_name {
-        "edit_file" | "write_file" => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        _ => None,
-    }
-}
-
 /// Render an `edit_file` tool call (old_string → new_string) as diff `Line`s.
 pub fn render_edit_file_diff(
     input: &serde_json::Value,
@@ -420,41 +425,15 @@ pub fn render_edit_file_diff(
     Some(build_diff_lines(&file_diff, width))
 }
 
-/// Infer a syntect-compatible language name from a file path's extension.
-///
-/// Returns `None` if the extension is unknown or not present, in which case
-/// callers should fall back to plain-text rendering.
-fn language_from_path(path: &str) -> Option<&'static str> {
-    let ext = Path::new(path).extension()?.to_str()?;
-    let lang = match ext {
-        "rs" => "Rust",
-        "py" => "Python",
-        "js" | "mjs" | "cjs" => "JavaScript",
-        "ts" | "mts" | "cts" => "TypeScript",
-        "json" => "JSON",
-        "toml" => "TOML",
-        "yaml" | "yml" => "YAML",
-        "sh" | "bash" => "Bash",
-        "html" | "htm" => "HTML",
-        "css" => "CSS",
-        "go" => "Go",
-        "c" | "h" => "C",
-        "cpp" | "cc" | "cxx" | "hpp" => "C++",
-        "java" => "Java",
-        "rb" => "Ruby",
-        "md" | "markdown" => "Markdown",
-        "sql" => "SQL",
-        "xml" => "XML",
-        _ => return None,
-    };
-    Some(lang)
-}
-
 /// Render a `write_file` tool call as a syntax-highlighted code block.
 ///
-/// The language is inferred from the file extension; if unknown the block is
-/// rendered as plain text.  No diff gutter is shown — there is no previous
-/// version to compare against.
+/// Syntax is detected from the file extension via syntect's built-in mappings
+/// (the same strategy used by `highlight_code_line` for diff lines).
+/// A persistent `HighlightLines` is used across all lines to preserve
+/// multi-line highlighter state — this is why `highlight_code_line` is not
+/// reused here, which resets state on every call.
+///
+/// No diff gutter is shown — there is no previous version to compare against.
 pub fn render_write_file(input: &serde_json::Value, width: usize) -> Option<Vec<Line<'static>>> {
     let path = input.get("path").and_then(|v| v.as_str())?;
     let content = input.get("content").and_then(|v| v.as_str())?;
@@ -467,21 +446,17 @@ pub fn render_write_file(input: &serde_json::Value, width: usize) -> Option<Vec<
     let file_label = format!("New file: {path}");
     let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled(file_label, label_style))];
 
-    let syntax = language_from_path(path)
-        .and_then(|lang| SYNTAX_SET.find_syntax_by_name(lang))
+    let syntax = SYNTAX_SET
+        .find_syntax_for_file(Path::new(path))
+        .ok()
+        .flatten()
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let theme = THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| THEME_SET.themes.values().next())
-        .expect("at least one theme is always available in default-themes");
-
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut highlighter = HighlightLines::new(syntax, default_theme());
 
     let max_line_no = content.lines().count().max(1);
     let digits = max_line_no.to_string().len().max(MIN_LINE_NO_DIGITS);
-    // gutter: line number + trailing space (no old-column for new files)
+    // gutter: line number + trailing space (no old-column — this is a new file)
     let gutter_width = digits + 1;
     let content_width = width.saturating_sub(gutter_width + 1); // +1 for "+" marker
 
@@ -789,32 +764,6 @@ mod tests {
                 "gutter should not have two-column padding, got: {gutter_text:?}"
             );
         }
-    }
-
-    // ── extract_file_path ────────────────────────────────────────────────────
-
-    #[test]
-    fn extract_file_path_edit_file() {
-        let input = serde_json::json!({"path": "src/lib.rs", "old_string": "a", "new_string": "b"});
-        assert_eq!(
-            extract_file_path("edit_file", &input),
-            Some("src/lib.rs".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_file_path_write_file() {
-        let input = serde_json::json!({"path": "out.txt", "content": "hi"});
-        assert_eq!(
-            extract_file_path("write_file", &input),
-            Some("out.txt".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_file_path_unknown_tool_returns_none() {
-        let input = serde_json::json!({"path": "x.txt"});
-        assert!(extract_file_path("bash", &input).is_none());
     }
 
     // ── insta snapshot tests ─────────────────────────────────────────────────
