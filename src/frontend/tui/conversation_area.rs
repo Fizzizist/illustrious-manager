@@ -63,6 +63,35 @@ impl ConversationEntry {
         }
     }
 
+    /// Create an entry whose display lines are provided directly, bypassing markdown rendering.
+    ///
+    /// Used for diff output from `edit_file` and `write_file` tool calls.
+    pub fn new_with_lines(
+        role: ConversationRole,
+        content: String,
+        lines: Vec<Line<'static>>,
+    ) -> Self {
+        // Wrap in the role header + trailing blank, then append the pre-built lines.
+        let mut all_lines = Vec::new();
+        all_lines.push(Line::from(Span::styled(
+            format!("{}:", role.display_label()),
+            Style::default().fg(role.color()),
+        )));
+        all_lines.extend(lines.into_iter().map(|mut l| {
+            l.spans.insert(0, Span::raw("  "));
+            l
+        }));
+        all_lines.push(Line::from(""));
+
+        Self {
+            role,
+            content,
+            cached_lines: all_lines,
+            cached_wrapped_count: 0,
+            cached_width: 0,
+        }
+    }
+
     pub fn lines(&self) -> &[Line<'static>] {
         &self.cached_lines
     }

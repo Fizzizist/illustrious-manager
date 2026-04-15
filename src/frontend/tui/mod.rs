@@ -1,4 +1,5 @@
 pub mod conversation_area;
+pub mod diff;
 pub mod input_area;
 mod tui_app;
 
