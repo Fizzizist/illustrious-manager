@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
             frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger).await?;
+            frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await?;
         }
     }
 
