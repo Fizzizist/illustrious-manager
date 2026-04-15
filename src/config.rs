@@ -1,4 +1,5 @@
 use dirs;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -242,9 +243,49 @@ pub fn apply_overrides(
 }
 
 /// Generate a markdown intro message displaying the currently loaded configuration.
+///
+/// Serializes the config to TOML to ensure all fields are captured automatically,
+/// then formats each key-value pair as a markdown list item.
 pub fn generate_intro_message(config: &AppConfig) -> String {
-    let toml = toml::to_string_pretty(config).unwrap_or_else(|e| format!("(error: {e})"));
-    format!("# Illustrious Manager\n\n```toml\n{toml}```")
+    let toml_value = toml::Value::try_from(config).unwrap_or(toml::Value::String(
+        "(error serializing config)".to_string(),
+    ));
+
+    let mut msg = String::from("# Illustrious Manager\n\n");
+    append_toml_as_list(&mut msg, &toml_value, "");
+    msg
+}
+
+fn append_toml_as_list(out: &mut String, value: &toml::Value, prefix: &str) {
+    if let toml::Value::Table(table) = value {
+        for (key, val) in table {
+            let full_key = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            match val {
+                toml::Value::Table(_) => append_toml_as_list(out, val, &full_key),
+                toml::Value::Array(arr) => {
+                    let items: Vec<String> = arr.iter().map(toml_value_display).collect();
+                    let _ = writeln!(out, "- **{full_key}:** {}", items.join(", "));
+                }
+                _ => {
+                    let _ = writeln!(out, "- **{full_key}:** {}", toml_value_display(val));
+                }
+            }
+        }
+    }
+}
+
+fn toml_value_display(val: &toml::Value) -> String {
+    match val {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Validate that the config has all required fields for the selected backend.
