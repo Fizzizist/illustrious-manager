@@ -16,6 +16,7 @@ pub enum ConversationRole {
     Error,
     ToolUse,
     ToolResult,
+    Intro,
 }
 
 impl ConversationRole {
@@ -26,6 +27,7 @@ impl ConversationRole {
             ConversationRole::Error => "Error",
             ConversationRole::ToolUse => "[Tool]",
             ConversationRole::ToolResult => "[Result]",
+            ConversationRole::Intro => "Welcome",
         }
     }
 
@@ -36,6 +38,7 @@ impl ConversationRole {
             ConversationRole::Error => Color::Red,
             ConversationRole::ToolUse => Color::Cyan,
             ConversationRole::ToolResult => Color::Yellow,
+            ConversationRole::Intro => Color::Magenta,
         }
     }
 }
@@ -332,6 +335,7 @@ mod tests {
         assert_eq!(ConversationRole::Error.display_label(), "Error");
         assert_eq!(ConversationRole::ToolUse.display_label(), "[Tool]");
         assert_eq!(ConversationRole::ToolResult.display_label(), "[Result]");
+        assert_eq!(ConversationRole::Intro.display_label(), "Welcome");
     }
 
     #[test]
@@ -341,6 +345,7 @@ mod tests {
         assert_eq!(ConversationRole::Error.color(), Color::Red);
         assert_eq!(ConversationRole::ToolUse.color(), Color::Cyan);
         assert_eq!(ConversationRole::ToolResult.color(), Color::Yellow);
+        assert_eq!(ConversationRole::Intro.color(), Color::Magenta);
     }
 
     #[test]
@@ -586,6 +591,38 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_user_markdown_italic", terminal.backend());
+    }
+
+    #[test]
+    fn render_intro_entry() {
+        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::path::PathBuf::from("/sessions"),
+        };
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Intro,
+            generate_intro_message(&config),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_intro_entry", terminal.backend());
     }
 
     #[test]
