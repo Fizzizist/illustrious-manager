@@ -82,6 +82,7 @@ fn render_role_lines(
     role: &ConversationRole,
     content: &str,
     trailing_blank: bool,
+    text_width: u16,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
@@ -93,7 +94,7 @@ fn render_role_lines(
         && is_diff_output(content)
         && let Some(file_diff) = parse_diff_payload(content)
     {
-        let diff_lines = build_diff_lines(&file_diff, 120);
+        let diff_lines = build_diff_lines(&file_diff, text_width);
         for line in diff_lines {
             let mut prefixed = Line::from(Span::raw("  "));
             prefixed.spans.extend(line.spans);
@@ -123,13 +124,18 @@ fn render_role_lines(
 }
 
 fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
-    render_role_lines(role, content, true)
+    render_role_lines(role, content, true, u16::MAX)
 }
 
 // TODO: For long responses with complex markdown, this O(response_size) per-frame
 // cost during streaming could become a bottleneck. Consider caching if it becomes an issue.
 fn render_current_response_lines(current_response: &str) -> Vec<Line<'static>> {
-    render_role_lines(&ConversationRole::Assistant, current_response, false)
+    render_role_lines(
+        &ConversationRole::Assistant,
+        current_response,
+        false,
+        u16::MAX,
+    )
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
@@ -488,13 +494,9 @@ mod tests {
         let before = "fn hello() {\n    println!(\"hello\");\n}\n";
         let after = "fn hello() {\n    println!(\"world\");\n}\n";
         let diff_content = format!("DIFF:src/main.rs\n{before}---BEFORE/AFTER---\n{after}");
-        let mut entries = vec![ConversationEntry::new(
-            ConversationRole::ToolResult,
-            diff_content,
-        )];
+        let entry = ConversationEntry::new(ConversationRole::ToolResult, diff_content);
 
-        // The entry should render without panicking and produce lines that look like a diff
-        let lines = entries[0].lines();
+        let lines = entry.lines();
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -512,11 +514,11 @@ mod tests {
 
     #[test]
     fn tool_result_non_diff_output_still_uses_markdown() {
-        let mut entries = vec![ConversationEntry::new(
+        let entry = ConversationEntry::new(
             ConversationRole::ToolResult,
             "Wrote 42 bytes to /tmp/foo.txt".to_string(),
-        )];
-        let lines = entries[0].lines();
+        );
+        let lines = entry.lines();
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))

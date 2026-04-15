@@ -63,12 +63,10 @@ pub fn build_file_diff_from_snapshots(path: &str, before: &str, after: &str) -> 
 
         // Compute hunk header ranges
         let first = group.first().expect("group must be non-empty");
-        let last = group.last().expect("group must be non-empty");
         let old_start = first.old_range().start + 1;
         let new_start = first.new_range().start + 1;
         let old_len: usize = group.iter().map(|op| op.old_range().len()).sum();
         let new_len: usize = group.iter().map(|op| op.new_range().len()).sum();
-        let _ = last;
 
         let header = format!(
             "@@ -{},{} +{},{} @@",
@@ -367,7 +365,7 @@ pub fn is_diff_output(content: &str) -> bool {
 
 /// Parse a diff payload embedded in tool result content.
 ///
-/// Format: `"DIFF:<path>\n<before>\n---\n<after>"`
+/// Format: `"DIFF:<path>\n<before>\n---BEFORE/AFTER---\n<after>"`
 pub fn parse_diff_payload(content: &str) -> Option<FileDiff> {
     let rest = content.strip_prefix("DIFF:")?;
     let newline = rest.find('\n')?;

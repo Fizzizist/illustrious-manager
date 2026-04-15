@@ -234,6 +234,7 @@ pub enum AgentEvent {
     ToolResult {
         name: String,
         content: String,
+        display: Option<String>,
         is_error: bool,
     },
     ToolConfirmationRequired {
@@ -512,6 +513,7 @@ mod tests {
         let event = AgentEvent::ToolResult {
             name: "bash".to_string(),
             content: "file1.txt".to_string(),
+            display: None,
             is_error: false,
         };
         assert!(matches!(event, AgentEvent::ToolResult { .. }));
@@ -519,6 +521,7 @@ mod tests {
             name,
             content,
             is_error,
+            ..
         } = event
         {
             assert_eq!(name, "bash");

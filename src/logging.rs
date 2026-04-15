@@ -109,6 +109,7 @@ impl Logger {
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 self.log_tool_result(name, content, *is_error)?;
             }
@@ -262,6 +263,7 @@ mod tests {
             let event = AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "output".to_string(),
+                display: None,
                 is_error: false,
             };
             logger.log_event(&event).expect("Failed to log event");

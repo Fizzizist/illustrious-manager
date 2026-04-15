@@ -257,8 +257,9 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
-            name,
+            name: _,
             content,
+            display,
             is_error,
         } => {
             let role = if is_error {
@@ -266,17 +267,8 @@ pub fn handle_agent_event(
             } else {
                 ConversationRole::ToolResult
             };
-            let display = match app.tools.lookup(&name) {
-                Ok(tool) => {
-                    let result = crate::tools::ToolResult {
-                        content: vec![crate::types::ContentBlock::Text(content)],
-                        is_error: false,
-                    };
-                    tool.markdown_output(&result)
-                }
-                Err(_) => content,
-            };
-            app.conversation.push(ConversationEntry::new(role, display));
+            let text = display.unwrap_or(content);
+            app.conversation.push(ConversationEntry::new(role, text));
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {

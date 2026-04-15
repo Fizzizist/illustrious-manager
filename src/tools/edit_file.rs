@@ -69,8 +69,22 @@ impl Tool for EditFile {
                     None
                 }
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .find(|s| s.starts_with("DIFF:"))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                result
+                    .content
+                    .iter()
+                    .filter_map(|b| {
+                        if let crate::types::ContentBlock::Text(s) = b {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
     }
 
     fn is_write_tool(&self) -> bool {
@@ -143,12 +157,16 @@ impl Tool for EditFile {
             message: format!("Failed to write file: {}", e),
         })?;
 
+        let summary = format!("Successfully replaced string in {:?}", validated_path);
         let diff_payload = format!(
             "DIFF:{}\n{}---BEFORE/AFTER---\n{}",
             path_str, content, new_content
         );
         Ok(ToolResult {
-            content: vec![ContentBlock::Text(diff_payload)],
+            content: vec![
+                ContentBlock::Text(summary),
+                ContentBlock::Text(diff_payload),
+            ],
             is_error: false,
         })
     }
