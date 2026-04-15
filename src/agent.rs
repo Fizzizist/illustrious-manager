@@ -138,7 +138,6 @@ impl Agent {
         input: String,
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
-        let pre_send_len = lock(&self.history).len();
         let user_msg = Message::text(Role::User, input);
         lock(&self.history).push(user_msg.clone());
 
@@ -159,10 +158,8 @@ impl Agent {
 
             'outer: loop {
                 if iterations >= max_iterations {
-                    lock(&history_arc).truncate(pre_send_len);
-                    let _ = event_tx.unbounded_send(AgentEvent::Error(format!(
-                        "Max tool iterations ({max_iterations}) exceeded"
-                    )));
+                    let error_msg = format!("Max tool iterations ({max_iterations}) exceeded");
+                    record_error(&error_msg, &history_arc, &session, &event_tx).await;
                     break;
                 }
                 iterations += 1;
@@ -171,8 +168,7 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        lock(&history_arc).truncate(pre_send_len);
-                        let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
+                        record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                         break;
                     }
                 };
@@ -218,8 +214,15 @@ impl Agent {
                         }
                         Ok(StreamEvent::Done) => break,
                         Err(e) => {
-                            lock(&history_arc).truncate(pre_send_len);
-                            let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
+                            if !text_accumulated.is_empty() {
+                                let partial_msg = Message {
+                                    role: Role::Assistant,
+                                    content: vec![ContentBlock::Text(text_accumulated.clone())],
+                                };
+                                lock(&history_arc).push(partial_msg.clone());
+                                let _ = session.lock().await.insert_message(&partial_msg).await;
+                            }
+                            record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
                         }
                     }
@@ -268,6 +271,18 @@ impl Agent {
 
         Ok(Box::pin(event_rx))
     }
+}
+
+async fn record_error(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
+    lock(history).push(error_user_msg.clone());
+    let _ = session.lock().await.insert_message(&error_user_msg).await;
+    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
 async fn execute_tool_calls(
@@ -877,7 +892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_error_on_second_iteration_clears_history() {
+    async fn backend_error_on_second_iteration_preserves_history() {
         let backend = SequencedBackend::new(vec![
             tool_call_response("t1", "bash", r#"{}"#),
             vec![Err(anyhow::anyhow!("backend failure on iteration 2"))],
@@ -900,8 +915,230 @@ mod tests {
             "expected Error event"
         );
         assert!(
-            agent.history().is_empty(),
-            "history must be fully cleared after mid-loop backend error"
+            !agent.history().is_empty(),
+            "history must be preserved after error so agent retains context"
+        );
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "run"))),
+            "user message must be retained in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_user_message_in_history() {
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection refused"))]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "expected Error event"
+        );
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must not be cleared on stream error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
+            "user message must be retained"
+        );
+    }
+
+    struct FailingBackend {
+        error_message: String,
+    }
+
+    #[async_trait]
+    impl LlmBackend for FailingBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(anyhow::anyhow!("{}", self.error_message))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_send_error_preserves_user_message_in_history() {
+        let backend = FailingBackend {
+            error_message: "connection refused".to_string(),
+        };
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("connection refused"))),
+            "expected Error event with connection refused message"
+        );
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must not be cleared on send_message error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
+            "user message must be retained"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("connection refused"))
+                )),
+            "error message with [ERROR] prefix must be in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_partial_text_in_history() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("partial response".to_string())),
+            Err(anyhow::anyhow!("max_tokens reached")),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("tell me a story".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "partial response")),
+            "expected partial text tokens before error"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "expected Error event"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("partial response")))),
+            "partial assistant text must be saved in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_message_is_added_to_history_as_user_message() {
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("max_tokens reached"))]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let has_error_in_history = history.iter().any(|m| {
+            m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t == "[ERROR] max_tokens reached"),
+                )
+        });
+        assert!(
+            has_error_in_history,
+            "error message with [ERROR] prefix must be added to history so the agent knows why a stoppage occurred"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_iterations_error_preserves_history() {
+        let responses: Vec<Vec<Result<StreamEvent>>> = (0..30)
+            .map(|_| tool_call_response("tool-1", "bash", r#"{}"#))
+            .collect();
+        let backend = SequencedBackend::new(responses);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            max_tool_iterations: 3,
+            ..Default::default()
+        };
+
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must be preserved after max iterations error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "run"))),
+            "original user message must be retained"
+        );
+        let tool_use_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count();
+        assert_eq!(
+            tool_use_count, 3,
+            "completed tool call iterations must be preserved in history"
+        );
+        let tool_result_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            tool_result_count, 3,
+            "completed tool result iterations must be preserved in history"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("Max tool iterations"))
+                )),
+            "error message with [ERROR] prefix must be in history"
         );
     }
 
