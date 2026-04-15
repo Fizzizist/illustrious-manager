@@ -45,7 +45,6 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     tools: std::sync::Arc<ToolRegistry>,
-    intro_entry_count: usize,
 }
 
 impl App {
@@ -74,7 +73,6 @@ impl App {
             viewport_height: 0,
             text_width: 0,
             tools,
-            intro_entry_count: 0,
         }
     }
 
@@ -114,9 +112,8 @@ impl App {
     }
 
     pub fn set_intro_message(&mut self, message: String) {
-        let entry = ConversationEntry::new(ConversationRole::Intro, message);
-        self.conversation.push(entry);
-        self.intro_entry_count = 1;
+        self.conversation
+            .push(ConversationEntry::new(ConversationRole::Intro, message));
     }
 
     pub fn input_text(&self) -> String {
@@ -853,7 +850,6 @@ mod tests {
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, ConversationRole::Intro);
         assert_eq!(app.conversation[0].content, "# Welcome\n\nHello!");
-        assert_eq!(app.intro_entry_count, 1);
     }
 
     #[test]
