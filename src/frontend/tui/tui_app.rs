@@ -461,6 +461,13 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Clean up current session if empty
+                                        if let Err(e) = agent.cleanup_empty_session().await {
+                                            app.conversation.push(ConversationEntry::new(
+                                                ConversationRole::Error,
+                                                format!("Failed to clean up empty session: {e}"),
+                                            ));
+                                        }
                                         // Reload the selected session
                                         match crate::session::Session::new(
                                             Some(session_id.clone()),
@@ -1014,7 +1021,6 @@ mod tests {
     async fn session_picker_select_clears_conversation_and_reloads_history() {
         use crate::agent::Agent;
         use crate::backend::LlmBackend;
-        use crate::session::SessionSummary;
         use crate::types::*;
         use async_trait::async_trait;
         use std::sync::Arc;
@@ -1102,6 +1108,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn regression_load_history_edit_file_with_zero_text_width_does_not_mangle_diff() {
         // Regression: load_history is called before the first render, so text_width
         // is 0. Previously this caused hunk headers to be truncated to "…".

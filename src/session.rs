@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS conversation (
 pub struct Session {
     pub id: String,
     pub conn: Connection,
+    db_path: PathBuf,
 }
 
 impl Session {
@@ -129,13 +130,21 @@ impl Session {
             .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
         let conn = db.connect()?;
         if !needs_migration {
-            return Ok(Self { id: sess_id, conn });
+            return Ok(Self {
+                id: sess_id,
+                conn,
+                db_path,
+            });
         }
         conn.execute(SCHEMA, ())
             .await
             .context("Failed to create conversation table")?;
 
-        Ok(Self { id: sess_id, conn })
+        Ok(Self {
+            id: sess_id,
+            conn,
+            db_path,
+        })
     }
 
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
@@ -152,6 +161,39 @@ impl Session {
             )
             .await
             .context("Failed to insert message into session")?;
+        Ok(())
+    }
+
+    pub async fn is_empty(&self) -> Result<bool> {
+        let mut rows = self
+            .conn
+            .query("SELECT COUNT(*) FROM conversation", ())
+            .await
+            .context("Failed to count conversation messages")?;
+
+        if let Some(row) = rows.next().await? {
+            let count = match row.get_value(0)? {
+                Value::Integer(n) => n,
+                _ => return Ok(true),
+            };
+            return Ok(count == 0);
+        }
+
+        Ok(true)
+    }
+
+    pub fn delete_db(&self) -> Result<()> {
+        for suffix in ["", "-wal", "-shm"] {
+            let path = if suffix.is_empty() {
+                self.db_path.clone()
+            } else {
+                self.db_path.with_extension(format!("db{}", suffix))
+            };
+            if path.exists() {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("Failed to remove {}", path.display()))?;
+            }
+        }
         Ok(())
     }
 
@@ -540,5 +582,67 @@ mod tests {
 
         let summaries = list_sessions(dir.path()).await.expect("list sessions");
         assert_eq!(summaries[0].first_user_message, "first message");
+    }
+
+    #[tokio::test]
+    async fn is_empty_returns_true_for_new_session() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        assert!(session.is_empty().await.expect("is_empty"));
+    }
+
+    #[tokio::test]
+    async fn is_empty_returns_false_after_inserting_message() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        session
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert");
+        assert!(!session.is_empty().await.expect("is_empty"));
+    }
+
+    #[tokio::test]
+    async fn delete_db_removes_db_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        let db_path = dir.path().join(format!("{}.db", session.id));
+        assert!(db_path.exists());
+
+        session.delete_db().expect("delete_db");
+        assert!(!db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_db_removes_wal_and_shm_sidecars() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        let wal_path = dir.path().join(format!("{}.db-wal", session.id));
+        let shm_path = dir.path().join(format!("{}.db-shm", session.id));
+        std::fs::write(&wal_path, b"fake wal").expect("write wal");
+        std::fs::write(&shm_path, b"fake shm").expect("write shm");
+
+        session.delete_db().expect("delete_db");
+        assert!(!wal_path.exists());
+        assert!(!shm_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_db_succeeds_when_no_sidecars_exist() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        // No WAL/SHM files — should still succeed
+        session.delete_db().expect("delete_db");
     }
 }
