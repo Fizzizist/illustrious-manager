@@ -1,4 +1,5 @@
 use dirs;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -240,6 +241,38 @@ pub fn apply_overrides(
     }
 }
 
+/// Generate a markdown intro message displaying the currently loaded configuration.
+pub fn generate_intro_message(config: &AppConfig) -> String {
+    let mut msg = String::from("# Illustrious Manager\n\n");
+
+    let _ = writeln!(msg, "**Backend:** {}", config.backend);
+
+    match config.backend.as_str() {
+        "vertex" => {
+            let _ = writeln!(msg, "**Project:** {}", config.vertex.project);
+            let _ = writeln!(msg, "**Region:** {}", config.vertex.region);
+            let _ = writeln!(msg, "**Model:** {}", config.vertex.model);
+        }
+        "zai" => {
+            if let Some(ref zai) = config.zai {
+                let _ = writeln!(msg, "**Model:** {}", zai.model);
+            }
+        }
+        _ => {}
+    }
+
+    let _ = writeln!(msg, "**Confirmation:** {:?}", config.tools.confirmation);
+    let _ = writeln!(msg, "**Sandbox Root:** {}", config.tools.sandbox_root);
+    let _ = writeln!(
+        msg,
+        "**Max Tool Iterations:** {}",
+        config.tools.max_tool_iterations
+    );
+    let _ = writeln!(msg, "**Sessions Dir:** {}", config.sessions_dir.display());
+
+    msg
+}
+
 /// Validate that the config has all required fields for the selected backend.
 ///
 /// `config_path`: The path that was actually used to load the config, for accurate error messages.
@@ -460,5 +493,112 @@ mod tests {
         let result = validate(&config, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Invalid backend"));
+    }
+
+    #[test]
+    fn generate_intro_message_contains_vertex_backend_settings() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-gcp-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("vertex"), "should mention backend name");
+        assert!(msg.contains("my-gcp-project"), "should mention project");
+        assert!(msg.contains("us-east5"), "should mention region");
+        assert!(
+            msg.contains("claude-sonnet-4-20250514"),
+            "should mention model"
+        );
+    }
+
+    #[test]
+    fn generate_intro_message_contains_zai_backend_settings() {
+        let config = AppConfig {
+            backend: "zai".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: Some(ZaiConfig {
+                api_key: "secret-key".to_string(),
+                model: "glm-5.1".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("zai"), "should mention backend name");
+        assert!(msg.contains("glm-5.1"), "should mention zai model");
+        assert!(!msg.contains("secret-key"), "should not leak API key");
+    }
+
+    #[test]
+    fn generate_intro_message_contains_tool_config() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig {
+                confirmation: ConfirmationMode::Always,
+                sandbox_root: "/tmp/sandbox".to_string(),
+                max_tool_iterations: 10,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("Always"), "should mention confirmation mode");
+        assert!(msg.contains("/tmp/sandbox"), "should mention sandbox root");
+        assert!(msg.contains("10"), "should mention max tool iterations");
+    }
+
+    #[test]
+    fn generate_intro_message_contains_sessions_dir() {
+        let sessions_dir = std::env::temp_dir().join("my-sessions");
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: sessions_dir.clone(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(
+            msg.contains(&sessions_dir.display().to_string()),
+            "should mention sessions directory"
+        );
+    }
+
+    #[test]
+    fn generate_intro_message_contains_markdown_heading() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.starts_with("# "), "should start with markdown heading");
     }
 }
