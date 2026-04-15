@@ -22,6 +22,7 @@ use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
 use super::session_picker::{SessionPicker, SessionPickerAction};
 use crate::agent::Agent;
+use crate::config::AppConfig;
 use crate::logging::Logger;
 use crate::session::list_sessions;
 use crate::tools::ToolRegistry;
@@ -112,6 +113,11 @@ impl App {
                 }
             }
         }
+    }
+
+    pub fn set_intro_message(&mut self, message: String) {
+        self.conversation
+            .push(ConversationEntry::new(ConversationRole::Intro, message));
     }
 
     pub fn input_text(&self) -> String {
@@ -344,7 +350,7 @@ pub async fn run(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     logger: Option<Logger>,
-    sessions_dir: std::path::PathBuf,
+    config: &AppConfig,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -352,7 +358,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt, logger, sessions_dir).await;
+    let result = run_app(&mut terminal, agent, initial_prompt, logger, config).await;
 
     disable_raw_mode()?;
     execute!(
@@ -370,12 +376,13 @@ async fn run_app(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
-    sessions_dir: std::path::PathBuf,
+    config: &AppConfig,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
+    app.set_intro_message(crate::config::generate_intro_message(config));
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
 
@@ -418,7 +425,7 @@ async fn run_app(
                                     let text = app.input_text();
                                     if text.trim() == "/sessions" {
                                         app.input.clear();
-                                        match list_sessions(&sessions_dir).await {
+                                        match list_sessions(&config.sessions_dir).await {
                                             Ok(sessions) => {
                                                 app.session_picker = Some(SessionPicker::new(sessions));
                                                 app.set_state(AppState::SessionPicker);
@@ -471,7 +478,7 @@ async fn run_app(
                                         // Reload the selected session
                                         match crate::session::Session::new(
                                             Some(session_id.clone()),
-                                            sessions_dir.clone(),
+                                            config.sessions_dir.clone(),
                                         )
                                         .await
                                         {
@@ -1106,6 +1113,63 @@ mod tests {
             action,
             SessionPickerAction::Select("01900000-0000-7000-0000-000000000001".to_string())
         );
+    }
+
+    #[test]
+    fn set_intro_message_adds_intro_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_intro_message("# Welcome\n\nHello!".to_string());
+        assert_eq!(app.conversation.len(), 1);
+        assert_eq!(app.conversation[0].role, ConversationRole::Intro);
+        assert_eq!(app.conversation[0].content, "# Welcome\n\nHello!");
+    }
+
+    #[test]
+    fn intro_message_displayed_after_history_when_resuming() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+        ];
+        app.load_history(&messages);
+        app.set_intro_message("# Welcome".to_string());
+
+        assert_eq!(app.conversation.len(), 3);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
+        assert_eq!(app.conversation[2].role, ConversationRole::Intro);
+    }
+
+    #[test]
+    fn render_intro_message_snapshot() {
+        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::path::PathBuf::from("/sessions"),
+        };
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_intro_message(generate_intro_message(&config));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_intro_message", terminal.backend());
     }
 
     #[test]
