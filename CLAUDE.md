@@ -27,7 +27,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 
 ## Project Overview
 
-Illustrious Manager is an experimental TUI agent application in Rust that connects to Claude on Vertex AI with streaming responses. It supports both an interactive REPL (Ratatui) and a single-shot stdout mode.
+Illustrious Manager is an experimental TUI agent application in Rust that connects to Claude on Vertex AI with streaming responses. It supports both an interactive REPL (Ratatui) and a single-shot stdout mode. Conversations are persisted to SQLite databases (one per session) and can be resumed.
 
 ## Build & Development Commands
 
@@ -37,6 +37,7 @@ cargo run                            # Run in REPL mode
 cargo run -- --single-shot "prompt"  # Run in single-shot mode
 cargo run -- --debug                 # Run with file logging (illustrious-manager_<ts>.log)
 cargo run -- --config <path>         # Use a custom config file
+cargo run -- --session-id <uuid>     # Resume a previous session by UUIDv7
 cargo test                           # Run all tests
 cargo test <test_name>               # Run a single test
 cargo insta review                   # Review/accept snapshot test changes
@@ -48,19 +49,23 @@ cargo fmt                            # Format
 
 Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
-2. **Agent Core** (`src/agent.rs`) — Owns conversation history and context files. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`.
+2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
-3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`. File tools are sandboxed to `sandbox_root` via `SandboxPolicy`. `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
+3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
 
 4. **Frontend Layer** (`src/frontend/`) — Two frontends consuming the same AgentEvent stream:
    - `stdout.rs`: Single-shot mode, streams tokens to stdout, pipe-friendly
-   - `tui`: Ratatui interactive REPL with input/response areas
+   - `tui/`: Ratatui interactive REPL with vim-style input (`input_area.rs`), scrollable conversation display (`conversation_area.rs`), syntax-highlighted diffs for file tools (`diff.rs` using `syntect` + `similar`), and a session picker overlay (`session_picker.rs`)
 
-**Context files** (`src/context_files.rs`) — on startup, CLAUDE.md and AGENTS.md are auto-discovered from `~/.claude/` and the current working directory, then injected into the conversation as initial context.
+**Session persistence** (`src/session.rs`) — Each session is a SQLite database (via `turso`) identified by a UUIDv7. Conversations are persisted per-message. Sessions can be listed, resumed, and deleted. The session picker in the TUI allows browsing and switching sessions.
 
-Key types live in `src/types.rs`. Configuration loading and CLI merge logic is in `src/config.rs`.
+**Context files** (`src/context_files.rs`) — On startup, CLAUDE.md and AGENTS.md are auto-discovered from `~/.claude/`, `pwd/.claude/`, the current working directory, and the home directory, then injected into the conversation as initial context (not persisted to the session DB).
+
+**Skills** (`src/tools/skill.rs`) — Skill directories are discovered from `~/.claude/skills/` and `pwd/.claude/skills/` (pwd overrides home). Each skill is a directory containing a `SKILL.md` file with optional YAML frontmatter (`description` field). Skills are registered as a tool and their names/descriptions are prepended to conversation history.
+
+Key types live in `src/types.rs`. Configuration loading and CLI merge logic is in `src/config.rs`. Debug file logging is in `src/logging.rs`.
 
 ## Configuration
 
@@ -68,6 +73,7 @@ Config file at `~/.config/illustrious-manager/config.toml` (auto-created on firs
 
 ```toml
 backend = "vertex"                    # "vertex" or "zai"
+# sessions_dir = "/path/to/sessions" # defaults to ~/.config/illustrious-manager/sessions
 
 [vertex]
 project = ""                          # GCP project ID (required)
@@ -86,13 +92,8 @@ model = "glm-5.1"
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 ```
 
-CLI flags (`--project`, `--region`, `--model`) override config file values.
+CLI flags (`--project`, `--region`, `--model`, `--session-id`) override config file values.
 
 ## Authentication
 
 Uses GCP Application Default Credentials (ADC) via `gcp_auth`. Requires `gcloud auth application-default login` or equivalent.
-
-## Design Documents
-
-- Design spec: `docs/superpowers/specs/2026-03-27-phase1-core-cli-design.md`
-- Implementation plan: `docs/superpowers/plans/2026-03-27-phase1-core-cli.md`
