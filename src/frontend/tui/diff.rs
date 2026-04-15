@@ -4,11 +4,15 @@ use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
+use syntect_assets::assets::HighlightingAssets;
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+static MONOKAI_EXTENDED: LazyLock<Theme> = LazyLock::new(|| {
+    let assets = HighlightingAssets::from_binary();
+    assets.get_theme("Monokai Extended Origin").clone()
+});
 
 /// Minimum digits reserved for each line-number column in the gutter.
 const MIN_LINE_NO_DIGITS: usize = 1;
@@ -140,13 +144,9 @@ pub fn build_file_diff_from_snapshots(path: &str, before: &str, after: &str) -> 
     }
 }
 
-/// Return the default syntect theme used throughout this module.
-fn default_theme() -> &'static syntect::highlighting::Theme {
-    THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| THEME_SET.themes.values().next())
-        .expect("at least one theme is always available in default-themes")
+/// Return the Monokai Extended theme used throughout this module.
+fn default_theme() -> &'static Theme {
+    &MONOKAI_EXTENDED
 }
 
 /// Convert a syntect `Color` to a ratatui `Color`.
