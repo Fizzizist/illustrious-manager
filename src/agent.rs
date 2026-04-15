@@ -26,7 +26,7 @@ pub struct Agent {
     /// Number of messages prepended to `history` that are never persisted to the DB
     /// (context files, skill definitions). Preserved across session switches.
     context_prefix_len: Arc<Mutex<usize>>,
-    config: RequestConfig,
+    config: Mutex<RequestConfig>,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
@@ -52,7 +52,7 @@ impl Agent {
             backend: Arc::from(backend),
             history: Arc::new(Mutex::new(history)),
             context_prefix_len: Arc::new(Mutex::new(0)),
-            config,
+            config: Mutex::new(config),
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
@@ -108,6 +108,18 @@ impl Agent {
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
+    }
+
+    pub fn model(&self) -> String {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone()
+    }
+
+    pub fn set_model(&self, model: String) {
+        self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
     pub fn history(&self) -> Vec<Message> {
@@ -185,7 +197,11 @@ impl Agent {
         let history_arc = Arc::clone(&self.history);
         let backend = Arc::clone(&self.backend);
         let tools = Arc::clone(&self.tools);
-        let config = self.config.clone();
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);

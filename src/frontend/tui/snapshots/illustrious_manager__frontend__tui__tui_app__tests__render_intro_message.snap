@@ -3,7 +3,7 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│Welcome:                                                  │"
+"│Info:                                                     │"
 "│  # Illustrious Manager                                   │"
 "│                                                          │"
 "│  - backend: vertex                                       │"
