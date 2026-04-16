@@ -4,6 +4,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::path::PathBuf;
 
+const STATUS_BG: Color = Color::Rgb(30, 30, 30);
+
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -65,22 +67,22 @@ pub fn build_status_line(info: &StatusLineInfo, width: u16) -> Line<'static> {
     let left_spans = vec![
         Span::styled(
             format!(" {usage_str} "),
-            Style::default().fg(Color::White).bg(Color::DarkGray),
+            Style::default().fg(Color::White).bg(STATUS_BG),
         ),
         Span::styled(
             format!("  {branch_str} "),
-            Style::default().fg(Color::Cyan).bg(Color::DarkGray),
+            Style::default().fg(Color::Cyan).bg(STATUS_BG),
         ),
     ];
 
     let right_spans = vec![
         Span::styled(
             format!(" {} ", info.model),
-            Style::default().fg(Color::Yellow).bg(Color::DarkGray),
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
         ),
         Span::styled(
             format!(" {dir_str} "),
-            Style::default().fg(Color::Magenta).bg(Color::DarkGray),
+            Style::default().fg(Color::Magenta).bg(STATUS_BG),
         ),
     ];
 
@@ -92,7 +94,7 @@ pub fn build_status_line(info: &StatusLineInfo, width: u16) -> Line<'static> {
     let mut spans = left_spans;
     spans.push(Span::styled(
         " ".repeat(gap),
-        Style::default().bg(Color::DarkGray),
+        Style::default().bg(STATUS_BG),
     ));
     spans.extend(right_spans);
 
@@ -260,7 +262,7 @@ mod tests {
         for span in &line.spans {
             assert_eq!(
                 span.style.bg,
-                Some(Color::DarkGray),
+                Some(STATUS_BG),
                 "all spans should have DarkGray background, span content: {:?}",
                 span.content
             );
