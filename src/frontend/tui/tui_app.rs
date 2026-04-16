@@ -51,6 +51,10 @@ pub struct App {
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
     pub usage: TokenUsage,
+    /// The input_tokens value reported by the last Usage event. The API always
+    /// reports the full context size, so we subtract the previous value to
+    /// count only the newly added (non-cached) input tokens per turn.
+    pub last_input_total: u32,
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
@@ -85,6 +89,7 @@ impl App {
             text_width: 0,
             session_picker: None,
             usage: TokenUsage::default(),
+            last_input_total: 0,
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
@@ -371,7 +376,9 @@ pub fn handle_agent_event(
             output_tokens,
             ..
         } => {
-            app.usage.add(input_tokens, output_tokens);
+            let new_input = input_tokens.saturating_sub(app.last_input_total);
+            app.last_input_total = input_tokens;
+            app.usage.add(new_input, output_tokens);
         }
     }
     Ok(())
@@ -849,6 +856,7 @@ mod tests {
         assert_eq!(app.usage.input_tokens, 0);
         assert_eq!(app.usage.output_tokens, 0);
 
+        // First turn: 100 input tokens reported (all new), 50 output
         let event = AgentEvent::Usage {
             input_tokens: 100,
             output_tokens: 50,
@@ -858,16 +866,73 @@ mod tests {
 
         assert_eq!(app.usage.input_tokens, 100);
         assert_eq!(app.usage.output_tokens, 50);
+        assert_eq!(app.last_input_total, 100);
 
+        // Second turn: API reports 300 total input tokens (prior 100 cached + 200 new), 75 output.
+        // We should only count the 200 new tokens, not the full 300.
         let event2 = AgentEvent::Usage {
-            input_tokens: 200,
+            input_tokens: 300,
             output_tokens: 75,
             stop_reason: "end_turn".to_string(),
         };
         handle_agent_event(&mut app, event2, None).expect("handle second usage event");
 
-        assert_eq!(app.usage.input_tokens, 300);
+        assert_eq!(
+            app.usage.input_tokens, 300,
+            "100 first turn + 200 new = 300"
+        );
         assert_eq!(app.usage.output_tokens, 125);
+        assert_eq!(app.last_input_total, 300);
+    }
+
+    #[test]
+    fn usage_event_does_not_double_count_cached_input_tokens() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        // Simulate 3 turns where the context grows by different amounts each time.
+        // Turn 1: 500 total input (all new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 500,
+                output_tokens: 100,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 1");
+
+        // Turn 2: 700 total input (500 cached + 200 new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 700,
+                output_tokens: 150,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 2");
+
+        // Turn 3: 850 total input (700 cached + 150 new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 850,
+                output_tokens: 80,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 3");
+
+        // Unique input tokens: 500 + 200 + 150 = 850
+        assert_eq!(
+            app.usage.input_tokens, 850,
+            "should count only unique input tokens across turns"
+        );
+        assert_eq!(app.usage.output_tokens, 330);
+        assert_eq!(app.last_input_total, 850);
     }
 
     #[test]
