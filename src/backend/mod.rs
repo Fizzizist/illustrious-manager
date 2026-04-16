@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod retry;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
@@ -31,7 +32,7 @@ pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
             )
             .await?;
             Ok(BackendSelection {
-                backend: Box::new(backend),
+                backend: Box::new(retry::RetryBackend::new(backend)),
                 model: config.vertex.model.clone(),
             })
         }
@@ -43,7 +44,7 @@ pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
             })?;
             let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
             Ok(BackendSelection {
-                backend: Box::new(backend),
+                backend: Box::new(retry::RetryBackend::new(backend)),
                 model: zai_config.model.clone(),
             })
         }

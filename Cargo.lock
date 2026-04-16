@@ -1644,6 +1644,7 @@ dependencies = [
  "syntect-assets",
  "tempfile",
  "tokio",
+ "tokio-retry2",
  "toml",
  "tui-markdown",
  "turso",
@@ -3833,6 +3834,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tokio-retry2"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0266d56e57e6b29becbfce5daa6add8730941ca8192ddd7c24d25bf90c32a743"
+dependencies = [
+ "pin-project",
+ "rand 0.9.2",
+ "tokio",
 ]
 
 [[package]]
