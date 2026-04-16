@@ -264,16 +264,6 @@ impl Default for App {
     }
 }
 
-/// Build a `StatusLineInfo` from the current app state.
-fn status_info(app: &App) -> StatusLineInfo {
-    StatusLineInfo {
-        model: app.model.clone(),
-        git_branch: app.git_branch.clone(),
-        working_dir: app.working_dir.clone(),
-        usage: app.usage.clone(),
-    }
-}
-
 /// Render the app to a frame. Includes scroll and cursor positioning.
 pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     let input_height = app
@@ -301,7 +291,12 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     app.input.render(frame, chunks[1]);
 
-    let info = status_info(app);
+    let info = StatusLineInfo {
+        model: &app.model,
+        git_branch: app.git_branch.as_deref(),
+        working_dir: &app.working_dir,
+        usage: &app.usage,
+    };
     status_line::render_status_line(&info, frame, chunks[2]);
 
     if let Some(ref mut picker) = app.session_picker {
