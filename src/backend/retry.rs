@@ -1,15 +1,21 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
+use tokio::sync::mpsc;
 use tokio_retry2::RetryError;
-use tokio_retry2::strategy::{ExponentialBackoff, jitter};
+use tokio_retry2::strategy::{ExponentialFactorBackoff, jitter};
 
 use super::LlmBackend;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 /// Initial backoff delay for 429 retries.
 const INITIAL_DELAY_MS: u64 = 1_000;
+/// Exponential growth factor applied to the delay on each retry.
+const BACKOFF_FACTOR: f64 = 2.0;
 /// Maximum backoff delay cap.
 const MAX_DELAY_MS: u64 = 60_000;
 /// Maximum number of retry attempts after the initial try.
@@ -23,6 +29,7 @@ pub(crate) fn is_rate_limit_error(err: &anyhow::Error) -> bool {
 }
 
 /// Wraps `inner` and retries `send_message` with exponential backoff on 429 errors.
+/// Emits `StreamEvent::RateLimitRetry` events before each retry so frontends can surface them.
 pub struct RetryBackend<B: LlmBackend> {
     pub inner: B,
 }
@@ -40,26 +47,53 @@ impl<B: LlmBackend + 'static> LlmBackend for RetryBackend<B> {
         messages: &[Message],
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
-        let strategy = ExponentialBackoff::from_millis(INITIAL_DELAY_MS)
+        let strategy = ExponentialFactorBackoff::from_millis(INITIAL_DELAY_MS, BACKOFF_FACTOR)
             .max_delay(Duration::from_millis(MAX_DELAY_MS))
             .map(jitter)
             .take(MAX_RETRIES);
 
-        tokio_retry2::Retry::spawn(strategy, || async {
-            self.inner.send_message(messages, config).await.map_err(
-                |e| -> RetryError<anyhow::Error> {
-                    if is_rate_limit_error(&e) {
-                        RetryError::Transient {
-                            err: e,
-                            retry_after: None,
+        let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<StreamEvent>();
+        let attempt_counter = Arc::new(AtomicU32::new(0));
+
+        let notify_tx_clone = notify_tx.clone();
+        let attempt_counter_clone = attempt_counter.clone();
+        let notifier = move |_err: &anyhow::Error, duration: Duration| {
+            let attempt = attempt_counter_clone.fetch_add(1, Ordering::SeqCst) + 1;
+            let delay_ms = duration.as_millis() as u64;
+            // Ignore send errors — receiver dropped means the stream was cancelled.
+            let _ = notify_tx_clone.send(StreamEvent::RateLimitRetry { attempt, delay_ms });
+        };
+
+        let result = tokio_retry2::Retry::spawn_notify(
+            strategy,
+            || async {
+                self.inner.send_message(messages, config).await.map_err(
+                    |e| -> RetryError<anyhow::Error> {
+                        if is_rate_limit_error(&e) {
+                            RetryError::Transient {
+                                err: e,
+                                retry_after: None,
+                            }
+                        } else {
+                            RetryError::Permanent(e)
                         }
-                    } else {
-                        RetryError::Permanent(e)
-                    }
-                },
-            )
-        })
-        .await
+                    },
+                )
+            },
+            notifier,
+        )
+        .await?;
+
+        // Drain any retry notifications that were buffered and prepend them to the response stream.
+        drop(notify_tx);
+        notify_rx.close();
+        let mut prefix_events: Vec<Result<StreamEvent>> = Vec::new();
+        while let Some(event) = notify_rx.recv().await {
+            prefix_events.push(Ok(event));
+        }
+
+        let combined = futures::stream::iter(prefix_events).chain(result);
+        Ok(Box::pin(combined))
     }
 }
 
@@ -143,12 +177,29 @@ mod tests {
             .await
             .expect("should succeed after retry");
 
-        let event = stream
+        // First event should be the retry notification.
+        let first = stream
             .next()
             .await
             .expect("stream must have first event")
             .expect("first event must be Ok");
-        assert!(matches!(event, StreamEvent::TextDelta(_)));
+        assert!(
+            matches!(first, StreamEvent::RateLimitRetry { attempt: 1, .. }),
+            "expected RateLimitRetry(attempt=1), got {:?}",
+            first
+        );
+
+        // Second event is the actual response.
+        let second = stream
+            .next()
+            .await
+            .expect("stream must have second event")
+            .expect("second event must be Ok");
+        assert!(
+            matches!(second, StreamEvent::TextDelta(_)),
+            "expected TextDelta, got {:?}",
+            second
+        );
     }
 
     #[tokio::test]
@@ -173,12 +224,17 @@ mod tests {
             .await
             .expect("should succeed on first try");
 
+        // No retry notification prefix — first event is the actual response.
         let event = stream
             .next()
             .await
             .expect("stream must have first event")
             .expect("first event must be Ok");
-        assert!(matches!(event, StreamEvent::TextDelta(_)));
+        assert!(
+            matches!(event, StreamEvent::TextDelta(_)),
+            "expected TextDelta with no retry prefix, got {:?}",
+            event
+        );
     }
 
     #[tokio::test]
@@ -191,5 +247,44 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.err().expect("must be an error").to_string();
         assert!(err_msg.contains("429"));
+    }
+
+    #[tokio::test]
+    async fn emits_retry_notification_before_each_retry() {
+        // Backend fails twice with 429, then succeeds. Should emit 2 RateLimitRetry events.
+        let inner = FailNTimes::new(2, "Vertex AI returned 429: rate limit");
+        let backend = RetryBackend::new(inner);
+
+        let mut stream = backend
+            .send_message(&[], &config())
+            .await
+            .expect("should succeed after two retries");
+
+        let events: Vec<StreamEvent> = stream
+            .map(|r| r.expect("stream item must be Ok"))
+            .collect()
+            .await;
+
+        let retry_events: Vec<&StreamEvent> = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::RateLimitRetry { .. }))
+            .collect();
+
+        assert_eq!(retry_events.len(), 2, "expected 2 retry notifications");
+
+        assert!(
+            matches!(
+                retry_events[0],
+                StreamEvent::RateLimitRetry { attempt: 1, .. }
+            ),
+            "first retry should be attempt 1"
+        );
+        assert!(
+            matches!(
+                retry_events[1],
+                StreamEvent::RateLimitRetry { attempt: 2, .. }
+            ),
+            "second retry should be attempt 2"
+        );
     }
 }

@@ -387,6 +387,11 @@ pub fn handle_agent_event(
             app.last_input_total = input_tokens;
             app.usage.add(new_input, output_tokens);
         }
+        AgentEvent::Info(msg) => {
+            app.conversation
+                .push(ConversationEntry::new(ConversationRole::Info, msg));
+            app.scroll_offset = 0;
+        }
     }
     Ok(())
 }

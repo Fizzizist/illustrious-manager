@@ -220,6 +220,11 @@ pub enum StreamEvent {
         stop_reason: String,
     },
     Done,
+    /// Emitted by RetryBackend before each retry attempt after a 429 response.
+    RateLimitRetry {
+        attempt: u32,
+        delay_ms: u64,
+    },
 }
 
 /// Events emitted by the Agent to frontends
@@ -243,6 +248,7 @@ pub enum AgentEvent {
     },
     ResponseComplete(String),
     Error(String),
+    Info(String),
     Usage {
         input_tokens: u32,
         output_tokens: u32,

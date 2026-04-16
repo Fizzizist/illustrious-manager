@@ -269,6 +269,12 @@ impl Agent {
                             });
                         }
                         Ok(StreamEvent::Done) => break,
+                        Ok(StreamEvent::RateLimitRetry { attempt, delay_ms }) => {
+                            let msg = format!(
+                                "Rate limit hit. Retrying (attempt {attempt}, waiting {delay_ms}ms)…"
+                            );
+                            let _ = event_tx.unbounded_send(AgentEvent::Info(msg));
+                        }
                         Err(e) => {
                             if !text_accumulated.is_empty() {
                                 let partial_msg = Message {
