@@ -21,6 +21,7 @@ use super::conversation_area::{ConversationArea, ConversationEntry, Conversation
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
 use super::session_picker::{SessionPicker, SessionPickerAction};
+use super::status_line::{self, StatusLineInfo, TokenUsage};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
@@ -49,6 +50,14 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
+    pub usage: TokenUsage,
+    /// The input_tokens value reported by the last Usage event. The API always
+    /// reports the full context size, so we subtract the previous value to
+    /// count only the newly added (non-cached) input tokens per turn.
+    pub last_input_total: u32,
+    pub model: String,
+    pub git_branch: Option<String>,
+    pub working_dir: std::path::PathBuf,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -79,11 +88,28 @@ impl App {
             viewport_height: 0,
             text_width: 0,
             session_picker: None,
+            usage: TokenUsage::default(),
+            last_input_total: 0,
+            model: String::new(),
+            git_branch: None,
+            working_dir: std::path::PathBuf::new(),
             tools,
         }
     }
 
     pub fn load_history(&mut self, messages: &[crate::types::Message]) {
+        if !messages.is_empty() {
+            let (input_tokens, output_tokens) = status_line::estimate_usage_from_messages(messages);
+            self.usage = TokenUsage {
+                input_tokens: input_tokens as u64,
+                output_tokens: output_tokens as u64,
+                is_estimated: true,
+            };
+            // Seed last_input_total so the next real Usage event subtracts
+            // correctly against the estimated context size.
+            self.last_input_total = input_tokens;
+        }
+
         for message in messages {
             let role = match message.role {
                 crate::types::Role::User => ConversationRole::User,
@@ -246,7 +272,11 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(input_height)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
     let text_width = chunks[0].width.saturating_sub(2);
@@ -260,6 +290,14 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     conv_area.render(frame, chunks[0], text_width);
 
     app.input.render(frame, chunks[1]);
+
+    let info = StatusLineInfo {
+        model: &app.model,
+        git_branch: app.git_branch.as_deref(),
+        working_dir: &app.working_dir,
+        usage: &app.usage,
+    };
+    status_line::render_status_line(&info, frame, chunks[2]);
 
     if let Some(ref mut picker) = app.session_picker {
         picker.render(frame, frame.area());
@@ -340,7 +378,15 @@ pub fn handle_agent_event(
             }
             app.set_state(AppState::ToolConfirmation { name, input });
         }
-        AgentEvent::Usage { .. } => {}
+        AgentEvent::Usage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            let new_input = input_tokens.saturating_sub(app.last_input_total);
+            app.last_input_total = input_tokens;
+            app.usage.add(new_input, output_tokens);
+        }
     }
     Ok(())
 }
@@ -379,6 +425,9 @@ async fn run_app(
     config: &AppConfig,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
+    app.model = agent.model();
+    app.git_branch = status_line::detect_git_branch();
+    app.working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
@@ -447,6 +496,7 @@ async fn run_app(
                                             ));
                                         } else {
                                             agent.set_model(model.clone());
+                                            app.model = model.clone();
                                             app.conversation.push(ConversationEntry::new(
                                                 ConversationRole::Info,
                                                 format!("Model switched to `{model}`"),
@@ -503,6 +553,8 @@ async fn run_app(
                                                         app.conversation.clear();
                                                         app.current_response.clear();
                                                         app.scroll_offset = 0;
+                                                        app.usage = TokenUsage::default();
+                                                        app.last_input_total = 0;
                                                         app.load_history(&history);
                                                         agent.load_session(session).await;
                                                     }
@@ -808,6 +860,126 @@ mod tests {
     }
 
     #[test]
+    fn usage_event_accumulates_token_counts() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+
+        // First turn: 100 input tokens reported (all new), 50 output
+        let event = AgentEvent::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle usage event");
+
+        assert_eq!(app.usage.input_tokens, 100);
+        assert_eq!(app.usage.output_tokens, 50);
+        assert_eq!(app.last_input_total, 100);
+
+        // Second turn: API reports 300 total input tokens (prior 100 cached + 200 new), 75 output.
+        // We should only count the 200 new tokens, not the full 300.
+        let event2 = AgentEvent::Usage {
+            input_tokens: 300,
+            output_tokens: 75,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event2, None).expect("handle second usage event");
+
+        assert_eq!(
+            app.usage.input_tokens, 300,
+            "100 first turn + 200 new = 300"
+        );
+        assert_eq!(app.usage.output_tokens, 125);
+        assert_eq!(app.last_input_total, 300);
+    }
+
+    #[test]
+    fn usage_event_does_not_double_count_cached_input_tokens() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        // Simulate 3 turns where the context grows by different amounts each time.
+        // Turn 1: 500 total input (all new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 500,
+                output_tokens: 100,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 1");
+
+        // Turn 2: 700 total input (500 cached + 200 new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 700,
+                output_tokens: 150,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 2");
+
+        // Turn 3: 850 total input (700 cached + 150 new)
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Usage {
+                input_tokens: 850,
+                output_tokens: 80,
+                stop_reason: "end_turn".to_string(),
+            },
+            None,
+        )
+        .expect("turn 3");
+
+        // Unique input tokens: 500 + 200 + 150 = 850
+        assert_eq!(
+            app.usage.input_tokens, 850,
+            "should count only unique input tokens across turns"
+        );
+        assert_eq!(app.usage.output_tokens, 330);
+        assert_eq!(app.last_input_total, 850);
+    }
+
+    #[test]
+    fn render_app_includes_status_line() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.model = "test-model".to_string();
+        app.usage.add(1000, 500);
+        app.git_branch = Some("main".to_string());
+        app.working_dir = std::path::PathBuf::from("/test/project");
+
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains("test-model"),
+            "status line should show model name"
+        );
+        assert!(
+            rendered.contains("main"),
+            "status line should show git branch"
+        );
+        assert!(
+            rendered.contains("↑1.0k"),
+            "status line should show input tokens"
+        );
+        assert!(
+            rendered.contains("↓500"),
+            "status line should show output tokens"
+        );
+    }
+
+    #[test]
     fn tool_use_received_preserves_accumulated_text_as_assistant_entry() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.current_response = "Let me look into that.".to_string();
@@ -976,6 +1148,59 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+        assert!(!app.usage.is_estimated);
+    }
+
+    #[test]
+    fn load_history_seeds_estimated_usage() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let messages = vec![
+            Message::text(Role::User, "a".repeat(400)),
+            Message::text(Role::Assistant, "b".repeat(200)),
+        ];
+        app.load_history(&messages);
+
+        assert!(
+            app.usage.is_estimated,
+            "usage should be flagged as estimated"
+        );
+        assert!(
+            app.usage.input_tokens > 0,
+            "input tokens should be non-zero"
+        );
+        assert!(
+            app.usage.output_tokens > 0,
+            "output tokens should be non-zero"
+        );
+        assert_eq!(
+            app.last_input_total, app.usage.input_tokens as u32,
+            "last_input_total should match estimated input tokens"
+        );
+    }
+
+    #[test]
+    fn real_usage_event_after_load_history_clears_estimated_flag() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.load_history(&[Message::text(Role::User, "hello world".to_string())]);
+        assert!(app.usage.is_estimated);
+
+        let event = AgentEvent::Usage {
+            input_tokens: app.last_input_total + 20,
+            output_tokens: 30,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        assert!(
+            !app.usage.is_estimated,
+            "real Usage event should clear estimated flag"
+        );
     }
 
     #[test]

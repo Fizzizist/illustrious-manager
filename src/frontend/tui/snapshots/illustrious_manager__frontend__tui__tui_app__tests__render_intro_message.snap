@@ -3,7 +3,6 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│Info:                                                     │"
 "│  # Illustrious Manager                                   │"
 "│                                                          │"
 "│  - backend: vertex                                       │"
@@ -22,3 +21,4 @@ expression: terminal.backend()
 "┌ -- INSERT -- ────────────────────────────────────────────┐"
 "│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
+" ↑0 ↓0   no git                                             "
