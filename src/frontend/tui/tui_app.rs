@@ -98,6 +98,18 @@ impl App {
     }
 
     pub fn load_history(&mut self, messages: &[crate::types::Message]) {
+        if !messages.is_empty() {
+            let (input_tokens, output_tokens) = status_line::estimate_usage_from_messages(messages);
+            self.usage = TokenUsage {
+                input_tokens: input_tokens as u64,
+                output_tokens: output_tokens as u64,
+                is_estimated: true,
+            };
+            // Seed last_input_total so the next real Usage event subtracts
+            // correctly against the estimated context size.
+            self.last_input_total = input_tokens;
+        }
+
         for message in messages {
             let role = match message.role {
                 crate::types::Role::User => ConversationRole::User,
@@ -546,6 +558,8 @@ async fn run_app(
                                                         app.conversation.clear();
                                                         app.current_response.clear();
                                                         app.scroll_offset = 0;
+                                                        app.usage = TokenUsage::default();
+                                                        app.last_input_total = 0;
                                                         app.load_history(&history);
                                                         agent.load_session(session).await;
                                                     }
@@ -1139,6 +1153,59 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.load_history(&[]);
         assert!(app.conversation.is_empty());
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+        assert!(!app.usage.is_estimated);
+    }
+
+    #[test]
+    fn load_history_seeds_estimated_usage() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let messages = vec![
+            Message::text(Role::User, "a".repeat(400)),
+            Message::text(Role::Assistant, "b".repeat(200)),
+        ];
+        app.load_history(&messages);
+
+        assert!(
+            app.usage.is_estimated,
+            "usage should be flagged as estimated"
+        );
+        assert!(
+            app.usage.input_tokens > 0,
+            "input tokens should be non-zero"
+        );
+        assert!(
+            app.usage.output_tokens > 0,
+            "output tokens should be non-zero"
+        );
+        assert_eq!(
+            app.last_input_total, app.usage.input_tokens as u32,
+            "last_input_total should match estimated input tokens"
+        );
+    }
+
+    #[test]
+    fn real_usage_event_after_load_history_clears_estimated_flag() {
+        use crate::types::{Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.load_history(&[Message::text(Role::User, "hello world".to_string())]);
+        assert!(app.usage.is_estimated);
+
+        let event = AgentEvent::Usage {
+            input_tokens: app.last_input_total + 20,
+            output_tokens: 30,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        assert!(
+            !app.usage.is_estimated,
+            "real Usage event should clear estimated flag"
+        );
     }
 
     #[test]
