@@ -155,13 +155,7 @@ async fn main() -> Result<()> {
             }
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
-            frontend::stdout::run(
-                stream,
-                confirm_tx,
-                cli.output_format.clone(),
-                logger.as_mut(),
-            )
-            .await?;
+            frontend::stdout::run(stream, confirm_tx, cli.output_format, logger.as_mut()).await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await?;
@@ -229,13 +223,13 @@ mod tests {
     #[test]
     fn debug_flag_is_parsed_when_present() {
         let cli = Cli::try_parse_from(["illustrious-manager", "--debug"]).unwrap();
-        assert_eq!(cli.debug, true);
+        assert!(cli.debug);
     }
 
     #[test]
     fn debug_flag_is_false_when_not_present() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
-        assert_eq!(cli.debug, false);
+        assert!(!cli.debug);
     }
 
     #[test]

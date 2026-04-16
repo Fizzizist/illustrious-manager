@@ -6,7 +6,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use crate::logging::Logger;
 use crate::types::{AgentEvent, BoxStream, ConfirmationResponse};
 
-#[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum OutputFormat {
     Text,
     Json,
@@ -95,13 +95,17 @@ async fn run_text<W: Write, R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
-                handle_confirmation(writer, confirm_tx.clone(), is_tty, stdin, &name, &input)?;
+                handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
         }
     }
     Ok(())
 }
 
+// In JSON mode the `result` field contains only the final assistant turn — the
+// text emitted after the last tool result. Intermediate "thinking" tokens that
+// appear before a tool call are discarded so that scripts receive a clean,
+// singular output rather than concatenated reasoning + final answer.
 async fn run_json<W: Write, R: BufRead>(
     stream: &mut BoxStream<AgentEvent>,
     writer: &mut W,
@@ -112,6 +116,7 @@ async fn run_json<W: Write, R: BufRead>(
 ) -> Result<()> {
     let mut result_text = String::new();
     let mut is_error = false;
+    let mut in_tool_iteration = false;
 
     while let Some(event) = stream.next().await {
         if let Some(log) = logger.as_deref_mut() {
@@ -120,7 +125,18 @@ async fn run_json<W: Write, R: BufRead>(
         }
         match event {
             AgentEvent::TokenReceived(text) => {
-                result_text.push_str(&text);
+                if !in_tool_iteration {
+                    result_text.push_str(&text);
+                }
+            }
+            AgentEvent::ToolUseReceived { .. } => {
+                // Entering a tool call — discard any pre-tool text and restart
+                // accumulation after the tool completes.
+                result_text.clear();
+                in_tool_iteration = true;
+            }
+            AgentEvent::ToolResult { .. } => {
+                in_tool_iteration = false;
             }
             AgentEvent::ResponseComplete(_) => {
                 break;
@@ -130,11 +146,15 @@ async fn run_json<W: Write, R: BufRead>(
                 result_text = msg;
                 break;
             }
-            AgentEvent::ToolUseReceived { .. }
-            | AgentEvent::ToolResult { .. }
-            | AgentEvent::Usage { .. } => {}
+            AgentEvent::Usage { .. } => {}
+            AgentEvent::ToolConfirmationRequired { name, .. } if !is_tty => {
+                let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
+                is_error = true;
+                result_text = format!("tool confirmation required in non-TTY mode (tool: {name})");
+                break;
+            }
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
-                handle_confirmation(writer, confirm_tx.clone(), is_tty, stdin, &name, &input)?;
+                handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
         }
     }
@@ -153,8 +173,7 @@ async fn run_json<W: Write, R: BufRead>(
     Ok(())
 }
 
-fn handle_confirmation<W: Write, R: BufRead>(
-    writer: &mut W,
+fn handle_confirmation<R: BufRead>(
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
     is_tty: bool,
     stdin: &mut R,
@@ -181,7 +200,6 @@ fn handle_confirmation<W: Write, R: BufRead>(
     confirm_tx
         .unbounded_send(decision)
         .map_err(|_| anyhow::anyhow!("agent confirmation channel closed"))?;
-    let _ = writer;
     Ok(())
 }
 
@@ -598,8 +616,60 @@ mod tests {
         );
     }
 
+    // Regression: multi-iteration responses must only include the final assistant
+    // turn in `result`, not intermediate reasoning emitted before a tool call.
     #[tokio::test]
-    async fn json_format_non_tty_confirmation_sends_rejection_and_errors() {
+    async fn json_format_multi_iteration_result_contains_only_final_turn() {
+        let events = vec![
+            // Pre-tool reasoning — must NOT appear in result
+            AgentEvent::TokenReceived("I will use bash.".to_string()),
+            AgentEvent::ToolUseReceived {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            AgentEvent::ToolResult {
+                name: "bash".to_string(),
+                content: "file.txt".to_string(),
+                is_error: false,
+            },
+            // Post-tool final answer — the only text that should appear in result
+            AgentEvent::TokenReceived("The directory contains file.txt.".to_string()),
+            AgentEvent::ResponseComplete("The directory contains file.txt.".to_string()),
+        ];
+        let s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
+        let mut buf = Vec::new();
+        let (tx, _rx) = make_confirm_channel();
+
+        run_with_writer(
+            s,
+            &mut buf,
+            tx,
+            OutputFormat::Json,
+            false,
+            &mut io::empty(),
+            None,
+        )
+        .await
+        .expect("should succeed");
+
+        let output = String::from_utf8(buf).expect("valid UTF-8");
+        let parsed: serde_json::Value = serde_json::from_str(output.trim()).expect("valid JSON");
+        assert_eq!(parsed["is_error"], false);
+        assert_eq!(parsed["result"], "The directory contains file.txt.");
+        assert!(
+            !parsed["result"]
+                .as_str()
+                .expect("result is a string")
+                .contains("I will use bash"),
+            "pre-tool reasoning must not appear in result"
+        );
+    }
+
+    // Regression: non-TTY confirmation in JSON mode must still emit a JSON
+    // envelope so callers can always parse stdout as JSON on any exit.
+    #[tokio::test]
+    async fn json_format_non_tty_confirmation_emits_json_and_errors() {
         let events = vec![AgentEvent::ToolConfirmationRequired {
             id: "t1".to_string(),
             name: "bash".to_string(),
@@ -621,6 +691,19 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "should error in non-TTY mode");
+
+        let output = String::from_utf8(buf).expect("valid UTF-8");
+        let parsed: serde_json::Value =
+            serde_json::from_str(output.trim()).expect("stdout must be valid JSON even on error");
+        assert_eq!(parsed["is_error"], true, "is_error must be true");
+        assert!(
+            parsed["result"]
+                .as_str()
+                .expect("result is a string")
+                .contains("non-TTY"),
+            "result should describe the non-TTY error"
+        );
+
         let response = rx.try_recv().expect("channel should have a value");
         assert_eq!(response, ConfirmationResponse::Rejected);
     }
