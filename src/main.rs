@@ -46,6 +46,9 @@ struct Cli {
     #[arg(long)]
     single_shot: bool,
 
+    #[arg(long, default_value = "text")]
+    output_format: frontend::stdout::OutputFormat,
+
     #[arg(long)]
     config: Option<PathBuf>,
 
@@ -71,6 +74,9 @@ fn determine_mode(cli: &Cli) -> Result<Mode> {
         })?;
         Ok(Mode::SingleShot { prompt })
     } else {
+        if cli.output_format != frontend::stdout::OutputFormat::Text {
+            anyhow::bail!("--output-format requires --single-shot");
+        }
         Ok(Mode::Repl {
             initial_prompt: cli.prompt.clone(),
         })
@@ -149,7 +155,7 @@ async fn main() -> Result<()> {
             }
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let stream = agent.send(prompt, Some(confirm_rx)).await?;
-            frontend::stdout::run(stream, confirm_tx, logger.as_mut()).await?;
+            frontend::stdout::run(stream, confirm_tx, cli.output_format, logger.as_mut()).await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await?;
@@ -217,13 +223,13 @@ mod tests {
     #[test]
     fn debug_flag_is_parsed_when_present() {
         let cli = Cli::try_parse_from(["illustrious-manager", "--debug"]).unwrap();
-        assert_eq!(cli.debug, true);
+        assert!(cli.debug);
     }
 
     #[test]
     fn debug_flag_is_false_when_not_present() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
-        assert_eq!(cli.debug, false);
+        assert!(!cli.debug);
     }
 
     #[test]
@@ -244,5 +250,35 @@ mod tests {
     fn session_id_flag_defaults_to_none() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert!(cli.session_id.is_none());
+    }
+
+    #[test]
+    fn output_format_defaults_to_text() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert_eq!(cli.output_format, frontend::stdout::OutputFormat::Text);
+    }
+
+    #[test]
+    fn output_format_json_is_parsed() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "hello",
+        ])
+        .unwrap();
+        assert_eq!(cli.output_format, frontend::stdout::OutputFormat::Json);
+    }
+
+    #[test]
+    fn output_format_json_without_single_shot_errors() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--output-format", "json", "hello"])
+            .unwrap();
+        let err = determine_mode(&cli).unwrap_err().to_string();
+        assert!(
+            err.contains("--output-format"),
+            "Error should mention --output-format"
+        );
     }
 }
