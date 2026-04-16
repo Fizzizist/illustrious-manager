@@ -159,8 +159,13 @@ impl VertexBackend {
     }
 
     fn endpoint(&self, model: &str) -> String {
+        let host = if self.region == "global" {
+            "aiplatform.googleapis.com".to_string()
+        } else {
+            format!("{}-aiplatform.googleapis.com", self.region)
+        };
         format!(
-            "https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
+            "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
             region = self.region,
             project = self.project,
             model = model,
