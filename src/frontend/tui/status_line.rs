@@ -2,7 +2,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use std::path::PathBuf;
 
 const STATUS_BG: Color = Color::Rgb(30, 30, 30);
 
@@ -23,11 +22,11 @@ impl TokenUsage {
     }
 }
 
-pub struct StatusLineInfo {
-    pub model: String,
-    pub git_branch: Option<String>,
-    pub working_dir: PathBuf,
-    pub usage: TokenUsage,
+pub struct StatusLineInfo<'a> {
+    pub model: &'a str,
+    pub git_branch: Option<&'a str>,
+    pub working_dir: &'a std::path::Path,
+    pub usage: &'a TokenUsage,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -58,8 +57,8 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
         }
     }
 
-    let input_tokens = (input_chars / 4) as u32;
-    let output_tokens = (output_chars / 4) as u32;
+    let input_tokens = input_chars.div_ceil(4) as u32;
+    let output_tokens = output_chars.div_ceil(4) as u32;
     (input_tokens, output_tokens)
 }
 
@@ -92,16 +91,16 @@ fn compact_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
-pub fn render_status_line(info: &StatusLineInfo, frame: &mut ratatui::Frame, area: Rect) {
+pub fn render_status_line(info: &StatusLineInfo<'_>, frame: &mut ratatui::Frame, area: Rect) {
     let line = build_status_line(info, area.width);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, area);
 }
 
-pub fn build_status_line(info: &StatusLineInfo, width: u16) -> Line<'static> {
-    let usage_str = format_token_usage(&info.usage);
-    let branch_str = info.git_branch.as_deref().unwrap_or("no git").to_string();
-    let dir_str = compact_path(&info.working_dir);
+pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static> {
+    let usage_str = format_token_usage(info.usage);
+    let branch_str = info.git_branch.unwrap_or("no git");
+    let dir_str = compact_path(info.working_dir);
 
     let left_spans = vec![
         Span::styled(
@@ -162,13 +161,28 @@ pub fn detect_git_branch() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
-    fn test_info() -> StatusLineInfo {
+    fn test_info() -> (String, Option<String>, PathBuf, TokenUsage) {
+        (
+            "claude-sonnet-4-20250514".to_string(),
+            Some("main".to_string()),
+            PathBuf::from("/home/user/project"),
+            TokenUsage::default(),
+        )
+    }
+
+    fn make_info<'a>(
+        model: &'a str,
+        git_branch: Option<&'a str>,
+        working_dir: &'a std::path::Path,
+        usage: &'a TokenUsage,
+    ) -> StatusLineInfo<'a> {
         StatusLineInfo {
-            model: "claude-sonnet-4-20250514".to_string(),
-            git_branch: Some("main".to_string()),
-            working_dir: PathBuf::from("/home/user/project"),
-            usage: TokenUsage::default(),
+            model,
+            git_branch,
+            working_dir,
+            usage,
         }
     }
 
@@ -244,7 +258,8 @@ mod tests {
 
     #[test]
     fn build_status_line_contains_all_sections() {
-        let info = test_info();
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("main"), "should contain git branch");
@@ -262,8 +277,8 @@ mod tests {
 
     #[test]
     fn build_status_line_no_git_branch() {
-        let mut info = test_info();
-        info.git_branch = None;
+        let (model, _, dir, usage) = test_info();
+        let info = make_info(&model, None, &dir, &usage);
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("no git"), "should show 'no git' fallback");
@@ -271,8 +286,9 @@ mod tests {
 
     #[test]
     fn build_status_line_with_token_usage() {
-        let mut info = test_info();
-        info.usage.add(5000, 1000);
+        let (model, branch, dir, mut usage) = test_info();
+        usage.add(5000, 1000);
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
         assert!(text.contains("↑5.0k"), "should contain input token count");
@@ -281,7 +297,8 @@ mod tests {
 
     #[test]
     fn build_status_line_sections_have_distinct_colors() {
-        let info = test_info();
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
         let line = build_status_line(&info, 120);
         let colors: Vec<Option<Color>> = line
             .spans
@@ -298,7 +315,8 @@ mod tests {
 
     #[test]
     fn build_status_line_all_spans_have_dark_gray_background() {
-        let info = test_info();
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
         let line = build_status_line(&info, 120);
         for span in &line.spans {
             assert_eq!(
@@ -312,16 +330,15 @@ mod tests {
 
     #[test]
     fn render_status_line_snapshot() {
-        let info = StatusLineInfo {
-            model: "claude-sonnet-4-20250514".to_string(),
-            git_branch: Some("main".to_string()),
-            working_dir: PathBuf::from("/home/user/project"),
-            usage: TokenUsage {
-                input_tokens: 12500,
-                output_tokens: 3200,
-                ..Default::default()
-            },
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage {
+            input_tokens: 12500,
+            output_tokens: 3200,
+            ..Default::default()
         };
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
 
         let backend = ratatui::backend::TestBackend::new(80, 1);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -337,12 +354,11 @@ mod tests {
 
     #[test]
     fn render_status_line_narrow_terminal() {
-        let info = StatusLineInfo {
-            model: "claude-sonnet-4-20250514".to_string(),
-            git_branch: Some("feature/long-branch-name".to_string()),
-            working_dir: PathBuf::from("/home/user/project"),
-            usage: TokenUsage::default(),
-        };
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("feature/long-branch-name".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage::default();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
 
         let backend = ratatui::backend::TestBackend::new(40, 1);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
