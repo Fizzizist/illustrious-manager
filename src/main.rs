@@ -53,6 +53,8 @@ struct Cli {
     #[arg(long)]
     json_schema: Option<String>,
 
+    /// Maximum number of reprompt attempts when schema validation fails.
+    /// 0 means validate once and fail immediately with no reprompts.
     #[arg(long, default_value_t = DEFAULT_MAX_SCHEMA_RETRIES)]
     max_schema_retries: u32,
 
