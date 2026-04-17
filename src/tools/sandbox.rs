@@ -282,7 +282,11 @@ mod tests {
 
         assert!(result.is_ok(), "Relative path should be resolved correctly");
         let canonical = result.unwrap();
-        assert!(canonical.starts_with(temp_dir.path()));
+        let canonical_temp = temp_dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize temp dir");
+        assert!(canonical.starts_with(&canonical_temp));
         assert!(canonical.ends_with("subdir/test.txt"));
     }
 
@@ -321,9 +325,14 @@ mod tests {
             result.is_ok(),
             "Non-existent path inside sandbox should be allowed for writing"
         );
+        let canonical_temp = temp_dir
+            .path()
+            .canonicalize()
+            .expect("canonicalize temp dir");
+        let expected = canonical_temp.join("new_file.txt");
         assert_eq!(
             result.expect("validate_write_path should succeed for path inside sandbox"),
-            new_file
+            expected
         );
     }
 

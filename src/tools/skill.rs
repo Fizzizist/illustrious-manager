@@ -224,6 +224,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn discover_skills_skips_dirs_with_non_utf8_names() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
