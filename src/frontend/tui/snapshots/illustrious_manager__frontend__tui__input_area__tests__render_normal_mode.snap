@@ -2,8 +2,8 @@
 source: src/frontend/tui/input_area.rs
 expression: terminal.backend()
 ---
-"┌ -- INSERT -- ────────────────────────┐"
-"│h                                     │"
+"┌ -- NORMAL -- ────────────────────────┐"
+"│hi                                    │"
 "└──────────────────────────────────────┘"
 "                                        "
 "                                        "

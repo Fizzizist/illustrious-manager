@@ -1,10 +1,11 @@
 use dirs;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum ConfirmationMode {
     Always,
@@ -45,7 +46,7 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
     pub confirmation: ConfirmationMode,
@@ -131,7 +132,7 @@ model = "glm-5.1"
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 "#;
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -146,7 +147,7 @@ pub struct AppConfig {
     pub tools: ToolsConfig,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct VertexConfig {
     pub project: String,
     #[serde(default = "default_region")]
@@ -155,14 +156,15 @@ pub struct VertexConfig {
     pub model: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ZaiConfig {
+    #[serde(skip_serializing)]
     pub api_key: String,
     #[serde(default = "default_zai_model")]
     pub model: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct OllamaConfig {
     pub api_key: String,
     #[serde(default = "default_ollama_model")]
@@ -263,6 +265,52 @@ pub fn apply_overrides(
             }
         }
         _ => {}
+    }
+}
+
+/// Generate a markdown intro message displaying the currently loaded configuration.
+///
+/// Serializes the config to TOML to ensure all fields are captured automatically,
+/// then formats each key-value pair as a markdown list item.
+pub fn generate_intro_message(config: &AppConfig) -> String {
+    let toml_value = toml::Value::try_from(config).unwrap_or(toml::Value::String(
+        "(error serializing config)".to_string(),
+    ));
+
+    let mut msg = String::from("# Illustrious Manager\n\n");
+    append_toml_as_list(&mut msg, &toml_value, "");
+    msg
+}
+
+fn append_toml_as_list(out: &mut String, value: &toml::Value, prefix: &str) {
+    if let toml::Value::Table(table) = value {
+        for (key, val) in table {
+            let full_key = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            match val {
+                toml::Value::Table(_) => append_toml_as_list(out, val, &full_key),
+                toml::Value::Array(arr) => {
+                    let items: Vec<String> = arr.iter().map(toml_value_display).collect();
+                    let _ = writeln!(out, "- **{full_key}:** {}", items.join(", "));
+                }
+                _ => {
+                    let _ = writeln!(out, "- **{full_key}:** {}", toml_value_display(val));
+                }
+            }
+        }
+    }
+}
+
+fn toml_value_display(val: &toml::Value) -> String {
+    match val {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -576,5 +624,117 @@ mod tests {
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn generate_intro_message_contains_vertex_backend_settings() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-gcp-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("vertex"), "should mention backend name");
+        assert!(msg.contains("my-gcp-project"), "should mention project");
+        assert!(msg.contains("us-east5"), "should mention region");
+        assert!(
+            msg.contains("claude-sonnet-4-20250514"),
+            "should mention model"
+        );
+    }
+
+    #[test]
+    fn generate_intro_message_contains_zai_backend_settings() {
+        let config = AppConfig {
+            backend: "zai".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: Some(ZaiConfig {
+                api_key: "secret-key".to_string(),
+                model: "glm-5.1".to_string(),
+            }),
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("zai"), "should mention backend name");
+        assert!(msg.contains("glm-5.1"), "should mention zai model");
+        assert!(!msg.contains("secret-key"), "should not leak API key");
+    }
+
+    #[test]
+    fn generate_intro_message_contains_tool_config() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig {
+                confirmation: ConfirmationMode::Always,
+                sandbox_root: "/tmp/sandbox".to_string(),
+                max_tool_iterations: 10,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("Always"), "should mention confirmation mode");
+        assert!(msg.contains("/tmp/sandbox"), "should mention sandbox root");
+        assert!(msg.contains("10"), "should mention max tool iterations");
+    }
+
+    #[test]
+    fn generate_intro_message_contains_sessions_dir() {
+        let sessions_dir = std::env::temp_dir().join("my-sessions");
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: sessions_dir.clone(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(
+            msg.contains(&sessions_dir.display().to_string()),
+            "should mention sessions directory"
+        );
+    }
+
+    #[test]
+    fn generate_intro_message_contains_markdown_heading() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.starts_with("# "), "should start with markdown heading");
     }
 }

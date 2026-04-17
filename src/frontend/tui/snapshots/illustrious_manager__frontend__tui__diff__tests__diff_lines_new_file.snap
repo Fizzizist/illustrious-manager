@@ -1,0 +1,10 @@
+---
+source: src/frontend/tui/diff.rs
+expression: rendered
+---
+[
+    "New file: src/main.rs",
+    "1 +fn main() {",
+    "2 +    println!(\"Hello!\");",
+    "3 +}",
+]

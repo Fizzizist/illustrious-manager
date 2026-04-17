@@ -23,7 +23,10 @@ struct PendingToolCall {
 pub struct Agent {
     backend: Arc<dyn LlmBackend>,
     history: Arc<Mutex<Vec<Message>>>,
-    config: RequestConfig,
+    /// Number of messages prepended to `history` that are never persisted to the DB
+    /// (context files, skill definitions). Preserved across session switches.
+    context_prefix_len: Arc<Mutex<usize>>,
+    config: Mutex<RequestConfig>,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
@@ -48,7 +51,8 @@ impl Agent {
         Self {
             backend: Arc::from(backend),
             history: Arc::new(Mutex::new(history)),
-            config,
+            context_prefix_len: Arc::new(Mutex::new(0)),
+            config: Mutex::new(config),
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
@@ -95,11 +99,27 @@ impl Agent {
 
         let msg = Message::text(Role::User, content);
         lock(&self.history).insert(0, msg.clone());
+        *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
         self
     }
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
+    }
+
+    pub fn model(&self) -> String {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .model
+            .clone()
+    }
+
+    pub fn set_model(&self, model: String) {
+        self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
     pub fn history(&self) -> Vec<Message> {
@@ -112,6 +132,34 @@ impl Agent {
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
         self.session.lock().await.load_history().await
+    }
+
+    /// If the current session has no messages, delete its DB file from disk.
+    pub async fn cleanup_empty_session(&self) -> Result<()> {
+        let session = self.session.lock().await;
+        if session.is_empty().await? {
+            session.delete_db()?;
+        }
+        Ok(())
+    }
+
+    /// Replace the current session with a new one and reload the conversation history.
+    /// Non-persisted context messages (context files, skill definitions) are preserved
+    /// at the front of history; only the persisted portion is replaced.
+    pub async fn load_session(&self, session: Session) {
+        let new_history = session.load_history().await.unwrap_or_default();
+        {
+            let prefix_len = *self
+                .context_prefix_len
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut history = lock(&self.history);
+            let take = prefix_len.min(history.len());
+            let prefix: Vec<Message> = history.drain(..take).collect();
+            *history = prefix;
+            history.extend(new_history);
+        }
+        *self.session.lock().await = session;
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -131,6 +179,10 @@ impl Agent {
         let msg = Message::text(Role::User, content);
         // prepend context files and don't persist them to the DB
         lock(&self.history).insert(0, msg.clone());
+        *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) += 1;
     }
 
     pub async fn send(
@@ -138,7 +190,6 @@ impl Agent {
         input: String,
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     ) -> Result<BoxStream<AgentEvent>> {
-        let pre_send_len = lock(&self.history).len();
         let user_msg = Message::text(Role::User, input);
         lock(&self.history).push(user_msg.clone());
 
@@ -146,7 +197,11 @@ impl Agent {
         let history_arc = Arc::clone(&self.history);
         let backend = Arc::clone(&self.backend);
         let tools = Arc::clone(&self.tools);
-        let config = self.config.clone();
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
@@ -159,10 +214,8 @@ impl Agent {
 
             'outer: loop {
                 if iterations >= max_iterations {
-                    lock(&history_arc).truncate(pre_send_len);
-                    let _ = event_tx.unbounded_send(AgentEvent::Error(format!(
-                        "Max tool iterations ({max_iterations}) exceeded"
-                    )));
+                    let error_msg = format!("Max tool iterations ({max_iterations}) exceeded");
+                    record_error(&error_msg, &history_arc, &session, &event_tx).await;
                     break;
                 }
                 iterations += 1;
@@ -171,8 +224,7 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        lock(&history_arc).truncate(pre_send_len);
-                        let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
+                        record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                         break;
                     }
                 };
@@ -218,8 +270,15 @@ impl Agent {
                         }
                         Ok(StreamEvent::Done) => break,
                         Err(e) => {
-                            lock(&history_arc).truncate(pre_send_len);
-                            let _ = event_tx.unbounded_send(AgentEvent::Error(e.to_string()));
+                            if !text_accumulated.is_empty() {
+                                let partial_msg = Message {
+                                    role: Role::Assistant,
+                                    content: vec![ContentBlock::Text(text_accumulated.clone())],
+                                };
+                                lock(&history_arc).push(partial_msg.clone());
+                                let _ = session.lock().await.insert_message(&partial_msg).await;
+                            }
+                            record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
                         }
                     }
@@ -268,6 +327,18 @@ impl Agent {
 
         Ok(Box::pin(event_rx))
     }
+}
+
+async fn record_error(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
+    lock(history).push(error_user_msg.clone());
+    let _ = session.lock().await.insert_message(&error_user_msg).await;
+    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
 async fn execute_tool_calls(
@@ -877,7 +948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_error_on_second_iteration_clears_history() {
+    async fn backend_error_on_second_iteration_preserves_history() {
         let backend = SequencedBackend::new(vec![
             tool_call_response("t1", "bash", r#"{}"#),
             vec![Err(anyhow::anyhow!("backend failure on iteration 2"))],
@@ -900,8 +971,230 @@ mod tests {
             "expected Error event"
         );
         assert!(
-            agent.history().is_empty(),
-            "history must be fully cleared after mid-loop backend error"
+            !agent.history().is_empty(),
+            "history must be preserved after error so agent retains context"
+        );
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "run"))),
+            "user message must be retained in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_user_message_in_history() {
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection refused"))]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "expected Error event"
+        );
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must not be cleared on stream error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
+            "user message must be retained"
+        );
+    }
+
+    struct FailingBackend {
+        error_message: String,
+    }
+
+    #[async_trait]
+    impl LlmBackend for FailingBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(anyhow::anyhow!("{}", self.error_message))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_send_error_preserves_user_message_in_history() {
+        let backend = FailingBackend {
+            error_message: "connection refused".to_string(),
+        };
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("connection refused"))),
+            "expected Error event with connection refused message"
+        );
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must not be cleared on send_message error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))),
+            "user message must be retained"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("connection refused"))
+                )),
+            "error message with [ERROR] prefix must be in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_error_preserves_partial_text_in_history() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("partial response".to_string())),
+            Err(anyhow::anyhow!("max_tokens reached")),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("tell me a story".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "partial response")),
+            "expected partial text tokens before error"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "expected Error event"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("partial response")))),
+            "partial assistant text must be saved in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_message_is_added_to_history_as_user_message() {
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("max_tokens reached"))]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let has_error_in_history = history.iter().any(|m| {
+            m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t == "[ERROR] max_tokens reached"),
+                )
+        });
+        assert!(
+            has_error_in_history,
+            "error message with [ERROR] prefix must be added to history so the agent knows why a stoppage occurred"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_iterations_error_preserves_history() {
+        let responses: Vec<Vec<Result<StreamEvent>>> = (0..30)
+            .map(|_| tool_call_response("tool-1", "bash", r#"{}"#))
+            .collect();
+        let backend = SequencedBackend::new(responses);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            max_tool_iterations: 3,
+            ..Default::default()
+        };
+
+        let agent = Agent::new(Box::new(backend), config, test_session().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        assert!(
+            !history.is_empty(),
+            "history must be preserved after max iterations error"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "run"))),
+            "original user message must be retained"
+        );
+        let tool_use_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            .count();
+        assert_eq!(
+            tool_use_count, 3,
+            "completed tool call iterations must be preserved in history"
+        );
+        let tool_result_count = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            tool_result_count, 3,
+            "completed tool result iterations must be preserved in history"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("Max tool iterations"))
+                )),
+            "error message with [ERROR] prefix must be in history"
         );
     }
 
@@ -1008,5 +1301,171 @@ mod tests {
             agent.history().is_empty(),
             "empty skills map should not add history entry"
         );
+    }
+
+    #[tokio::test]
+    async fn load_session_replaces_persisted_history() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        session_a
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .await
+            .expect("insert");
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        session_b
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .await
+            .expect("insert");
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+
+        assert_eq!(agent.history().len(), 1);
+        assert!(
+            matches!(&agent.history()[0].content[0], crate::types::ContentBlock::Text(t) if t == "session a message")
+        );
+
+        agent.load_session(session_b).await;
+
+        assert_eq!(agent.history().len(), 1);
+        assert!(
+            matches!(&agent.history()[0].content[0], crate::types::ContentBlock::Text(t) if t == "session b message")
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_preserves_context_prefix() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        session_a
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .await
+            .expect("insert");
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        session_b
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .await
+            .expect("insert");
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+
+        let mut skills = std::collections::HashMap::new();
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let skill_path = tmp.path().join("test-skill.md");
+        std::fs::write(&skill_path, "---\ndescription: A test skill\n---\nContent").expect("write");
+        skills.insert("test-skill".to_string(), skill_path);
+
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a)
+            .await
+            .with_skills(&skills);
+
+        // history should be: [skill_prefix, session_a_message]
+        assert_eq!(agent.history().len(), 2);
+
+        agent.load_session(session_b).await;
+
+        // history should be: [skill_prefix, session_b_message] — prefix preserved
+        let history = agent.history();
+        assert_eq!(history.len(), 2, "context prefix should be preserved");
+        assert!(
+            matches!(&history[0].content[0], crate::types::ContentBlock::Text(t) if t.contains("test-skill")),
+            "first entry should still be the skills prefix"
+        );
+        assert!(
+            matches!(&history[1].content[0], crate::types::ContentBlock::Text(t) if t == "session b message"),
+            "second entry should be new session's message"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_updates_session_id() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session_a = Session::new(None, dir_path.clone())
+            .await
+            .expect("session a");
+        let id_a = session_a.id.clone();
+
+        let session_b = Session::new(None, dir_path.clone())
+            .await
+            .expect("session b");
+        let id_b = session_b.id.clone();
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+
+        assert_eq!(agent.session_id().await, id_a);
+        agent.load_session(session_b).await;
+        assert_eq!(agent.session_id().await, id_b);
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_session_deletes_db_when_no_messages() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+        assert!(db_path.exists());
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(!db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_session_preserves_db_when_has_messages() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        session
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(db_path.exists());
     }
 }
