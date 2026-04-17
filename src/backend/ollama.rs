@@ -7,6 +7,8 @@ use super::ndjson::create_ndjson_event_stream;
 use crate::config::OllamaConfig;
 use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent};
 
+const DEFAULT_CLOUD_ENDPOINT: &str = "https://ollama.com/api/chat";
+
 #[derive(Default)]
 pub struct OllamaParser;
 
@@ -32,14 +34,25 @@ impl OllamaParser {
         }
 
         if let Some(tool_calls) = json["message"]["tool_calls"].as_array() {
-            for tool_call in tool_calls {
+            for (idx, tool_call) in tool_calls.iter().enumerate() {
                 let function = &tool_call["function"];
-                let name = function["name"].as_str().unwrap_or("").to_string();
-                let id = tool_call
+                let name = match function["name"].as_str() {
+                    Some(n) if !n.is_empty() => n.to_string(),
+                    _ => {
+                        bail!(
+                            "Malformed tool call at index {}: missing or empty function name",
+                            idx
+                        );
+                    }
+                };
+                let id = match tool_call
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(s) => s.to_string(),
+                    None => format!("tool_{idx}"),
+                };
 
                 let arguments = if function["arguments"].is_object() {
                     serde_json::to_string(&function["arguments"])
@@ -84,8 +97,10 @@ pub struct OllamaBackend {
 
 impl OllamaBackend {
     pub fn new(config: &OllamaConfig) -> Result<Self> {
-        if config.api_key.is_empty() {
-            bail!("API key cannot be empty for ollama backend");
+        if config.base_url == DEFAULT_CLOUD_ENDPOINT && config.api_key.is_empty() {
+            bail!(
+                "API key is required for Ollama Cloud. Set it in your config, or set base_url to your self-hosted endpoint."
+            );
         }
         Ok(Self {
             client: Client::new(),
@@ -574,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn new_rejects_empty_api_key() {
+    fn new_rejects_empty_api_key_for_cloud_endpoint() {
         let result = OllamaBackend::new(&OllamaConfig {
             api_key: "".to_string(),
             model: "gpt-oss:120b".to_string(),
@@ -582,6 +597,16 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
+    }
+
+    #[test]
+    fn new_allows_empty_api_key_for_self_hosted() {
+        let result = OllamaBackend::new(&OllamaConfig {
+            api_key: "".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "http://localhost:11434/api/chat".to_string(),
+        });
+        assert!(result.is_ok(), "should accept empty key for self-hosted");
     }
 
     #[test]
@@ -594,5 +619,60 @@ mod tests {
         assert!(backend.is_ok());
         let b = backend.unwrap();
         assert_eq!(b.endpoint, "https://ollama.com/api/chat");
+    }
+
+    #[test]
+    fn parser_missing_tool_name_bails() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"tool_calls":[{"id":"c1","function":{"arguments":{}}}]}}"#;
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing or empty function name")
+        );
+    }
+
+    #[test]
+    fn parser_empty_tool_name_bails() {
+        let mut parser = OllamaParser::new();
+        let chunk =
+            r#"{"message":{"tool_calls":[{"id":"c1","function":{"name":"","arguments":{}}}]}}"#;
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing or empty function name")
+        );
+    }
+
+    #[test]
+    fn parser_missing_id_generates_fallback() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"tool_calls":[{"function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 3);
+        if let StreamEvent::ToolUseStart { id, name } = &events[0] {
+            assert_eq!(name, "bash");
+            assert_eq!(id, "tool_0", "should generate fallback ID with index");
+        } else {
+            panic!("expected ToolUseStart");
+        }
+    }
+
+    #[test]
+    fn parser_chunk_with_both_text_and_tool_calls() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"content":"Thinking...","tool_calls":[{"id":"c1","function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Thinking..."));
+        assert!(matches!(&events[1], StreamEvent::ToolUseStart { .. }));
+        assert!(matches!(&events[2], StreamEvent::ToolUseDelta(_)));
+        assert!(matches!(&events[3], StreamEvent::ToolUseDone));
     }
 }
