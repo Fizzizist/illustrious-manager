@@ -205,48 +205,19 @@ async fn run_json<W: Write, R: BufRead>(
 ) -> Result<()> {
     let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
     let mut stream = agent.send(initial_prompt, Some(confirm_rx)).await?;
-    let (mut result_text, mut is_error) =
-        collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
+    let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
 
-    let mut structured_output: Option<serde_json::Value> = None;
-
-    if !is_error && let Some(ref validator) = json_schema {
-        let schema_raw = json_schema_raw
-            .as_deref()
-            .expect("schema_raw present when validator present");
-        let mut retries_left = max_schema_retries;
-
-        loop {
-            match validate_json_output(&result_text, validator) {
-                Ok(parsed) => {
-                    structured_output = Some(parsed);
-                    break;
-                }
-                Err(validation_err) => {
-                    if retries_left == 0 {
-                        is_error = true;
-                        result_text = validation_err;
-                        break;
-                    }
-                    retries_left -= 1;
-                    let reprompt = format!(
-                        "Your previous output was invalid: {}. Output ONLY valid JSON conforming to this schema: {}",
-                        validation_err, schema_raw
-                    );
-                    let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
-                    let mut retry_stream = agent.send(reprompt, Some(retry_rx)).await?;
-                    let (new_text, new_error) =
-                        collect_response(&mut retry_stream, retry_tx, is_tty, stdin, logger)
-                            .await?;
-                    result_text = new_text;
-                    is_error = new_error;
-                    if is_error {
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    let (result_text, is_error, structured_output) = apply_schema_retry(
+        initial,
+        json_schema.as_ref(),
+        json_schema_raw.as_deref(),
+        max_schema_retries,
+        &agent,
+        is_tty,
+        stdin,
+        logger,
+    )
+    .await?;
 
     let output = if let Some(ref sv) = structured_output {
         serde_json::json!({
@@ -271,37 +242,34 @@ async fn run_json<W: Write, R: BufRead>(
     Ok(())
 }
 
-// Retry orchestration extracted for unit-testing without a real agent.
-// `responses` is a queue of `(text, is_error)` tuples the fake "LLM" returns,
-// one per send (initial + each retry).
-#[cfg(test)]
-async fn run_schema_retry_with_responses(
-    schema_json: &str,
-    max_retries: u32,
-    responses: Vec<(String, bool)>,
+// Drives the schema-validation + reprompt retry loop.
+//
+// `initial` is the `(text, is_error)` from the first LLM call. On validation
+// failure, calls `agent.send` with a reprompt and collects the next response,
+// repeating up to `max_schema_retries` times.
+//
+// Extracted so that tests can call it directly with a fake agent that returns
+// canned responses, exercising the same production code path.
+#[allow(clippy::too_many_arguments)]
+async fn apply_schema_retry<R: BufRead>(
+    initial: (String, bool),
+    validator: Option<&jsonschema::Validator>,
+    schema_raw: Option<&str>,
+    max_schema_retries: u32,
+    agent: &Agent,
+    is_tty: bool,
+    stdin: &mut R,
+    logger: &mut Option<&mut Logger>,
 ) -> Result<(String, bool, Option<serde_json::Value>)> {
-    use std::cell::RefCell;
-    let schema: serde_json::Value = serde_json::from_str(schema_json)?;
-    let validator = jsonschema::validator_for(&schema)?;
-    let responses = RefCell::new(responses.into_iter());
-
-    let mut result_text = String::new();
-    let mut is_error = false;
-
-    // Initial send
-    if let Some((text, err)) = responses.borrow_mut().next() {
-        result_text = text;
-        is_error = err;
-    }
-
+    let (mut result_text, mut is_error) = initial;
     let mut structured_output: Option<serde_json::Value> = None;
 
-    if !is_error {
-        let schema_raw = schema_json;
-        let mut retries_left = max_retries;
+    if !is_error && let Some(v) = validator {
+        let schema_raw = schema_raw.expect("schema_raw present when validator present");
+        let mut retries_left = max_schema_retries;
 
         loop {
-            match validate_json_output(&result_text, &validator) {
+            match validate_json_output(&result_text, v) {
                 Ok(parsed) => {
                     structured_output = Some(parsed);
                     break;
@@ -313,14 +281,17 @@ async fn run_schema_retry_with_responses(
                         break;
                     }
                     retries_left -= 1;
-                    let _ = format!(
+                    let reprompt = format!(
                         "Your previous output was invalid: {}. Output ONLY valid JSON conforming to this schema: {}",
                         validation_err, schema_raw
                     );
-                    if let Some((text, err)) = responses.borrow_mut().next() {
-                        result_text = text;
-                        is_error = err;
-                    }
+                    let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
+                    let mut retry_stream = agent.send(reprompt, Some(retry_rx)).await?;
+                    let (new_text, new_error) =
+                        collect_response(&mut retry_stream, retry_tx, is_tty, stdin, logger)
+                            .await?;
+                    result_text = new_text;
+                    is_error = new_error;
                     if is_error {
                         break;
                     }
@@ -636,38 +607,43 @@ mod tests {
     async fn json_format_non_tty_confirmation_emits_json_envelope_and_errors() {
         // Regression: non-TTY confirmation in JSON mode must still emit a parseable
         // JSON envelope so callers can always parse stdout on any exit path.
-        let schema =
-            r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#;
-        let schema_val: serde_json::Value = serde_json::from_str(schema).unwrap();
-        let validator = jsonschema::validator_for(&schema_val).unwrap();
+        //
+        // We exercise collect_response (the inner loop of run_json) directly with a
+        // real ToolConfirmationRequired event in non-TTY mode, then verify that the
+        // resulting (text, is_error) tuple is what run_json would write as a JSON envelope.
+        let events = vec![AgentEvent::ToolConfirmationRequired {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "rm -rf /"}),
+        }];
+        let mut s: BoxStream<AgentEvent> = Box::pin(futures::stream::iter(events));
+        let (tx, mut rx) = mpsc::unbounded::<ConfirmationResponse>();
 
-        // Produce a non-TTY confirmation event through run_schema_retry_with_responses
-        // by simulating is_error=true on first response (mirrors collect_response behaviour).
-        let (result_text, is_error, structured_output) = run_schema_retry_with_responses(
-            schema,
-            3,
-            vec![(
-                "tool confirmation required in non-TTY mode (tool: bash)".to_string(),
-                true,
-            )],
-        )
-        .await
-        .expect("should not propagate error");
+        let (result_text, is_error) =
+            collect_response(&mut s, tx, false, &mut io::empty(), &mut None)
+                .await
+                .expect("collect_response should not propagate error");
 
-        // The contract: is_error=true, result contains the description, no structured_output.
+        // collect_response sets is_error=true and sends Rejected in non-TTY mode.
         assert!(is_error);
         assert!(result_text.contains("non-TTY"));
-        assert!(structured_output.is_none());
+        let response = rx.try_recv().expect("rejection should be sent");
+        assert_eq!(response, ConfirmationResponse::Rejected);
 
-        // Verify the JSON envelope a caller would receive.
-        let _ = validator; // validator unused here — envelope shape is the concern
-        let output = serde_json::json!({
+        // Verify that the JSON envelope run_json would emit is valid and correct.
+        let envelope = serde_json::json!({
             "is_error": is_error,
             "result": result_text,
         });
-        assert!(serde_json::from_str::<serde_json::Value>(&output.to_string()).is_ok());
-        assert_eq!(output["is_error"], true);
-        assert!(output["result"].as_str().unwrap().contains("non-TTY"));
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&envelope.to_string()).expect("envelope must be valid JSON");
+        assert_eq!(reparsed["is_error"], true);
+        assert!(
+            reparsed["result"]
+                .as_str()
+                .expect("result is a string")
+                .contains("non-TTY")
+        );
     }
 
     // --- validate_json_output unit tests ---
@@ -685,7 +661,7 @@ mod tests {
         );
         let result = validate_json_output(r#"{"name": "Alice"}"#, &validator);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap()["name"], "Alice");
+        assert_eq!(result.expect("valid")["name"], "Alice");
     }
 
     #[test]
@@ -693,7 +669,7 @@ mod tests {
         let validator = make_validator(r#"{"type": "object"}"#);
         let result = validate_json_output("not json at all", &validator);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not valid JSON"));
+        assert!(result.expect_err("invalid").contains("not valid JSON"));
     }
 
     #[test]
@@ -706,34 +682,142 @@ mod tests {
     }
 
     // --- Retry orchestration behavioral tests ---
+    //
+    // These tests call `apply_schema_retry` — the production function — via a real
+    // `Agent` backed by `SequencedBackend`, which returns canned `StreamEvent`
+    // sequences. If the retry loop in `apply_schema_retry` changes, these break.
 
     const PERSON_SCHEMA: &str =
         r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#;
 
-    #[tokio::test]
-    async fn schema_valid_json_on_first_attempt_populates_structured_output() {
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
-            PERSON_SCHEMA,
-            3,
-            vec![(r#"{"name":"Alice"}"#.to_string(), false)],
+    /// Build an `Arc<Agent>` whose backend returns `responses` in order, one
+    /// `Vec<AgentEvent>` per `agent.send()` call.
+    async fn make_sequenced_agent(responses: Vec<Vec<AgentEvent>>) -> Arc<Agent> {
+        use crate::backend::LlmBackend;
+        use crate::session::Session;
+        use crate::types::{RequestConfig, StreamEvent};
+        use async_trait::async_trait;
+
+        struct SequencedBackend {
+            responses: Arc<tokio::sync::Mutex<Vec<Vec<AgentEvent>>>>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for SequencedBackend {
+            async fn send_message(
+                &self,
+                _: &[crate::types::Message],
+                _: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                let mut lock = self.responses.lock().await;
+                let events: Vec<AgentEvent> = if lock.is_empty() {
+                    vec![AgentEvent::ResponseComplete(String::new())]
+                } else {
+                    lock.remove(0)
+                };
+                // Convert AgentEvents to StreamEvents for the backend layer.
+                let stream_events: Vec<Result<StreamEvent>> = events
+                    .into_iter()
+                    .flat_map(|e| match e {
+                        AgentEvent::TokenReceived(t) => {
+                            vec![Ok(StreamEvent::TextDelta(t)), Ok(StreamEvent::Done)]
+                        }
+                        AgentEvent::ToolConfirmationRequired { name, input, id } => {
+                            // Emit a tool use that will trigger confirmation in agent.
+                            // For simplicity encode as a text delta so collect_response sees it.
+                            // Actually: emit Done — the agent handles confirmation upstream.
+                            // We rely on collect_response's non-TTY branch in our test.
+                            let _ = (name, input, id);
+                            vec![Ok(StreamEvent::Done)]
+                        }
+                        AgentEvent::Error(msg) => vec![Err(anyhow::anyhow!(msg))],
+                        _ => vec![Ok(StreamEvent::Done)],
+                    })
+                    .collect();
+                Ok(Box::pin(futures::stream::iter(stream_events)))
+            }
+        }
+
+        let backend = SequencedBackend {
+            responses: Arc::new(tokio::sync::Mutex::new(responses)),
+        };
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.keep()).await.expect("test session");
+        let config = crate::types::RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 1024,
+            tools: vec![],
+        };
+        Arc::new(Agent::new(Box::new(backend), config, session).await)
+    }
+
+    fn token_events(text: &str) -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::TokenReceived(text.to_string()),
+            AgentEvent::ResponseComplete(text.to_string()),
+        ]
+    }
+
+    async fn run_apply_schema_retry(
+        schema_json: &str,
+        max_retries: u32,
+        responses: Vec<Vec<AgentEvent>>,
+    ) -> Result<(String, bool, Option<serde_json::Value>)> {
+        let schema: serde_json::Value =
+            serde_json::from_str(schema_json).expect("test schema valid JSON");
+        let validator = jsonschema::validator_for(&schema).expect("test schema compiles");
+
+        // The first response is used as the initial result (simulating the first agent.send).
+        let mut all = responses;
+        let first_events = if all.is_empty() {
+            vec![AgentEvent::ResponseComplete(String::new())]
+        } else {
+            all.remove(0)
+        };
+
+        // Collect initial response from stream.
+        let mut first_stream: BoxStream<AgentEvent> = Box::pin(futures::stream::iter(first_events));
+        let (tx, _rx) = mpsc::unbounded::<ConfirmationResponse>();
+        let initial =
+            collect_response(&mut first_stream, tx, false, &mut io::empty(), &mut None).await?;
+
+        // Build agent with remaining responses for retries.
+        let agent = make_sequenced_agent(all).await;
+
+        apply_schema_retry(
+            initial,
+            Some(&validator),
+            Some(schema_json),
+            max_retries,
+            &agent,
+            false,
+            &mut io::empty(),
+            &mut None,
         )
         .await
-        .expect("should succeed");
+    }
+
+    #[tokio::test]
+    async fn schema_valid_json_on_first_attempt_populates_structured_output() {
+        let (text, is_error, structured_output) =
+            run_apply_schema_retry(PERSON_SCHEMA, 3, vec![token_events(r#"{"name":"Alice"}"#)])
+                .await
+                .expect("should succeed");
 
         assert!(!is_error);
         assert_eq!(text, r#"{"name":"Alice"}"#);
         assert!(structured_output.is_some());
-        assert_eq!(structured_output.unwrap()["name"], "Alice");
+        assert_eq!(structured_output.expect("some")["name"], "Alice");
     }
 
     #[tokio::test]
     async fn schema_invalid_json_on_first_attempt_reprompts_and_succeeds_on_second() {
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
+        let (text, is_error, structured_output) = run_apply_schema_retry(
             PERSON_SCHEMA,
             3,
             vec![
-                ("not json at all".to_string(), false),
-                (r#"{"name":"Bob"}"#.to_string(), false),
+                token_events("not json at all"),
+                token_events(r#"{"name":"Bob"}"#),
             ],
         )
         .await
@@ -742,40 +826,39 @@ mod tests {
         assert!(!is_error);
         assert_eq!(text, r#"{"name":"Bob"}"#);
         assert!(structured_output.is_some());
-        assert_eq!(structured_output.unwrap()["name"], "Bob");
+        assert_eq!(structured_output.expect("some")["name"], "Bob");
     }
 
     #[tokio::test]
     async fn schema_invalid_json_exhausts_retries_and_sets_is_error() {
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
+        let (text, is_error, structured_output) = run_apply_schema_retry(
             PERSON_SCHEMA,
             2,
             vec![
-                ("not json".to_string(), false),
-                ("still not json".to_string(), false),
-                ("never valid".to_string(), false),
+                token_events("not json"),
+                token_events("still not json"),
+                token_events("never valid"),
             ],
         )
         .await
-        .expect("orchestration should not itself error");
+        .expect("orchestration should not itself propagate error");
 
         assert!(is_error, "is_error must be true after exhausting retries");
         assert!(
             text.contains("not valid JSON"),
-            "result should contain validation error"
+            "result should contain validation error, got: {text}"
         );
         assert!(structured_output.is_none());
     }
 
     #[tokio::test]
     async fn schema_parseable_but_schema_invalid_json_triggers_retry() {
-        // Valid JSON but missing required "name" field — schema validation fails.
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
+        let (text, is_error, structured_output) = run_apply_schema_retry(
             PERSON_SCHEMA,
             3,
             vec![
-                (r#"{"age": 42}"#.to_string(), false),
-                (r#"{"name": "Carol"}"#.to_string(), false),
+                token_events(r#"{"age": 42}"#),
+                token_events(r#"{"name": "Carol"}"#),
             ],
         )
         .await
@@ -784,18 +867,15 @@ mod tests {
         assert!(!is_error);
         assert_eq!(text, r#"{"name": "Carol"}"#);
         assert!(structured_output.is_some());
-        assert_eq!(structured_output.unwrap()["name"], "Carol");
+        assert_eq!(structured_output.expect("some")["name"], "Carol");
     }
 
     #[tokio::test]
     async fn schema_max_retries_zero_validates_once_and_fails() {
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
-            PERSON_SCHEMA,
-            0,
-            vec![("not json".to_string(), false)],
-        )
-        .await
-        .expect("orchestration should not itself error");
+        let (text, is_error, structured_output) =
+            run_apply_schema_retry(PERSON_SCHEMA, 0, vec![token_events("not json")])
+                .await
+                .expect("orchestration should not propagate error");
 
         assert!(is_error);
         assert!(text.contains("not valid JSON"));
@@ -803,9 +883,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_schema_returns_result_text_unchanged_without_structured_output() {
-        // When schema is None, run_schema_retry_with_responses cannot be used.
-        // Verify via collect_response that the result passes through unmodified.
+    async fn no_schema_returns_result_text_unchanged() {
         let events = vec![
             AgentEvent::TokenReceived("plain text".to_string()),
             AgentEvent::ResponseComplete("plain text".to_string()),
@@ -816,12 +894,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_error_true_from_collect_skips_schema_validation() {
-        // If the LLM stream itself errors, the retry loop must not run.
-        let (text, is_error, structured_output) = run_schema_retry_with_responses(
-            PERSON_SCHEMA,
+    async fn is_error_true_from_initial_collect_skips_schema_validation() {
+        // If the initial LLM stream errors, apply_schema_retry must not attempt validation.
+        let schema: serde_json::Value = serde_json::from_str(PERSON_SCHEMA).expect("valid schema");
+        let validator = jsonschema::validator_for(&schema).expect("compiles");
+
+        let initial = ("stream error".to_string(), true);
+        let agent = make_sequenced_agent(vec![]).await;
+
+        let (text, is_error, structured_output) = apply_schema_retry(
+            initial,
+            Some(&validator),
+            Some(PERSON_SCHEMA),
             3,
-            vec![("stream error".to_string(), true)],
+            &agent,
+            false,
+            &mut io::empty(),
+            &mut None,
         )
         .await
         .expect("should not propagate");
