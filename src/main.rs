@@ -75,8 +75,7 @@ enum Mode {
     },
     SingleShot {
         prompt: String,
-        json_schema: Option<jsonschema::Validator>,
-        json_schema_raw: Option<String>,
+        json_schema: Option<frontend::stdout::JsonSchema>,
         max_schema_retries: u32,
     },
 }
@@ -89,7 +88,7 @@ fn determine_mode(cli: &Cli) -> Result<Mode> {
             )
         })?;
 
-        let (json_schema, json_schema_raw) = if let Some(ref schema_str) = cli.json_schema {
+        let json_schema = if let Some(ref schema_str) = cli.json_schema {
             if cli.output_format != frontend::stdout::OutputFormat::Json {
                 anyhow::bail!("--json-schema requires --output-format json");
             }
@@ -97,15 +96,17 @@ fn determine_mode(cli: &Cli) -> Result<Mode> {
                 .map_err(|e| anyhow::anyhow!("--json-schema is not valid JSON: {}", e))?;
             let validator = jsonschema::validator_for(&schema_value)
                 .map_err(|e| anyhow::anyhow!("--json-schema failed to compile: {}", e))?;
-            (Some(validator), Some(schema_str.clone()))
+            Some(frontend::stdout::JsonSchema {
+                validator,
+                raw: schema_str.clone(),
+            })
         } else {
-            (None, None)
+            None
         };
 
         Ok(Mode::SingleShot {
             prompt,
             json_schema,
-            json_schema_raw,
             max_schema_retries: cli.max_schema_retries,
         })
     } else {
@@ -190,14 +191,13 @@ async fn main() -> Result<()> {
         Mode::SingleShot {
             prompt,
             json_schema,
-            json_schema_raw,
             max_schema_retries,
         } => {
             // Inject schema instruction before logging so the log reflects what is actually sent.
-            let effective_prompt = if let Some(ref schema_raw) = json_schema_raw {
+            let effective_prompt = if let Some(ref schema) = json_schema {
                 format!(
                     "{}\n\nYou MUST output ONLY valid JSON conforming to this schema (no markdown, no explanation):\n{}",
-                    prompt, schema_raw
+                    prompt, schema.raw
                 )
             } else {
                 prompt
@@ -210,7 +210,6 @@ async fn main() -> Result<()> {
                 effective_prompt,
                 cli.output_format,
                 json_schema,
-                json_schema_raw,
                 max_schema_retries,
                 logger.as_mut(),
             )
@@ -425,12 +424,14 @@ mod tests {
             Mode::SingleShot {
                 prompt,
                 json_schema,
-                json_schema_raw,
                 ..
             } => {
                 assert_eq!(prompt, "hello");
                 assert!(json_schema.is_some());
-                assert_eq!(json_schema_raw.as_deref(), Some(r#"{"type":"object"}"#));
+                assert_eq!(
+                    json_schema.expect("some").raw.as_str(),
+                    r#"{"type":"object"}"#
+                );
             }
             Mode::Repl { .. } => panic!("Expected SingleShot mode"),
         }
