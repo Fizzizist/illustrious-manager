@@ -369,7 +369,9 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
         }
         "ollama" => {
             if let Some(ref ollama_config) = config.ollama {
-                if ollama_config.api_key.is_empty() {
+                if ollama_config.api_key.is_empty()
+                    && ollama_config.base_url == default_ollama_base_url()
+                {
                     let path = match config_path {
                         Some(p) => p.display().to_string(),
                         None => default_config_path()
@@ -379,7 +381,7 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                             }),
                     };
                     bail!(
-                        "API key is required for ollama backend. Set it in your config file at:\n  {}",
+                        "API key is required for Ollama Cloud. Set it in your config file at:\n  {}\nOr set base_url to your self-hosted endpoint.",
                         path
                     );
                 }
@@ -705,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_ollama_backend_with_empty_api_key_errors() {
+    fn validate_ollama_backend_with_empty_api_key_for_cloud_errors() {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
@@ -725,6 +727,28 @@ mod tests {
         let result = validate(&config, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
+    }
+
+    #[test]
+    fn validate_ollama_backend_with_empty_api_key_for_self_hosted_succeeds() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "http://localhost:11434/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_ok());
     }
 
     #[test]
