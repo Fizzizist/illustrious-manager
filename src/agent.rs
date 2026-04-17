@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::backend::LlmBackend;
+use crate::backend::{BackendFactory, LlmBackend};
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -455,6 +455,32 @@ async fn execute_tool_calls(
     }
 
     (assistant_content, tool_result_blocks)
+}
+
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
+
+/// Spawn a fresh `Agent` for the given named role using the shared `BackendFactory`.
+///
+/// The caller supplies a pre-built `ToolRegistry` and a `Session`. The agent's
+/// model is taken from the role definition; `tool_config` controls iteration
+/// limits and confirmation behaviour.
+pub async fn spawn_agent(
+    factory: &BackendFactory,
+    role: &str,
+    tool_config: &ToolsConfig,
+    session: Session,
+    tools: ToolRegistry,
+) -> anyhow::Result<Agent> {
+    let selection = factory.for_role(role).await?;
+    let request_config = RequestConfig {
+        model: selection.model,
+        max_tokens: DEFAULT_MAX_TOKENS,
+        tools: tools.definitions(),
+    };
+    Ok(Agent::new(selection.backend, request_config, session)
+        .await
+        .with_tools(tools)
+        .with_tool_config(tool_config))
 }
 
 #[cfg(test)]

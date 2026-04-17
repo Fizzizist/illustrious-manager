@@ -158,6 +158,22 @@ impl VertexBackend {
         })
     }
 
+    /// Create a `VertexBackend` with an already-initialized auth provider.
+    /// Used by `BackendFactory` to share a single provider across roles that
+    /// target the same `(project, region)`.
+    pub fn with_auth(
+        project: String,
+        region: String,
+        auth_manager: Arc<dyn gcp_auth::TokenProvider>,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            project,
+            region,
+            auth_manager,
+        }
+    }
+
     fn endpoint(&self, model: &str) -> String {
         let host = if self.region == "global" {
             "aiplatform.googleapis.com".to_string()
