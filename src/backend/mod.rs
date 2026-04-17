@@ -26,6 +26,10 @@ pub struct BackendSelection {
     pub model: String,
 }
 
+type AuthProvider = Arc<dyn gcp_auth::TokenProvider>;
+type AuthCell = Arc<OnceCell<AuthProvider>>;
+type AuthCache = Mutex<HashMap<(String, String), AuthCell>>;
+
 /// Factory that constructs backends on demand, sharing expensive auth state
 /// across roles that target the same Vertex AI `(project, region)` pair.
 ///
@@ -40,8 +44,7 @@ pub struct BackendSelection {
 pub struct BackendFactory {
     config: AppConfig,
     /// One `OnceCell` per `(project, region)` key, initialised on first use.
-    vertex_auth_cache:
-        Mutex<HashMap<(String, String), Arc<OnceCell<Arc<dyn gcp_auth::TokenProvider>>>>>,
+    vertex_auth_cache: AuthCache,
 }
 
 impl BackendFactory {
@@ -89,14 +92,9 @@ impl BackendFactory {
     /// Returns the auth provider for `(project, region)`, initialising it
     /// exactly once — safe under concurrent callers because `OnceCell::get_or_try_init`
     /// serialises initialisation.
-    async fn vertex_auth_for(
-        &self,
-        project: String,
-        region: String,
-    ) -> Result<Arc<dyn gcp_auth::TokenProvider>> {
+    async fn vertex_auth_for(&self, project: String, region: String) -> Result<AuthProvider> {
         let key = (project, region);
-        // Grab (or create) the OnceCell for this key under a brief sync lock.
-        let cell = {
+        let cell: AuthCell = {
             let mut cache = self
                 .vertex_auth_cache
                 .lock()
@@ -107,7 +105,6 @@ impl BackendFactory {
                     .or_insert_with(|| Arc::new(OnceCell::new())),
             )
         };
-        // Initialise the cell at most once, even if many tasks race here.
         let provider = cell
             .get_or_try_init(|| async {
                 gcp_auth::provider().await.map_err(|e| {
