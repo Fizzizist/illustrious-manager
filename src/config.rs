@@ -93,7 +93,7 @@ const DEFAULT_REGION: &str = "us-east5";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_BACKEND: &str = "vertex";
 
-const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex" or "zai"
+const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", or "ollama"
 backend = "vertex"
 # where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
 # or a local `illustrious-manager-sessions` directory if $HOME is not found.
@@ -112,6 +112,14 @@ model = "claude-sonnet-4-20250514"
 api_key = ""
 # Model to use
 model = "glm-5.1"
+
+[ollama]
+# Required: your Ollama API key
+api_key = ""
+# Model to use
+model = "gpt-oss:120b"
+# Base URL for Ollama API (change for self-hosted)
+# base_url = "https://ollama.com/api/chat"
 
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
@@ -136,6 +144,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub zai: Option<ZaiConfig>,
     #[serde(default)]
+    pub ollama: Option<OllamaConfig>,
+    #[serde(default)]
     pub tools: ToolsConfig,
 }
 
@@ -146,6 +156,24 @@ pub struct VertexConfig {
     pub region: String,
     #[serde(default = "default_model")]
     pub model: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct OllamaConfig {
+    #[serde(skip_serializing)]
+    pub api_key: String,
+    #[serde(default = "default_ollama_model")]
+    pub model: String,
+    #[serde(default = "default_ollama_base_url")]
+    pub base_url: String,
+}
+
+fn default_ollama_model() -> String {
+    "gpt-oss:120b".to_string()
+}
+
+fn default_ollama_base_url() -> String {
+    "https://ollama.com/api/chat".to_string()
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -236,6 +264,13 @@ pub fn apply_overrides(
                 && let Some(ref mut zai) = config.zai
             {
                 zai.model = m.to_string();
+            }
+        }
+        "ollama" => {
+            if let Some(m) = model
+                && let Some(ref mut ollama) = config.ollama
+            {
+                ollama.model = m.to_string();
             }
         }
         _ => {}
@@ -332,9 +367,33 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 );
             }
         }
+        "ollama" => {
+            if let Some(ref ollama_config) = config.ollama {
+                if ollama_config.api_key.is_empty()
+                    && ollama_config.base_url == default_ollama_base_url()
+                {
+                    let path = match config_path {
+                        Some(p) => p.display().to_string(),
+                        None => default_config_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|_| {
+                                "~/.config/illustrious-manager/config.toml".to_string()
+                            }),
+                    };
+                    bail!(
+                        "API key is required for Ollama Cloud. Set it in your config file at:\n  {}\nOr set base_url to your self-hosted endpoint.",
+                        path
+                    );
+                }
+            } else {
+                bail!(
+                    "ollama backend configuration is missing. Add a [ollama] section to your config file."
+                );
+            }
+        }
         _ => {
             bail!(
-                "Invalid backend '{}'. Supported backends are: vertex, zai",
+                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama",
                 config.backend
             );
         }
@@ -408,6 +467,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -426,6 +486,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -443,6 +504,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -464,6 +526,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "glm-5.1".to_string(),
             }),
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -485,6 +548,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "glm-5.1".to_string(),
             }),
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -502,6 +566,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -520,6 +585,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -546,6 +612,7 @@ mod tests {
                 api_key: "secret-key".to_string(),
                 model: "glm-5.1".to_string(),
             }),
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
@@ -565,6 +632,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Always,
                 sandbox_root: "/tmp/sandbox".to_string(),
@@ -590,6 +658,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
         };
@@ -610,10 +679,148 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
+    }
+
+    #[test]
+    fn validate_ollama_backend_with_missing_config_errors() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("[ollama]"));
+    }
+
+    #[test]
+    fn validate_ollama_backend_with_empty_api_key_for_cloud_errors() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("API key"));
+    }
+
+    #[test]
+    fn validate_ollama_backend_with_empty_api_key_for_self_hosted_succeeds() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "http://localhost:11434/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_ollama_backend_with_valid_config_succeeds() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn apply_overrides_ollama_model() {
+        let mut config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        apply_overrides(&mut config, None, None, Some("custom-model"));
+        assert_eq!(
+            config.ollama.as_ref().unwrap().model,
+            "custom-model",
+            "model override should be applied to ollama config"
+        );
+    }
+
+    #[test]
+    fn generate_intro_message_contains_ollama_backend_settings() {
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "secret-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+        };
+        let msg = generate_intro_message(&config);
+        assert!(msg.contains("ollama"), "should mention backend name");
+        assert!(msg.contains("gpt-oss:120b"), "should mention ollama model");
+        assert!(msg.contains("ollama.com"), "should mention base_url");
+        assert!(!msg.contains("secret-key"), "should not leak API key");
     }
 }
