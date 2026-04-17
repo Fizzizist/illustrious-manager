@@ -607,6 +607,7 @@ mod tests {
             zai: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
+            models: std::collections::BTreeMap::new(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,
