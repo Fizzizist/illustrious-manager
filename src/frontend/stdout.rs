@@ -14,12 +14,28 @@ pub enum OutputFormat {
     Json,
 }
 
+/// A compiled JSON Schema paired with its original source text.
+///
+/// The `validator` is used to validate LLM responses. The `raw` text is
+/// included verbatim in reprompt messages so the model can see the schema.
+pub struct JsonSchema {
+    pub validator: jsonschema::Validator,
+    pub raw: String,
+}
+
+impl std::fmt::Debug for JsonSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonSchema")
+            .field("raw", &self.raw)
+            .finish()
+    }
+}
+
 pub async fn run(
     agent: Arc<Agent>,
     prompt: String,
     format: OutputFormat,
-    json_schema: Option<jsonschema::Validator>,
-    json_schema_raw: Option<String>,
+    json_schema: Option<JsonSchema>,
     max_schema_retries: u32,
     logger: Option<&mut Logger>,
 ) -> Result<()> {
@@ -33,7 +49,6 @@ pub async fn run(
         &mut handle,
         format,
         json_schema,
-        json_schema_raw,
         max_schema_retries,
         is_tty,
         &mut stdin,
@@ -48,8 +63,7 @@ async fn run_with_writer<W: Write, R: BufRead>(
     prompt: String,
     writer: &mut W,
     format: OutputFormat,
-    json_schema: Option<jsonschema::Validator>,
-    json_schema_raw: Option<String>,
+    json_schema: Option<JsonSchema>,
     max_schema_retries: u32,
     is_tty: bool,
     stdin: &mut R,
@@ -67,7 +81,6 @@ async fn run_with_writer<W: Write, R: BufRead>(
                 prompt,
                 writer,
                 json_schema,
-                json_schema_raw,
                 max_schema_retries,
                 is_tty,
                 stdin,
@@ -196,8 +209,7 @@ async fn run_json<W: Write, R: BufRead>(
     agent: Arc<Agent>,
     initial_prompt: String,
     writer: &mut W,
-    json_schema: Option<jsonschema::Validator>,
-    json_schema_raw: Option<String>,
+    json_schema: Option<JsonSchema>,
     max_schema_retries: u32,
     is_tty: bool,
     stdin: &mut R,
@@ -210,7 +222,6 @@ async fn run_json<W: Write, R: BufRead>(
     let (result_text, is_error, structured_output) = apply_schema_retry(
         initial,
         json_schema.as_ref(),
-        json_schema_raw.as_deref(),
         max_schema_retries,
         &agent,
         is_tty,
@@ -253,8 +264,7 @@ async fn run_json<W: Write, R: BufRead>(
 #[allow(clippy::too_many_arguments)]
 async fn apply_schema_retry<R: BufRead>(
     initial: (String, bool),
-    validator: Option<&jsonschema::Validator>,
-    schema_raw: Option<&str>,
+    json_schema: Option<&JsonSchema>,
     max_schema_retries: u32,
     agent: &Agent,
     is_tty: bool,
@@ -264,12 +274,11 @@ async fn apply_schema_retry<R: BufRead>(
     let (mut result_text, mut is_error) = initial;
     let mut structured_output: Option<serde_json::Value> = None;
 
-    if !is_error && let Some(v) = validator {
-        let schema_raw = schema_raw.expect("schema_raw present when validator present");
+    if !is_error && let Some(schema) = json_schema {
         let mut retries_left = max_schema_retries;
 
         loop {
-            match validate_json_output(&result_text, v) {
+            match validate_json_output(&result_text, &schema.validator) {
                 Ok(parsed) => {
                     structured_output = Some(parsed);
                     break;
@@ -283,7 +292,7 @@ async fn apply_schema_retry<R: BufRead>(
                     retries_left -= 1;
                     let reprompt = format!(
                         "Your previous output was invalid: {}. Output ONLY valid JSON conforming to this schema: {}",
-                        validation_err, schema_raw
+                        validation_err, schema.raw
                     );
                     let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
                     let mut retry_stream = agent.send(reprompt, Some(retry_rx)).await?;
@@ -763,9 +772,13 @@ mod tests {
         max_retries: u32,
         responses: Vec<Vec<AgentEvent>>,
     ) -> Result<(String, bool, Option<serde_json::Value>)> {
-        let schema: serde_json::Value =
+        let schema_val: serde_json::Value =
             serde_json::from_str(schema_json).expect("test schema valid JSON");
-        let validator = jsonschema::validator_for(&schema).expect("test schema compiles");
+        let validator = jsonschema::validator_for(&schema_val).expect("test schema compiles");
+        let json_schema = JsonSchema {
+            validator,
+            raw: schema_json.to_string(),
+        };
 
         // The first response is used as the initial result (simulating the first agent.send).
         let mut all = responses;
@@ -786,8 +799,7 @@ mod tests {
 
         apply_schema_retry(
             initial,
-            Some(&validator),
-            Some(schema_json),
+            Some(&json_schema),
             max_retries,
             &agent,
             false,
@@ -796,7 +808,6 @@ mod tests {
         )
         .await
     }
-
     #[tokio::test]
     async fn schema_valid_json_on_first_attempt_populates_structured_output() {
         let (text, is_error, structured_output) =
@@ -896,16 +907,19 @@ mod tests {
     #[tokio::test]
     async fn is_error_true_from_initial_collect_skips_schema_validation() {
         // If the initial LLM stream errors, apply_schema_retry must not attempt validation.
-        let schema: serde_json::Value = serde_json::from_str(PERSON_SCHEMA).expect("valid schema");
-        let validator = jsonschema::validator_for(&schema).expect("compiles");
+        let schema_val: serde_json::Value =
+            serde_json::from_str(PERSON_SCHEMA).expect("valid schema");
+        let json_schema = JsonSchema {
+            validator: jsonschema::validator_for(&schema_val).expect("compiles"),
+            raw: PERSON_SCHEMA.to_string(),
+        };
 
         let initial = ("stream error".to_string(), true);
         let agent = make_sequenced_agent(vec![]).await;
 
         let (text, is_error, structured_output) = apply_schema_retry(
             initial,
-            Some(&validator),
-            Some(PERSON_SCHEMA),
+            Some(&json_schema),
             3,
             &agent,
             false,
