@@ -1644,6 +1644,7 @@ dependencies = [
  "syntect-assets",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tui-markdown",
  "turso",
