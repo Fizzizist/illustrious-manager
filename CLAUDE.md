@@ -49,7 +49,7 @@ cargo fmt                            # Format
 
 Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Three implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing), `zai` (z.ai), and `ollama` (Ollama Cloud/self-hosted via NDJSON, with `ndjson.rs` for NDJSON stream parsing). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
 2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
@@ -72,7 +72,7 @@ Key types live in `src/types.rs`. Configuration loading and CLI merge logic is i
 Config file at `~/.config/illustrious-manager/config.toml` (auto-created on first run):
 
 ```toml
-backend = "vertex"                    # "vertex" or "zai"
+backend = "vertex"                    # "vertex", "zai", or "ollama"
 # sessions_dir = "/path/to/sessions" # defaults to ~/.config/illustrious-manager/sessions
 
 [vertex]
@@ -83,6 +83,11 @@ model = "claude-sonnet-4-20250514"
 [zai]
 api_key = ""                          # z.ai API key (required for zai backend)
 model = "glm-5.1"
+
+[ollama]
+api_key = ""                          # Ollama API key (required for ollama backend)
+model = "gpt-oss:120b"
+# base_url = "https://ollama.com/api/chat"  # change for self-hosted Ollama
 
 # [tools]
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never

@@ -1395,6 +1395,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
         };
