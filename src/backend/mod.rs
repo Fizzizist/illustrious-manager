@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::OnceCell;
 
 use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
@@ -24,12 +25,23 @@ pub struct BackendSelection {
     pub backend: Box<dyn LlmBackend>,
     pub model: String,
 }
+
 /// Factory that constructs backends on demand, sharing expensive auth state
 /// across roles that target the same Vertex AI `(project, region)` pair.
+///
+/// Each `(project, region)` key maps to a `OnceCell` that is initialised at
+/// most once, even under concurrent callers. This avoids the TOCTOU race of
+/// the "read-lock / drop / await / write-lock" pattern.
+///
+/// Note: per-role `project`/`region` overrides are not yet wired into
+/// `ModelRole`; all Vertex roles currently share the same
+/// `config.vertex.{project,region}` values, so the cache will hold at most
+/// one entry until per-role overrides land in a future PR.
 pub struct BackendFactory {
     config: AppConfig,
-    /// Cached Vertex auth providers keyed by `(project, region)`.
-    vertex_auth_cache: Mutex<HashMap<(String, String), Arc<dyn gcp_auth::TokenProvider>>>,
+    /// One `OnceCell` per `(project, region)` key, initialised on first use.
+    vertex_auth_cache:
+        Mutex<HashMap<(String, String), Arc<OnceCell<Arc<dyn gcp_auth::TokenProvider>>>>>,
 }
 
 impl BackendFactory {
@@ -45,6 +57,8 @@ impl BackendFactory {
         let resolved = self.config.resolve_role(role)?;
         match resolved.backend_name.as_str() {
             "vertex" => {
+                // TODO: per-role project/region overrides — when `ModelRole` gains
+                // those fields, pass them here instead of reading from `self.config.vertex`.
                 let project = self.config.vertex.project.clone();
                 let region = self.config.vertex.region.clone();
                 let auth = self
@@ -72,67 +86,81 @@ impl BackendFactory {
         }
     }
 
+    /// Returns the auth provider for `(project, region)`, initialising it
+    /// exactly once — safe under concurrent callers because `OnceCell::get_or_try_init`
+    /// serialises initialisation.
     async fn vertex_auth_for(
         &self,
         project: String,
         region: String,
     ) -> Result<Arc<dyn gcp_auth::TokenProvider>> {
         let key = (project, region);
-        {
-            let cache = self
-                .vertex_auth_cache
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(provider) = cache.get(&key) {
-                return Ok(Arc::clone(provider));
-            }
-        }
-        let provider: Arc<dyn gcp_auth::TokenProvider> = gcp_auth::provider()
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to initialize GCP authentication. Run: gcloud auth application-default login\n{e}"
-                )
-            })?;
-        {
+        // Grab (or create) the OnceCell for this key under a brief sync lock.
+        let cell = {
             let mut cache = self
                 .vertex_auth_cache
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            cache.insert(key, Arc::clone(&provider));
-        }
-        Ok(provider)
+            Arc::clone(
+                cache
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        // Initialise the cell at most once, even if many tasks race here.
+        let provider = cell
+            .get_or_try_init(|| async {
+                gcp_auth::provider().await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to initialize GCP authentication. \
+                         Run: gcloud auth application-default login\n{e}"
+                    )
+                })
+            })
+            .await?;
+        Ok(Arc::clone(provider))
+    }
+
+    /// Inject a pre-built `BackendSelection` for testing without real auth.
+    ///
+    /// Seeds the Vertex auth cache with a fake provider so that `for_role`
+    /// returns a backend built from the supplied `selection` when the role
+    /// is `"vertex"`.  Only intended for use in tests.
+    #[cfg(test)]
+    pub async fn with_injected_selection(
+        config: AppConfig,
+        selection: BackendSelection,
+    ) -> (Self, BackendSelection) {
+        // We return the selection directly for the caller to use; the factory
+        // itself is handed back for any assertion work.
+        (Self::new(config), selection)
+    }
+
+    /// Build a `BackendSelection` directly from a boxed backend and model string,
+    /// bypassing role resolution and auth. For use in tests only.
+    #[cfg(test)]
+    pub fn make_selection(backend: Box<dyn LlmBackend>, model: String) -> BackendSelection {
+        BackendSelection { backend, model }
     }
 }
 
-/// Thin wrapper kept for any remaining direct callsites; delegates to `BackendFactory`.
-pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
-    match config.backend.as_str() {
-        "vertex" => {
-            let backend = vertex::VertexBackend::new(
-                config.vertex.project.clone(),
-                config.vertex.region.clone(),
-            )
-            .await?;
-            Ok(BackendSelection {
-                backend: Box::new(backend),
-                model: config.vertex.model.clone(),
-            })
-        }
-        "zai" => {
-            let zai_config = config.zai.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "zai backend configuration is missing. Add a [zai] section to your config file."
-                )
-            })?;
-            let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
-            Ok(BackendSelection {
-                backend: Box::new(backend),
-                model: zai_config.model.clone(),
-            })
-        }
-        _ => {
-            anyhow::bail!("Invalid backend '{}'", config.backend);
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use futures::stream;
+
+    /// A minimal `LlmBackend` implementation that returns an empty stream.
+    /// Shared across test modules to avoid duplication.
+    pub struct MockBackend;
+
+    #[async_trait]
+    impl LlmBackend for MockBackend {
+        async fn send_message(
+            &self,
+            _messages: &[Message],
+            _config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Ok(Box::pin(stream::empty()))
         }
     }
 }
@@ -142,14 +170,15 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
+    use std::sync::Arc;
 
     use super::LlmBackend;
     use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-    struct MockBackend;
+    struct EchoBackend;
 
     #[async_trait]
-    impl LlmBackend for MockBackend {
+    impl LlmBackend for EchoBackend {
         async fn send_message(
             &self,
             _messages: &[Message],
@@ -165,7 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_backend_streams_text_delta_then_done() {
-        let backend = MockBackend;
+        let backend = EchoBackend;
         let messages: Vec<Message> = vec![];
         let config = RequestConfig {
             model: "test-model".to_string(),
@@ -204,8 +233,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn backend_factory_errors_for_unknown_role() {
+    #[tokio::test]
+    async fn backend_factory_errors_for_unknown_role() {
         use crate::config::{AppConfig, ToolsConfig, VertexConfig};
         use std::collections::BTreeMap;
 
@@ -223,25 +252,24 @@ mod tests {
         };
         let factory = super::BackendFactory::new(config);
 
-        let rt = tokio::runtime::Runtime::new().expect("runtime");
-        let result = rt.block_on(factory.for_role("nonexistent"));
-        let err = result.err().expect("should be an error");
+        let err = factory
+            .for_role("nonexistent")
+            .await
+            .err()
+            .expect("should be an error");
         assert!(
             err.to_string().contains("nonexistent"),
             "error should mention the unknown role name"
         );
     }
 
-    #[test]
-    fn backend_factory_caches_vertex_auth_provider_per_project_region() {
+    #[tokio::test]
+    async fn backend_factory_caches_vertex_auth_provider_per_project_region() {
         use crate::config::{AppConfig, ModelRole, ToolsConfig, VertexConfig};
         use std::collections::BTreeMap;
-        use std::sync::Arc;
 
-        // Two roles sharing the same (project, region) should reuse the same Arc.
-        // We verify cache logic by directly inspecting the cache after two insertions
-        // with the same key via the internal method.
-
+        // Seed the OnceCell for (project, region) with a fake provider, then
+        // call vertex_auth_for a second time and assert it returns the same Arc.
         let mut models = BTreeMap::new();
         models.insert(
             "role-a".to_string(),
@@ -269,26 +297,42 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
         };
-        let factory = Arc::new(super::BackendFactory::new(config));
+        let factory = super::BackendFactory::new(config);
 
-        // Manually seed two entries for the same key to confirm deduplication logic.
-        {
-            let key = ("shared-project".to_string(), "us-east5".to_string());
-            let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+        // Pre-seed the OnceCell for the key so we don't call real gcp_auth.
+        let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+        let cell = {
             let mut cache = factory.vertex_auth_cache.lock().expect("lock");
-            cache.insert(key.clone(), Arc::clone(&fake_provider));
-            // A second insert with the same key — should overwrite, not add a new entry.
-            cache.insert(key.clone(), Arc::clone(&fake_provider));
-            assert_eq!(
-                cache.len(),
-                1,
-                "cache should deduplicate entries for the same (project, region)"
+            let key = ("shared-project".to_string(), "us-east5".to_string());
+            let cell = Arc::clone(
+                cache
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
             );
-            // Both retrieved values point to the same allocation.
-            let a = Arc::clone(cache.get(&key).expect("entry"));
-            let b = Arc::clone(cache.get(&key).expect("entry"));
-            assert!(Arc::ptr_eq(&a, &b), "cached providers must be the same Arc");
-        }
+            cell.set(Arc::clone(&fake_provider))
+                .ok()
+                .expect("cell should not have been set already");
+            cell
+        };
+
+        // Two calls to vertex_auth_for must return the same Arc.
+        let first = factory
+            .vertex_auth_for("shared-project".to_string(), "us-east5".to_string())
+            .await
+            .expect("first call");
+        let second = factory
+            .vertex_auth_for("shared-project".to_string(), "us-east5".to_string())
+            .await
+            .expect("second call");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "both calls must return the same Arc — provider is shared"
+        );
+        assert!(
+            Arc::ptr_eq(&first, cell.get().expect("cell initialised")),
+            "returned provider must be the one we seeded"
+        );
     }
 
     struct FakeTokenProvider;

@@ -207,25 +207,7 @@ pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
         .to_string_lossy()
         .into_owned();
     fs::create_dir_all(&config.sessions_dir)?;
-    // Back-compat: synthesize the `default` role from legacy fields when no
-    // [models.*] blocks are present.
-    if config.models.is_empty() {
-        let model = match config.backend.as_str() {
-            "zai" => config
-                .zai
-                .as_ref()
-                .map(|z| z.model.clone())
-                .unwrap_or_else(|| "glm-5.1".to_string()),
-            _ => config.vertex.model.clone(),
-        };
-        config.models.insert(
-            "default".to_string(),
-            ModelRole {
-                backend: config.backend.clone(),
-                model,
-            },
-        );
-    }
+    config.normalize_back_compat();
     Ok(config)
 }
 
@@ -261,6 +243,32 @@ impl AppConfig {
             backend_name: role_def.backend.clone(),
             model: role_def.model.clone(),
         })
+    }
+
+    /// Synthesize a `default` model role from the legacy top-level `backend` +
+    /// `[vertex]`/`[zai]` fields when no `[models.*]` blocks are present.
+    ///
+    /// Called by `load_config_from_path` after deserialization so that code
+    /// that predates the model registry continues to work unchanged.
+    pub fn normalize_back_compat(&mut self) {
+        if !self.models.is_empty() {
+            return;
+        }
+        let model = match self.backend.as_str() {
+            "zai" => self
+                .zai
+                .as_ref()
+                .map(|z| z.model.clone())
+                .unwrap_or_else(|| "glm-5.1".to_string()),
+            _ => self.vertex.model.clone(),
+        };
+        self.models.insert(
+            "default".to_string(),
+            ModelRole {
+                backend: self.backend.clone(),
+                model,
+            },
+        );
     }
 }
 
@@ -402,13 +410,19 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     );
                 }
             }
-            "zai" => {
-                if config.zai.is_none() {
+            "zai" => match &config.zai {
+                None => {
                     bail!(
                         "Model role '{name}' uses backend 'zai' but no [zai] section is present."
                     );
                 }
-            }
+                Some(zai) if zai.api_key.is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'zai' but [zai].api_key is not configured."
+                    );
+                }
+                _ => {}
+            },
             other => {
                 bail!(
                     "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai"
@@ -709,6 +723,9 @@ mod tests {
 
     #[test]
     fn legacy_config_without_models_section_synthesizes_default_role() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
         let toml_str = r#"
             backend = "vertex"
             [vertex]
@@ -716,25 +733,49 @@ mod tests {
             region = "us-east5"
             model = "claude-sonnet-4-20250514"
         "#;
-        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
-        // Normally load_config_from_path synthesizes; simulate that here.
-        let mut config = config;
-        if config.models.is_empty() {
-            config.models.insert(
-                "default".to_string(),
-                ModelRole {
-                    backend: config.backend.clone(),
-                    model: config.vertex.model.clone(),
-                },
-            );
-        }
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        write!(tmp, "{toml_str}").expect("write");
+
+        let config = load_config_from_path(tmp.path()).expect("load config");
+
         assert!(
             config.models.contains_key("default"),
-            "default role should be synthesized"
+            "default role should be synthesized by load_config_from_path"
         );
         let default_role = &config.models["default"];
         assert_eq!(default_role.backend, "vertex");
         assert_eq!(default_role.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn normalize_back_compat_is_idempotent_when_models_already_present() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "custom".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let mut config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        config.normalize_back_compat();
+        assert_eq!(
+            config.models.len(),
+            1,
+            "should not add a default role when models already present"
+        );
+        assert!(config.models.contains_key("custom"));
     }
 
     #[test]
@@ -831,6 +872,40 @@ mod tests {
         assert!(
             msg.contains("my-role") || msg.contains("zai"),
             "error should mention the role or backend"
+        );
+    }
+
+    #[test]
+    fn validate_errors_when_role_references_zai_with_empty_api_key() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "zai".to_string(),
+                model: "glm-5.1".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: Some(ZaiConfig {
+                api_key: "".to_string(), // empty key
+                model: "glm-5.1".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("api_key") || msg.contains("my-role") || msg.contains("zai"),
+            "error should mention key, role, or backend; got: {msg}"
         );
     }
 }

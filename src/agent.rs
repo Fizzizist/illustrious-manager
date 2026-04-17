@@ -122,6 +122,16 @@ impl Agent {
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
+    #[cfg(test)]
+    pub fn max_tool_iterations_for_test(&self) -> u32 {
+        self.max_tool_iterations
+    }
+
+    #[cfg(test)]
+    pub fn confirmation_mode_for_test(&self) -> &ConfirmationMode {
+        &self.confirmation_mode
+    }
+
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
     }
@@ -472,6 +482,18 @@ pub async fn spawn_agent(
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let selection = factory.for_role(role).await?;
+    spawn_agent_with_selection(selection, tool_config, session, tools).await
+}
+
+/// Core of `spawn_agent` — constructs an `Agent` from an already-resolved
+/// `BackendSelection`. Separated out so tests can inject a fake backend without
+/// going through real auth.
+pub async fn spawn_agent_with_selection(
+    selection: crate::backend::BackendSelection,
+    tool_config: &ToolsConfig,
+    session: Session,
+    tools: ToolRegistry,
+) -> anyhow::Result<Agent> {
     let request_config = RequestConfig {
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
@@ -1493,5 +1515,48 @@ mod tests {
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_produces_agent_with_role_model_and_tools_config() {
+        use crate::backend::BackendSelection;
+        use crate::config::ToolsConfig;
+        use crate::tools::ToolRegistry;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+
+        let selection = BackendSelection {
+            backend: Box::new(SequencedBackend::new(vec![])),
+            model: "claude-test-model".to_string(),
+        };
+
+        let mut tool_config = ToolsConfig::default();
+        tool_config.max_tool_iterations = 7;
+        tool_config.confirmation = ConfirmationMode::Never;
+
+        let registry = ToolRegistry::new();
+
+        let agent = super::spawn_agent_with_selection(selection, &tool_config, session, registry)
+            .await
+            .expect("spawn_agent_with_selection should succeed");
+
+        assert_eq!(
+            agent.model(),
+            "claude-test-model",
+            "agent model must match the role's model"
+        );
+        assert_eq!(
+            agent.max_tool_iterations_for_test(),
+            7,
+            "agent max_tool_iterations must reflect tool_config"
+        );
+        assert_eq!(
+            agent.confirmation_mode_for_test(),
+            &ConfirmationMode::Never,
+            "agent confirmation_mode must reflect tool_config"
+        );
     }
 }

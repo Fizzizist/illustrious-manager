@@ -222,7 +222,7 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.keep())
+            let session = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
             let agent = Arc::new(
@@ -260,7 +260,7 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.keep())
+            let session = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
             let agent = Arc::new(
@@ -297,7 +297,7 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.keep())
+            let session = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
             let agent = Arc::new(
@@ -334,7 +334,7 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.keep())
+            let session = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
             let agent = Arc::new(
@@ -371,7 +371,7 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.keep())
+            let session = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
             let agent = Arc::new(
