@@ -191,12 +191,21 @@ async fn main() -> Result<()> {
             json_schema_raw,
             max_schema_retries,
         } => {
+            // Inject schema instruction before logging so the log reflects what is actually sent.
+            let effective_prompt = if let Some(ref schema_raw) = json_schema_raw {
+                format!(
+                    "{}\n\nYou MUST output ONLY valid JSON conforming to this schema (no markdown, no explanation):\n{}",
+                    prompt, schema_raw
+                )
+            } else {
+                prompt
+            };
             if let Some(ref mut log) = logger {
-                log.log_user_input(&prompt)?;
+                log.log_user_input(&effective_prompt)?;
             }
             frontend::stdout::run(
                 agent.clone(),
-                prompt,
+                effective_prompt,
                 cli.output_format,
                 json_schema,
                 json_schema_raw,
