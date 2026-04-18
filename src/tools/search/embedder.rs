@@ -125,8 +125,15 @@ impl Embedder {
     }
 }
 
-fn detect_dimension(_session: &Session) -> usize {
-    DEFAULT_DIMENSION
+fn detect_dimension(session: &Session) -> usize {
+    session
+        .outputs()
+        .first()
+        .and_then(|outlet| outlet.dtype().tensor_shape())
+        .and_then(|shape| shape.last().copied())
+        .filter(|&d| d > 0)
+        .map(|d| d as usize)
+        .unwrap_or(DEFAULT_DIMENSION)
 }
 
 fn mean_pool_normalize(data: &[f32], seq_len: usize, dim: usize, mask: &[f32]) -> Vec<f32> {

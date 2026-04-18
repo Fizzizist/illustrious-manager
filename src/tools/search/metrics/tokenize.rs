@@ -1,7 +1,5 @@
 pub fn tokenize(text: &str) -> Vec<String> {
-    let _spaced = text.replace(|c: char| c.is_ascii_uppercase(), "");
-
-    // Simpler approach: split on common delimiters after camelCase expansion
+    // Split on common delimiters after camelCase expansion
     let camel_expanded = expand_camel_case(text);
 
     let parts: Vec<&str> = camel_expanded
