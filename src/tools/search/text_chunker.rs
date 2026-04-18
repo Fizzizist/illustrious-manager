@@ -77,6 +77,7 @@ const MIN_SPLIT_SIZE: usize = 500;
 const MAX_CHUNK_SIZE: usize = 8000;
 const MIN_PARAGRAPH_SIZE: usize = 200;
 
+#[allow(clippy::type_complexity)]
 static HEADING_RE: LazyLock<fn(&str) -> Option<(usize, &str)>> = LazyLock::new(|| {
     |line: &str| {
         let trimmed = line.trim_start();
@@ -411,8 +412,7 @@ fn chunk_toml(content: &str, file_path: &str) -> Vec<TextChunk> {
         }
     }
 
-    for i in 0..first_section_line {
-        let line = lines[i];
+    for (i, &line) in lines.iter().enumerate().take(first_section_line) {
         if line.trim().is_empty() || line.trim().starts_with('#') {
             continue;
         }
@@ -493,10 +493,10 @@ fn chunk_plaintext(content: &str, file_path: &str) -> Vec<TextChunk> {
     let mut group_end = paragraphs[0].1;
     let mut group_content = paragraphs[0].2.clone();
 
-    for i in 1..paragraphs.len() {
+    for para in paragraphs.iter().skip(1) {
         if group_content.len() < MIN_PARAGRAPH_SIZE {
-            group_end = paragraphs[i].1;
-            group_content = format!("{group_content}\n\n{}", paragraphs[i].2);
+            group_end = para.1;
+            group_content = format!("{group_content}\n\n{}", para.2);
         } else {
             chunks.push(TextChunk {
                 file_path: file_path.to_string(),
@@ -506,9 +506,9 @@ fn chunk_plaintext(content: &str, file_path: &str) -> Vec<TextChunk> {
                 name: extract_paragraph_name(&group_content),
                 content: group_content,
             });
-            group_start = paragraphs[i].0;
-            group_end = paragraphs[i].1;
-            group_content = paragraphs[i].2.clone();
+            group_start = para.0;
+            group_end = para.1;
+            group_content = para.2.clone();
         }
     }
 

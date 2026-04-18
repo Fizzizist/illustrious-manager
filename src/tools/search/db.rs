@@ -224,6 +224,7 @@ impl SearchDb {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_chunk(
         &mut self,
         file_id: i64,
