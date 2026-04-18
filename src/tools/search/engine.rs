@@ -19,11 +19,30 @@ const METRIC_CANDIDATE_LIMIT: usize = 1000;
 #[derive(Clone)]
 pub struct SearchEngine {
     project_root: PathBuf,
+    embedder_cache_dir: PathBuf,
 }
 
 impl SearchEngine {
     pub fn new(project_root: PathBuf) -> Self {
-        Self { project_root }
+        let embedder_cache_dir = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("illustrious-manager")
+            .join("models");
+        Self {
+            project_root,
+            embedder_cache_dir,
+        }
+    }
+
+    fn get_embedder(&self) -> Embedder {
+        Embedder::new(self.embedder_cache_dir.clone())
+    }
+
+    fn ensure_embedder(embedder: &mut Embedder) -> bool {
+        if embedder.initialize().is_err() {
+            return false;
+        }
+        true
     }
 
     pub fn search(
@@ -39,7 +58,9 @@ impl SearchEngine {
         let db_path = index_dir.join("search.db");
         let mut db = SearchDb::open(&db_path)?;
 
-        self.build_index(&mut db)?;
+        let mut embedder = self.get_embedder();
+
+        self.build_index(&mut db, &mut embedder)?;
 
         let mut all_chunks = db.get_all_chunks()?;
         if let Some(dir) = restrict_to_dir {
@@ -54,7 +75,8 @@ impl SearchEngine {
 
         let bm25_scores = metrics::compute_bm25_scores(&mut db, query, METRIC_CANDIDATE_LIMIT);
 
-        let cosine_scores = self.compute_vector_scores(&mut db, query, METRIC_CANDIDATE_LIMIT)?;
+        let cosine_scores =
+            self.compute_vector_scores(&mut db, &mut embedder, query, METRIC_CANDIDATE_LIMIT)?;
 
         let path_scores = metrics::compute_path_match_scores(query, &all_chunks);
 
@@ -122,7 +144,7 @@ impl SearchEngine {
         Ok(format_results(&results))
     }
 
-    fn build_index(&self, db: &mut SearchDb) -> Result<()> {
+    fn build_index(&self, db: &mut SearchDb, embedder: &mut Embedder) -> Result<()> {
         let scanned_files = scanner::scan_project(&self.project_root);
         let existing_files = db.get_all_files()?;
 
@@ -207,16 +229,26 @@ impl SearchEngine {
                     db.insert_symbol(chunk_id, name, &text_chunk.kind.to_string())?;
                 }
             }
+
+            let imports = extract_imports(&content, &scanned.file_type);
+            for target_path in imports {
+                let _ = db.insert_import(file_id, &target_path);
+            }
         }
 
         if !all_new_chunk_ids.is_empty() {
-            let _ = self.embed_chunks(db, &all_new_chunk_ids);
+            let _ = self.embed_chunks(db, embedder, &all_new_chunk_ids);
         }
 
         Ok(())
     }
 
-    fn embed_chunks(&self, db: &mut SearchDb, chunk_ids: &[i64]) -> Result<()> {
+    fn embed_chunks(
+        &self,
+        db: &mut SearchDb,
+        embedder: &mut Embedder,
+        chunk_ids: &[i64],
+    ) -> Result<()> {
         if chunk_ids.is_empty() {
             return Ok(());
         }
@@ -228,13 +260,7 @@ impl SearchEngine {
 
         let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
 
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("illustrious-manager")
-            .join("models");
-
-        let mut embedder = Embedder::new(cache_dir);
-        if embedder.initialize().is_err() {
+        if !Self::ensure_embedder(embedder) {
             return Ok(());
         }
 
@@ -256,16 +282,11 @@ impl SearchEngine {
     fn compute_vector_scores(
         &self,
         db: &mut SearchDb,
+        embedder: &mut Embedder,
         query: &str,
         limit: usize,
     ) -> Result<HashMap<i64, f64>> {
-        let cache_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("illustrious-manager")
-            .join("models");
-
-        let mut embedder = Embedder::new(cache_dir);
-        if embedder.initialize().is_err() {
+        if !Self::ensure_embedder(embedder) {
             return Ok(HashMap::new());
         }
 
@@ -354,6 +375,200 @@ impl SearchEngine {
     }
 }
 
+fn extract_imports(content: &str, file_type: &super::scanner::FileType) -> Vec<String> {
+    match file_type {
+        super::scanner::FileType::Rust => extract_rust_imports(content),
+        _ => Vec::new(),
+    }
+}
+
+fn extract_rust_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("use ") {
+            continue;
+        }
+        let path = trimmed
+            .strip_prefix("use ")
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(';')
+            .trim();
+
+        // Handle grouped imports: use foo::{bar, baz}
+        if let Some(brace_start) = path.find("::{") {
+            let base = &path[..brace_start];
+            let inner = &path[brace_start + 3..path.len().saturating_sub(1)];
+            let base_normalized = base.replace("::", "/");
+            for item in inner.split(',') {
+                let full = format!("{}/{}", base_normalized, item.trim());
+                let resolved = resolve_rust_path(&full);
+                imports.push(resolved);
+            }
+        } else {
+            let resolved = resolve_rust_path(&path.replace("::", "/"));
+            imports.push(resolved);
+        }
+    }
+    imports
+}
+
+fn resolve_rust_path(crate_path: &str) -> String {
+    let parts: Vec<&str> = crate_path.split('/').collect();
+    if parts.len() < 2 {
+        return crate_path.to_string();
+    }
+
+    match parts[0] {
+        "crate" => {
+            let rest = &parts[1..];
+            if rest.is_empty() {
+                return crate_path.to_string();
+            }
+            match rest[0] {
+                "super" | "self" => rest[1..].join("/"),
+                _ => rest.join("/"),
+            }
+        }
+        "super" | "self" => parts[1..].join("/"),
+        "std" => format!("lib/std/{}", parts[1..].join("/")),
+        "core" => format!("lib/core/{}", parts[1..].join("/")),
+        "alloc" => format!("lib/alloc/{}", parts[1..].join("/")),
+        _ => parts.join("/"),
+    }
+}
+
+#[cfg(feature = "ts-typescript")]
+fn extract_ts_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let import_path = if let Some(rest) = trimmed
+            .strip_prefix("import ")
+            .and_then(|s| s.strip_prefix("type "))
+            .or_else(|| trimmed.strip_prefix("import "))
+        {
+            rest.split("from").last().map(|s| {
+                s.trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+            })
+        } else if let Some(rest) = trimmed.strip_prefix("from ") {
+            Some(
+                rest.split("import")
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\''),
+            )
+        } else if trimmed.starts_with("require(") {
+            Some(
+                trimmed
+                    .trim_start_matches("require(")
+                    .trim_end_matches(')')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\''),
+            )
+        } else {
+            None
+        };
+
+        if let Some(path) = import_path {
+            if !path.is_empty() {
+                imports.push(path.to_string());
+            }
+        }
+    }
+    imports
+}
+
+#[cfg(feature = "ts-python")]
+fn extract_python_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") || trimmed.starts_with("from ") {
+            let module = if let Some(rest) = trimmed.strip_prefix("from ") {
+                rest.split(" import").next().unwrap_or("")
+            } else {
+                trimmed.strip_prefix("import ").unwrap_or("")
+            };
+            let module = module.trim().split(" as ").next().unwrap_or(module).trim();
+            if !module.is_empty() {
+                imports.push(module.replace('.', "/"));
+            }
+        }
+    }
+    imports
+}
+
+#[cfg(feature = "ts-go")]
+fn extract_go_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    let mut in_import_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "import (" {
+            in_import_block = true;
+            continue;
+        }
+        if in_import_block && trimmed == ")" {
+            in_import_block = false;
+            continue;
+        }
+        if in_import_block {
+            let path = trimmed
+                .trim_matches('"')
+                .split("//")
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !path.is_empty() {
+                imports.push(path.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("import ") {
+            let path = rest
+                .trim()
+                .trim_matches('"')
+                .split("//")
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !path.is_empty() {
+                imports.push(path.to_string());
+            }
+        }
+    }
+    imports
+}
+
+#[cfg(feature = "ts-java")]
+fn extract_java_imports(content: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("import ") {
+            let path = trimmed
+                .strip_prefix("import ")
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
+            if !path.is_empty() {
+                imports.push(path.replace('.', "/"));
+            }
+        }
+    }
+    imports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +609,71 @@ mod tests {
         let engine = SearchEngine::new(temp.path().to_path_buf());
         let result = engine.search("main", 20, Some("src")).expect("search");
         assert!(!result.contains("main.rs") || result.contains("No results"));
+    }
+
+    #[test]
+    fn extract_rust_imports_simple() {
+        let code = "use std::collections::HashMap;\nuse crate::tools::search::db;\n";
+        let imports = extract_rust_imports(code);
+        assert!(imports.contains(&"lib/std/collections/HashMap".to_string()));
+        assert!(imports.contains(&"tools/search/db".to_string()));
+    }
+
+    #[test]
+    fn extract_rust_imports_grouped() {
+        let code = "use std::collections::{HashMap, BTreeMap};\n";
+        let imports = extract_rust_imports(code);
+        assert!(imports.contains(&"lib/std/collections/HashMap".to_string()));
+        assert!(imports.contains(&"lib/std/collections/BTreeMap".to_string()));
+    }
+
+    #[test]
+    fn extract_rust_imports_ignores_non_use_lines() {
+        let code = "fn main() {}\n// use something\nconst X: i32 = 1;\n";
+        let imports = extract_rust_imports(code);
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn extract_rust_imports_super_path() {
+        let code = "use super::engine::SearchEngine;\n";
+        let imports = extract_rust_imports(code);
+        assert!(imports.contains(&"engine/SearchEngine".to_string()));
+    }
+
+    #[test]
+    fn extract_rust_imports_crate_self() {
+        let code = "use crate::config::SearchConfig;\n";
+        let imports = extract_rust_imports(code);
+        assert!(imports.contains(&"config/SearchConfig".to_string()));
+    }
+
+    #[test]
+    fn extract_rust_imports_empty() {
+        let imports = extract_rust_imports("");
+        assert!(imports.is_empty());
+    }
+
+    #[test]
+    fn rebuild_creates_fresh_index() {
+        let temp = TempDir::new().expect("temp dir");
+        fs::write(temp.path().join("a.rs"), "fn first() {}").expect("write");
+
+        let engine = SearchEngine::new(temp.path().to_path_buf());
+        let result1 = engine.search("first", 20, None).expect("search");
+        assert!(result1.contains("a.rs"));
+
+        // Modify the file
+        fs::write(temp.path().join("a.rs"), "fn renamed() {}").expect("write");
+
+        // Add another file
+        fs::write(temp.path().join("b.rs"), "fn second() {}").expect("write");
+
+        // Delete the db to simulate rebuild
+        let db_path = temp.path().join(".search-index").join("search.db");
+        let _ = std::fs::remove_file(&db_path);
+
+        let result2 = engine.search("second", 20, None).expect("search");
+        assert!(result2.contains("b.rs"));
     }
 }

@@ -66,6 +66,21 @@ impl SearchTool {
             .clone()
             .expect("engine should be Some after initialization")
     }
+
+    fn delete_index_db(&self) {
+        let db_path = self.sandbox_root.join(".search-index").join("search.db");
+        let _ = std::fs::remove_file(&db_path);
+        let wal_path = self
+            .sandbox_root
+            .join(".search-index")
+            .join("search.db-wal");
+        let _ = std::fs::remove_file(&wal_path);
+        let shm_path = self
+            .sandbox_root
+            .join(".search-index")
+            .join("search.db-shm");
+        let _ = std::fs::remove_file(&shm_path);
+    }
 }
 
 impl Tool for SearchTool {
@@ -93,6 +108,7 @@ impl Tool for SearchTool {
         let rebuild = input["rebuild"].as_bool().unwrap_or(false);
 
         if rebuild {
+            self.delete_index_db();
             let mut guard = self.engine.lock().expect("SearchTool engine lock poisoned");
             *guard = None;
         }
@@ -173,5 +189,20 @@ mod tests {
         registry.register(Box::new(tool)).expect("should register");
         let def = registry.lookup("search").expect("should find search tool");
         assert_eq!(def.name(), "search");
+    }
+
+    #[test]
+    fn rebuild_deletes_index_db() {
+        let temp = TempDir::new().expect("temp dir");
+        let index_dir = temp.path().join(".search-index");
+        std::fs::create_dir_all(&index_dir).expect("dir");
+        std::fs::write(index_dir.join("search.db"), "fake db content").expect("write");
+        std::fs::write(index_dir.join("search.db-wal"), "wal").expect("write");
+
+        let tool = SearchTool::new(temp.path().to_path_buf());
+        tool.delete_index_db();
+
+        assert!(!index_dir.join("search.db").exists());
+        assert!(!index_dir.join("search.db-wal").exists());
     }
 }
