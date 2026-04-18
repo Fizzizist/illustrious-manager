@@ -175,10 +175,11 @@ fn download_model(model_name: &str, target_dir: &Path) -> Result<()> {
 
         eprintln!("Downloading {url}...");
 
-        let response = ureq::get(&url).call().context("HTTP request failed")?;
-        let mut reader = response.into_body().into_reader();
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut buf).context("Reading response body")?;
+        let response = reqwest::blocking::get(&url)
+            .with_context(|| format!("HTTP request to {url}"))?
+            .error_for_status()
+            .context("HTTP request failed")?;
+        let buf = response.bytes().context("Reading response body")?;
         std::fs::write(&dest, &buf).with_context(|| format!("Writing {}", dest.display()))?;
     }
 
