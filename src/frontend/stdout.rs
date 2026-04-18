@@ -201,9 +201,10 @@ async fn collect_response<R: BufRead>(
 // singular output rather than concatenated reasoning + final answer.
 //
 // When a JSON schema is provided, the response is validated against it. On
-// failure a reprompt is sent through the agent, up to `max_schema_retries` times.
-// On exhaustion `is_error: true` is emitted. On success `structured_output`
-// contains the parsed JSON value.
+// success the `result` key contains the parsed JSON value directly (not a
+// string). On failure a reprompt is sent through the agent, up to
+// `max_schema_retries` times. On exhaustion `is_error: true` is emitted with
+// the validation error as a string in `result`.
 #[allow(clippy::too_many_arguments)]
 async fn run_json<W: Write, R: BufRead>(
     agent: Arc<Agent>,
@@ -219,7 +220,7 @@ async fn run_json<W: Write, R: BufRead>(
     let mut stream = agent.send(initial_prompt, Some(confirm_rx)).await?;
     let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
 
-    let (result_text, is_error, structured_output) = apply_schema_retry(
+    let (result, is_error) = apply_schema_retry(
         initial,
         json_schema.as_ref(),
         max_schema_retries,
@@ -230,24 +231,16 @@ async fn run_json<W: Write, R: BufRead>(
     )
     .await?;
 
-    let output = if let Some(ref sv) = structured_output {
-        serde_json::json!({
-            "is_error": is_error,
-            "result": result_text,
-            "structured_output": sv,
-        })
-    } else {
-        serde_json::json!({
-            "is_error": is_error,
-            "result": result_text,
-        })
-    };
+    let output = serde_json::json!({
+        "is_error": is_error,
+        "result": result,
+    });
 
     writeln!(writer, "{}", output)?;
     writer.flush()?;
 
     if is_error {
-        anyhow::bail!("LLM error: {}", result_text);
+        anyhow::bail!("LLM error: {}", result);
     }
 
     Ok(())
@@ -255,9 +248,11 @@ async fn run_json<W: Write, R: BufRead>(
 
 // Drives the schema-validation + reprompt retry loop.
 //
-// `initial` is the `(text, is_error)` from the first LLM call. On validation
-// failure, calls `agent.send` with a reprompt and collects the next response,
-// repeating up to `max_schema_retries` times.
+// `initial` is the `(text, is_error)` from the first LLM call. When no schema
+// is provided, returns `(Value::String(text), is_error)`. When a schema is
+// provided and validation succeeds, returns the parsed JSON value directly as
+// `result`. On validation failure, reprompts up to `max_schema_retries` times.
+// On exhaustion, returns `(Value::String(validation_err), true)`.
 //
 // Extracted so that tests can call it directly with a fake agent that returns
 // canned responses, exercising the same production code path.
@@ -270,9 +265,8 @@ async fn apply_schema_retry<R: BufRead>(
     is_tty: bool,
     stdin: &mut R,
     logger: &mut Option<&mut Logger>,
-) -> Result<(String, bool, Option<serde_json::Value>)> {
+) -> Result<(serde_json::Value, bool)> {
     let (mut result_text, mut is_error) = initial;
-    let mut structured_output: Option<serde_json::Value> = None;
 
     if !is_error && let Some(schema) = json_schema {
         let mut retries_left = max_schema_retries;
@@ -280,8 +274,7 @@ async fn apply_schema_retry<R: BufRead>(
         loop {
             match validate_json_output(&result_text, &schema.validator) {
                 Ok(parsed) => {
-                    structured_output = Some(parsed);
-                    break;
+                    return Ok((parsed, false));
                 }
                 Err(validation_err) => {
                     if retries_left == 0 {
@@ -309,7 +302,7 @@ async fn apply_schema_retry<R: BufRead>(
         }
     }
 
-    Ok((result_text, is_error, structured_output))
+    Ok((serde_json::Value::String(result_text), is_error))
 }
 
 fn validate_json_output(
@@ -771,7 +764,7 @@ mod tests {
         schema_json: &str,
         max_retries: u32,
         responses: Vec<Vec<AgentEvent>>,
-    ) -> Result<(String, bool, Option<serde_json::Value>)> {
+    ) -> Result<(serde_json::Value, bool)> {
         let schema_val: serde_json::Value =
             serde_json::from_str(schema_json).expect("test schema valid JSON");
         let validator = jsonschema::validator_for(&schema_val).expect("test schema compiles");
@@ -809,21 +802,19 @@ mod tests {
         .await
     }
     #[tokio::test]
-    async fn schema_valid_json_on_first_attempt_populates_structured_output() {
-        let (text, is_error, structured_output) =
+    async fn schema_valid_json_on_first_attempt_returns_parsed_value_as_result() {
+        let (result, is_error) =
             run_apply_schema_retry(PERSON_SCHEMA, 3, vec![token_events(r#"{"name":"Alice"}"#)])
                 .await
                 .expect("should succeed");
 
         assert!(!is_error);
-        assert_eq!(text, r#"{"name":"Alice"}"#);
-        assert!(structured_output.is_some());
-        assert_eq!(structured_output.expect("some")["name"], "Alice");
+        assert_eq!(result["name"], "Alice");
     }
 
     #[tokio::test]
     async fn schema_invalid_json_on_first_attempt_reprompts_and_succeeds_on_second() {
-        let (text, is_error, structured_output) = run_apply_schema_retry(
+        let (result, is_error) = run_apply_schema_retry(
             PERSON_SCHEMA,
             3,
             vec![
@@ -835,14 +826,12 @@ mod tests {
         .expect("should succeed");
 
         assert!(!is_error);
-        assert_eq!(text, r#"{"name":"Bob"}"#);
-        assert!(structured_output.is_some());
-        assert_eq!(structured_output.expect("some")["name"], "Bob");
+        assert_eq!(result["name"], "Bob");
     }
 
     #[tokio::test]
     async fn schema_invalid_json_exhausts_retries_and_sets_is_error() {
-        let (text, is_error, structured_output) = run_apply_schema_retry(
+        let (result, is_error) = run_apply_schema_retry(
             PERSON_SCHEMA,
             2,
             vec![
@@ -856,15 +845,17 @@ mod tests {
 
         assert!(is_error, "is_error must be true after exhausting retries");
         assert!(
-            text.contains("not valid JSON"),
-            "result should contain validation error, got: {text}"
+            result
+                .as_str()
+                .expect("result should be a string on error")
+                .contains("not valid JSON"),
+            "result should contain validation error, got: {result}"
         );
-        assert!(structured_output.is_none());
     }
 
     #[tokio::test]
     async fn schema_parseable_but_schema_invalid_json_triggers_retry() {
-        let (text, is_error, structured_output) = run_apply_schema_retry(
+        let (result, is_error) = run_apply_schema_retry(
             PERSON_SCHEMA,
             3,
             vec![
@@ -876,21 +867,23 @@ mod tests {
         .expect("should succeed");
 
         assert!(!is_error);
-        assert_eq!(text, r#"{"name": "Carol"}"#);
-        assert!(structured_output.is_some());
-        assert_eq!(structured_output.expect("some")["name"], "Carol");
+        assert_eq!(result["name"], "Carol");
     }
 
     #[tokio::test]
     async fn schema_max_retries_zero_validates_once_and_fails() {
-        let (text, is_error, structured_output) =
+        let (result, is_error) =
             run_apply_schema_retry(PERSON_SCHEMA, 0, vec![token_events("not json")])
                 .await
                 .expect("orchestration should not propagate error");
 
         assert!(is_error);
-        assert!(text.contains("not valid JSON"));
-        assert!(structured_output.is_none());
+        assert!(
+            result
+                .as_str()
+                .expect("result should be a string on error")
+                .contains("not valid JSON")
+        );
     }
 
     #[tokio::test]
@@ -917,7 +910,7 @@ mod tests {
         let initial = ("stream error".to_string(), true);
         let agent = make_sequenced_agent(vec![]).await;
 
-        let (text, is_error, structured_output) = apply_schema_retry(
+        let (result, is_error) = apply_schema_retry(
             initial,
             Some(&json_schema),
             3,
@@ -930,7 +923,6 @@ mod tests {
         .expect("should not propagate");
 
         assert!(is_error);
-        assert_eq!(text, "stream error");
-        assert!(structured_output.is_none());
+        assert_eq!(result, "stream error");
     }
 }
