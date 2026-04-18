@@ -22,6 +22,7 @@ use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
+use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
 use tools::write_file::WriteFileTool;
 use types::{ConfirmationResponse, RequestConfig};
@@ -113,6 +114,10 @@ async fn main() -> Result<()> {
     let sandbox_policy = SandboxPolicy::new(std::path::Path::new(&app_config.tools.sandbox_root));
     registry.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
+
+    registry.register(Box::new(SearchTool::new(std::path::PathBuf::from(
+        &app_config.tools.sandbox_root,
+    ))))?;
 
     let skills = discover_skills_from_env();
     registry.register(Box::new(SkillTool::new(&skills)))?;
