@@ -1,17 +1,5 @@
-pub mod chunker;
-pub mod db;
-pub mod embedder;
-pub mod engine;
-pub mod format;
-pub mod metrics;
-pub mod query_classifier;
-pub mod ranker;
-pub mod scanner;
-pub mod text_chunker;
-pub mod ts_chunker;
-pub mod vector_store;
-
 use crate::types::ContentBlock;
+use search_semantically::SearchEngine;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -20,7 +8,7 @@ use super::{Tool, ToolError, ToolResult};
 
 pub struct SearchTool {
     sandbox_root: PathBuf,
-    engine: Arc<Mutex<Option<engine::SearchEngine>>>,
+    engine: Arc<Mutex<Option<SearchEngine>>>,
     schema: Value,
 }
 
@@ -57,10 +45,10 @@ impl SearchTool {
         }
     }
 
-    fn get_or_create_engine(&self) -> engine::SearchEngine {
+    fn get_or_create_engine(&self) -> SearchEngine {
         let mut guard = self.engine.lock().expect("SearchTool engine lock poisoned");
         if guard.is_none() {
-            *guard = Some(engine::SearchEngine::new(self.sandbox_root.clone()));
+            *guard = Some(SearchEngine::new(self.sandbox_root.clone()));
         }
         guard
             .clone()

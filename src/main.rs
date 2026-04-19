@@ -21,7 +21,7 @@ use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
-use tools::search::SearchTool;
+use tools::search_tool::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
 use tools::write_file::WriteFileTool;
 use types::RequestConfig;
