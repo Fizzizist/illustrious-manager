@@ -2,13 +2,11 @@ use crate::types::ContentBlock;
 use search_semantically::SearchEngine;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 
 use super::{Tool, ToolError, ToolResult};
 
 pub struct SearchTool {
     sandbox_root: PathBuf,
-    engine: Arc<Mutex<Option<SearchEngine>>>,
     schema: Value,
 }
 
@@ -40,34 +38,15 @@ impl SearchTool {
         });
         Self {
             sandbox_root,
-            engine: Arc::new(Mutex::new(None)),
             schema,
         }
     }
 
-    fn get_or_create_engine(&self) -> SearchEngine {
-        let mut guard = self.engine.lock().expect("SearchTool engine lock poisoned");
-        if guard.is_none() {
-            *guard = Some(SearchEngine::new(self.sandbox_root.clone()));
-        }
-        guard
-            .clone()
-            .expect("engine should be Some after initialization")
-    }
-
     fn delete_index_db(&self) {
-        let db_path = self.sandbox_root.join(".search-index").join("search.db");
-        let _ = std::fs::remove_file(&db_path);
-        let wal_path = self
-            .sandbox_root
-            .join(".search-index")
-            .join("search.db-wal");
-        let _ = std::fs::remove_file(&wal_path);
-        let shm_path = self
-            .sandbox_root
-            .join(".search-index")
-            .join("search.db-shm");
-        let _ = std::fs::remove_file(&shm_path);
+        for suffix in &["search.db", "search.db-wal", "search.db-shm"] {
+            let path = self.sandbox_root.join(".search-index").join(suffix);
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 
@@ -97,12 +76,10 @@ impl Tool for SearchTool {
 
         if rebuild {
             self.delete_index_db();
-            let mut guard = self.engine.lock().expect("SearchTool engine lock poisoned");
-            *guard = None;
         }
 
-        let eng = self.get_or_create_engine();
-        let result = eng.search(query, limit, restrict_to_dir.as_deref());
+        let engine = SearchEngine::new(self.sandbox_root.clone());
+        let result = engine.search(query, limit, restrict_to_dir.as_deref());
 
         match result {
             Ok(output) => Ok(ToolResult {
@@ -192,5 +169,78 @@ mod tests {
 
         assert!(!index_dir.join("search.db").exists());
         assert!(!index_dir.join("search.db-wal").exists());
+    }
+
+    #[test]
+    fn execute_returns_results_for_populated_project() {
+        let temp = TempDir::new().expect("temp dir");
+        std::fs::write(
+            temp.path().join("main.rs"),
+            "fn calculate_total(prices: &[f64]) -> f64 {\n    prices.iter().sum()\n}\n",
+        )
+        .expect("write");
+
+        let tool = SearchTool::new(temp.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "query": "calculate_total"
+            }))
+            .expect("execute should succeed");
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.len() == 1,
+            "expected exactly one content block"
+        );
+        match &result.content[0] {
+            ContentBlock::Text(text) => {
+                assert!(
+                    text.contains("main.rs"),
+                    "result should reference main.rs, got: {text}"
+                );
+            }
+            _ => panic!("expected Text content block"),
+        }
+    }
+
+    #[test]
+    fn execute_with_rebuild_fresh_search() {
+        let temp = TempDir::new().expect("temp dir");
+        std::fs::write(
+            temp.path().join("lib.rs"),
+            "pub fn process_data(input: &str) -> String {\n    input.to_uppercase()\n}\n",
+        )
+        .expect("write");
+
+        let tool = SearchTool::new(temp.path().to_path_buf());
+
+        let result = tool
+            .execute(serde_json::json!({
+                "query": "process_data",
+                "rebuild": true
+            }))
+            .expect("execute with rebuild should succeed");
+
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn execute_empty_project_returns_no_results() {
+        let temp = TempDir::new().expect("temp dir");
+
+        let tool = SearchTool::new(temp.path().to_path_buf());
+        let result = tool
+            .execute(serde_json::json!({
+                "query": "anything"
+            }))
+            .expect("execute should succeed");
+
+        assert!(!result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => {
+                assert_eq!(text, "No results found.");
+            }
+            _ => panic!("expected Text content block"),
+        }
     }
 }
