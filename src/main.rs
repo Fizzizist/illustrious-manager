@@ -16,16 +16,17 @@ use std::time::SystemTime;
 
 use agent::spawn_agent;
 use backend::BackendFactory;
-use futures::channel::mpsc;
 use logging::Logger;
 use session::Session;
 use tools::ToolRegistry;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
+use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
 use tools::write_file::WriteFileTool;
-use types::ConfirmationResponse;
+
+const DEFAULT_MAX_SCHEMA_RETRIES: u32 = 3;
 
 #[derive(Parser)]
 #[command(name = "illustrious-manager")]
@@ -49,6 +50,14 @@ struct Cli {
     output_format: frontend::stdout::OutputFormat,
 
     #[arg(long)]
+    json_schema: Option<String>,
+
+    /// Maximum number of reprompt attempts when schema validation fails.
+    /// 0 means validate once and fail immediately with no reprompts.
+    #[arg(long, default_value_t = DEFAULT_MAX_SCHEMA_RETRIES)]
+    max_schema_retries: u32,
+
+    #[arg(long)]
     config: Option<PathBuf>,
 
     #[arg(long)]
@@ -60,8 +69,14 @@ struct Cli {
 
 #[derive(Debug)]
 enum Mode {
-    Repl { initial_prompt: Option<String> },
-    SingleShot { prompt: String },
+    Repl {
+        initial_prompt: Option<String>,
+    },
+    SingleShot {
+        prompt: String,
+        json_schema: Option<frontend::stdout::JsonSchema>,
+        max_schema_retries: u32,
+    },
 }
 
 fn determine_mode(cli: &Cli) -> Result<Mode> {
@@ -71,10 +86,34 @@ fn determine_mode(cli: &Cli) -> Result<Mode> {
                 "--single-shot requires a prompt argument.\n\nUsage: illustrious-manager --single-shot \"your prompt here\""
             )
         })?;
-        Ok(Mode::SingleShot { prompt })
+
+        let json_schema = if let Some(ref schema_str) = cli.json_schema {
+            if cli.output_format != frontend::stdout::OutputFormat::Json {
+                anyhow::bail!("--json-schema requires --output-format json");
+            }
+            let schema_value: serde_json::Value = serde_json::from_str(schema_str)
+                .map_err(|e| anyhow::anyhow!("--json-schema is not valid JSON: {}", e))?;
+            let validator = jsonschema::validator_for(&schema_value)
+                .map_err(|e| anyhow::anyhow!("--json-schema failed to compile: {}", e))?;
+            Some(frontend::stdout::JsonSchema {
+                validator,
+                raw: schema_str.clone(),
+            })
+        } else {
+            None
+        };
+
+        Ok(Mode::SingleShot {
+            prompt,
+            json_schema,
+            max_schema_retries: cli.max_schema_retries,
+        })
     } else {
         if cli.output_format != frontend::stdout::OutputFormat::Text {
             anyhow::bail!("--output-format requires --single-shot");
+        }
+        if cli.json_schema.is_some() {
+            anyhow::bail!("--json-schema requires --single-shot");
         }
         Ok(Mode::Repl {
             initial_prompt: cli.prompt.clone(),
@@ -113,6 +152,10 @@ async fn main() -> Result<()> {
     registry.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
 
+    registry.register(Box::new(SearchTool::new(std::path::PathBuf::from(
+        &app_config.tools.sandbox_root,
+    ))))?;
+
     let skills = discover_skills_from_env();
     registry.register(Box::new(SkillTool::new(&skills)))?;
 
@@ -140,13 +183,32 @@ async fn main() -> Result<()> {
     }
 
     match mode {
-        Mode::SingleShot { prompt } => {
+        Mode::SingleShot {
+            prompt,
+            json_schema,
+            max_schema_retries,
+        } => {
+            // Inject schema instruction before logging so the log reflects what is actually sent.
+            let effective_prompt = if let Some(ref schema) = json_schema {
+                format!(
+                    "{}\n\nYou MUST output ONLY valid JSON conforming to this schema (no markdown, no explanation):\n{}",
+                    prompt, schema.raw
+                )
+            } else {
+                prompt
+            };
             if let Some(ref mut log) = logger {
-                log.log_user_input(&prompt)?;
+                log.log_user_input(&effective_prompt)?;
             }
-            let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
-            let stream = agent.send(prompt, Some(confirm_rx)).await?;
-            frontend::stdout::run(stream, confirm_tx, cli.output_format, logger.as_mut()).await?;
+            frontend::stdout::run(
+                agent.clone(),
+                effective_prompt,
+                cli.output_format,
+                json_schema,
+                max_schema_retries,
+                logger.as_mut(),
+            )
+            .await?;
         }
         Mode::Repl { initial_prompt } => {
             frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await?;
@@ -186,7 +248,7 @@ mod tests {
     fn single_shot_with_prompt_gives_single_shot_mode() {
         let cli = Cli::try_parse_from(["illustrious-manager", "--single-shot", "hello"]).unwrap();
         match determine_mode(&cli).unwrap() {
-            Mode::SingleShot { prompt } => assert_eq!(prompt, "hello"),
+            Mode::SingleShot { prompt, .. } => assert_eq!(prompt, "hello"),
             Mode::Repl { .. } => panic!("Expected SingleShot mode"),
         }
     }
@@ -270,6 +332,143 @@ mod tests {
         assert!(
             err.contains("--output-format"),
             "Error should mention --output-format"
+        );
+    }
+
+    #[test]
+    fn json_schema_is_none_when_not_provided() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "hello",
+        ])
+        .unwrap();
+        assert!(cli.json_schema.is_none());
+    }
+
+    #[test]
+    fn max_schema_retries_defaults_to_three() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert_eq!(cli.max_schema_retries, DEFAULT_MAX_SCHEMA_RETRIES);
+    }
+
+    #[test]
+    fn max_schema_retries_is_overridden_when_provided() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "--max-schema-retries",
+            "5",
+            "hello",
+        ])
+        .unwrap();
+        assert_eq!(cli.max_schema_retries, 5);
+    }
+
+    #[test]
+    fn json_schema_without_single_shot_errors() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--json-schema",
+            r#"{"type":"object"}"#,
+            "hello",
+        ])
+        .unwrap();
+        let err = determine_mode(&cli).unwrap_err().to_string();
+        assert!(
+            err.contains("--json-schema"),
+            "error should mention --json-schema"
+        );
+    }
+
+    #[test]
+    fn json_schema_without_output_format_json_errors() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--json-schema",
+            r#"{"type":"object"}"#,
+            "hello",
+        ])
+        .unwrap();
+        let err = determine_mode(&cli).unwrap_err().to_string();
+        assert!(
+            err.contains("--json-schema"),
+            "error should mention --json-schema"
+        );
+    }
+
+    #[test]
+    fn json_schema_with_single_shot_and_json_format_succeeds() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "--json-schema",
+            r#"{"type":"object"}"#,
+            "hello",
+        ])
+        .unwrap();
+        let mode = determine_mode(&cli).unwrap();
+        match mode {
+            Mode::SingleShot {
+                prompt,
+                json_schema,
+                ..
+            } => {
+                assert_eq!(prompt, "hello");
+                assert!(json_schema.is_some());
+                assert_eq!(
+                    json_schema.expect("some").raw.as_str(),
+                    r#"{"type":"object"}"#
+                );
+            }
+            Mode::Repl { .. } => panic!("Expected SingleShot mode"),
+        }
+    }
+
+    #[test]
+    fn json_schema_non_json_value_errors() {
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "--json-schema",
+            "not valid json",
+            "hello",
+        ])
+        .unwrap();
+        let err = determine_mode(&cli).unwrap_err().to_string();
+        assert!(
+            err.contains("not valid JSON"),
+            "error should describe invalid JSON"
+        );
+    }
+
+    #[test]
+    fn json_schema_invalid_schema_errors() {
+        // Valid JSON but not a valid JSON Schema (unknown keyword that causes compilation failure).
+        // Use a type value that jsonschema rejects.
+        let cli = Cli::try_parse_from([
+            "illustrious-manager",
+            "--single-shot",
+            "--output-format",
+            "json",
+            "--json-schema",
+            r#"{"type": "notavalidtype"}"#,
+            "hello",
+        ])
+        .unwrap();
+        let err = determine_mode(&cli).unwrap_err().to_string();
+        assert!(
+            err.contains("compile"),
+            "error should mention compilation failure"
         );
     }
 }

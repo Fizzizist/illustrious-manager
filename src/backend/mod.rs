@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod ndjson;
+pub mod ollama;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
@@ -73,6 +75,18 @@ impl BackendFactory {
                     model: resolved.model,
                 })
             }
+            "ollama" => {
+                let ollama_config = self.config.ollama.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses ollama backend but no [ollama] section is configured."
+                    )
+                })?;
+                let backend = ollama::OllamaBackend::new(ollama_config)?;
+                Ok(BackendSelection {
+                    backend: Box::new(backend),
+                    model: resolved.model,
+                })
+            }
             other => anyhow::bail!("Unknown backend '{other}' for role '{role}'"),
         }
     }
@@ -87,8 +101,6 @@ impl BackendFactory {
         config: AppConfig,
         selection: BackendSelection,
     ) -> (Self, BackendSelection) {
-        // We return the selection directly for the caller to use; the factory
-        // itself is handed back for any assertion work.
         (Self::new(config), selection)
     }
 
@@ -202,6 +214,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -247,6 +260,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,

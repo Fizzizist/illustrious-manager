@@ -49,15 +49,17 @@ cargo fmt                            # Format
 
 Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Two implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing) and `zai` (z.ai). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Three implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing), `zai` (z.ai), and `ollama` (Ollama Cloud/self-hosted via NDJSON, with `ndjson.rs` for NDJSON stream parsing). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
 2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
-3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
+3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name), `search` (semantic code search). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
 
 4. **Frontend Layer** (`src/frontend/`) — Two frontends consuming the same AgentEvent stream:
    - `stdout.rs`: Single-shot mode, streams tokens to stdout, pipe-friendly
    - `tui/`: Ratatui interactive REPL with vim-style input (`input_area.rs`), scrollable conversation display (`conversation_area.rs`), syntax-highlighted diffs for file tools (`diff.rs` using `syntect` + `similar`), and a session picker overlay (`session_picker.rs`)
+
+**Semantic Search** (`src/tools/search.rs`) — Thin wrapper around the `search-semantically` crate. Exposes semantic code search as a tool with support for natural language queries, identifier names, and file path patterns. The `search-semantically` crate provides tree-sitter AST chunking, ONNX Runtime embeddings (`all-MiniLM-L6-v2`), 6-signal POEM ranking (BM25/FTS5, cosine similarity, path match, symbol match, import graph, git recency), and incremental indexing via SQLite at `<project_root>/.search-index/search.db`.
 
 **Session persistence** (`src/session.rs`) — Each session is a SQLite database (via `turso`) identified by a UUIDv7. Conversations are persisted per-message. Sessions can be listed, resumed, and deleted. The session picker in the TUI allows browsing and switching sessions.
 
@@ -72,7 +74,7 @@ Key types live in `src/types.rs`. Configuration loading and CLI merge logic is i
 Config file at `~/.config/illustrious-manager/config.toml` (auto-created on first run):
 
 ```toml
-backend = "vertex"                    # "vertex" or "zai"
+backend = "vertex"                    # "vertex", "zai", or "ollama"
 # sessions_dir = "/path/to/sessions" # defaults to ~/.config/illustrious-manager/sessions
 
 [vertex]
@@ -83,6 +85,11 @@ model = "claude-sonnet-4-20250514"
 [zai]
 api_key = ""                          # z.ai API key (required for zai backend)
 model = "glm-5.1"
+
+[ollama]
+api_key = ""                          # Ollama API key (required for ollama backend)
+model = "gpt-oss:120b"
+# base_url = "https://ollama.com/api/chat"  # change for self-hosted Ollama
 
 # [tools]
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never
