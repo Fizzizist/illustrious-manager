@@ -325,6 +325,7 @@ pub fn handle_agent_event(
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
+            app.git_branch = status_line::detect_git_branch();
         }
         AgentEvent::Error(msg) => {
             app.conversation
@@ -333,6 +334,7 @@ pub fn handle_agent_event(
             app.confirmation_tx = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
+            app.git_branch = status_line::detect_git_branch();
         }
         AgentEvent::ToolUseReceived { name, input, .. } => {
             if !app.current_response.is_empty() {
@@ -857,6 +859,29 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let event = AgentEvent::ResponseComplete("test".to_string());
         handle_agent_event(&mut app, event, None).expect("should not error without logger");
+    }
+
+    #[test]
+    fn response_complete_refreshes_git_branch() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.git_branch = Some("old-branch".to_string());
+        let event = AgentEvent::ResponseComplete("done".to_string());
+        handle_agent_event(&mut app, event, None).expect("handle event");
+        let current = status_line::detect_git_branch();
+        assert_eq!(
+            app.git_branch, current,
+            "ResponseComplete should refresh git branch"
+        );
+    }
+
+    #[test]
+    fn error_event_refreshes_git_branch() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.git_branch = Some("old-branch".to_string());
+        let event = AgentEvent::Error("oops".to_string());
+        handle_agent_event(&mut app, event, None).expect("handle event");
+        let current = status_line::detect_git_branch();
+        assert_eq!(app.git_branch, current, "Error should refresh git branch");
     }
 
     #[test]
