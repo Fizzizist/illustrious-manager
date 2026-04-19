@@ -1,9 +1,10 @@
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
+use tokio::sync::OnceCell;
 
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
@@ -133,6 +134,81 @@ impl VertexSseParser {
         }
 
         Ok(())
+    }
+}
+
+type AuthProvider = Arc<dyn gcp_auth::TokenProvider>;
+type AuthCell = Arc<OnceCell<AuthProvider>>;
+
+/// Cache that shares expensive GCP auth state across Vertex AI backends that
+/// target the same `(project, region)` pair.
+///
+/// Each key maps to a `OnceCell` initialised at most once, even under
+/// concurrent callers.  This avoids the TOCTOU race of the
+/// "read-lock / drop / await / write-lock" pattern.
+pub struct VertexAuthCache {
+    cells: Mutex<HashMap<(String, String), AuthCell>>,
+}
+
+impl Default for VertexAuthCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VertexAuthCache {
+    pub fn new() -> Self {
+        Self {
+            cells: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Returns the auth provider for `(project, region)`, initialising it
+    /// exactly once — safe under concurrent callers because
+    /// `OnceCell::get_or_try_init` serialises initialisation.
+    pub async fn get_or_init(&self, project: String, region: String) -> Result<AuthProvider> {
+        let key = (project, region);
+        let cell: AuthCell = {
+            let mut cache = self.cells.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::clone(
+                cache
+                    .entry(key)
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        let provider = cell
+            .get_or_try_init(|| async {
+                gcp_auth::provider().await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to initialize GCP authentication. \
+                         Run: gcloud auth application-default login\n{e}"
+                    )
+                })
+            })
+            .await?;
+        Ok(Arc::clone(provider))
+    }
+
+    /// Pre-seed the cache entry for `(project, region)` with a known provider.
+    /// Intended for tests only.
+    #[cfg(test)]
+    pub fn seed(
+        &self,
+        project: &str,
+        region: &str,
+        provider: AuthProvider,
+    ) -> Arc<OnceCell<AuthProvider>> {
+        let key = (project.to_string(), region.to_string());
+        let mut cache = self.cells.lock().expect("lock");
+        let cell = Arc::clone(
+            cache
+                .entry(key)
+                .or_insert_with(|| Arc::new(OnceCell::new())),
+        );
+        cell.set(provider)
+            .ok()
+            .expect("cell should not have been set already");
+        cell
     }
 }
 
