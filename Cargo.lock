@@ -3842,9 +3842,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "search-semantically"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "359ca9c355c5262fe956b4c150c6165a58f3846bb464ac58d6388994b57a941d"
+checksum = "d1ef9797a4f4c3917ad6726efa515722def65c5f7806ae65a9dd8fe66d2e65bf"
 dependencies = [
  "anyhow",
  "dirs",
