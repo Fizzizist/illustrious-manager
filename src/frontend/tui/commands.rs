@@ -179,6 +179,7 @@ mod tests {
                 model: "claude-sonnet-4-20250514".to_string(),
             },
             zai: None,
+            ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
