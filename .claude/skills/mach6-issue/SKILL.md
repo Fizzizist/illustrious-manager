@@ -14,7 +14,9 @@ argument-hint: "[issue-number | description]"
 2. **HTML markers** — Use `<!-- mach6-assessment -->`, `<!-- mach6-plan -->`, `<!-- mach6-review -->`, `<!-- mach6-progress -->` as the first line of comment bodies for reliable discovery.
 3. **No `#N` in comment bodies** — GitHub auto-links `#N` to issues/PRs. Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets (.env, credentials, tokens, keys).
-5. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning or implementing.
+5. **Task tracking** — Use the `tasks_update` tool to show progress through multi-step commands.
+6. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning or implementing.
+7. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Determine Mode
 
@@ -26,7 +28,18 @@ If the input is a number, run **ASSESS** mode. Otherwise, run **CREATE** mode.
 
 **Assess an existing GitHub issue — explore the codebase, identify scope/risks/ambiguities, post assessment.**
 
-### Step 1: Read the issue
+### Step 1: Set up task tracking
+
+```
+tasks_update([
+  { id: "read", title: "Read issue and comments", status: "in_progress" },
+  { id: "explore", title: "Explore relevant codebase", status: "pending" },
+  { id: "assess", title: "Analyze and assess", status: "pending" },
+  { id: "post", title: "Post assessment", status: "pending" }
+])
+```
+
+### Step 2: Read the issue
 
 ```bash
 gh issue view <number>
@@ -35,16 +48,20 @@ gh issue view <number> --comments
 
 Parse: problem statement, constraints, requirements, acceptance criteria, prior discussion, linked PRs.
 
-### Step 2: Explore the codebase
+Update task: read → completed, explore → in_progress.
 
-Explore the codebase directly using the available tools (search, grep, find, read, ls) to understand:
+### Step 3: Explore the codebase
+
+Launch 2-3 Explore subagents in parallel targeting different aspects. Agent definitions specify their own model with a provider fallback list — defaults work across providers and are fine for most cases. Override only with good reason (e.g. a particularly complex issue warrants a stronger tier).
 - **Relevant code**: Find existing code related to the issue, trace implementation patterns
 - **Architecture**: Map relevant architecture layers, abstractions, data flow
 - **Prior work**: Check for related branches, PRs, or commits
 
-Identify 5-10 key files and read them thoroughly.
+Each agent should return 5-10 key files. After agents complete, read all identified files.
 
-### Step 3: Assess
+Update task: explore → completed, assess → in_progress.
+
+### Step 4: Assess
 
 Present to the user:
 1. **Summary**: The issue in your own words
@@ -54,19 +71,24 @@ Present to the user:
 5. **Scope**: Size and complexity estimate
 6. **Risks**: Pitfalls, edge cases, architectural concerns
 
-### Step 4: Post assessment
+### Step 5: Post assessment
 
 Post as an issue comment:
 
 ```bash
-gh issue comment <number> --body "<!-- mach6-assessment -->
+cat > /tmp/gh-comment.md << 'MACH6_EOF'
+<!-- mach6-assessment -->
 ## Issue Assessment
 
 <assessment content>
 
 ---
-*Automated assessment by mach6*"
+*Automated assessment by mach6*
+MACH6_EOF
+gh issue comment <number> --body-file /tmp/gh-comment.md
 ```
+
+Update task: post → completed.
 
 Suggest next step: `/skill:mach6-plan <number>`
 
@@ -105,7 +127,10 @@ Present the draft to the user for approval.
 ### Step 3: Create the issue
 
 ```bash
-gh issue create --title "<title>" --body "<body>" [--label "<labels>"]
+cat > /tmp/gh-body.md << 'MACH6_EOF'
+<body>
+MACH6_EOF
+gh issue create --title "<title>" --body-file /tmp/gh-body.md [--label "<labels>"]
 ```
 
 Report the issue number and URL. Suggest next step: `/skill:mach6-plan <number>`
