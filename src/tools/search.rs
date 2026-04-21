@@ -1,4 +1,5 @@
 use crate::types::ContentBlock;
+use async_trait::async_trait;
 use search_semantically::SearchEngine;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ impl SearchTool {
     }
 }
 
+#[async_trait]
 impl Tool for SearchTool {
     fn name(&self) -> &str {
         "search"
@@ -63,7 +65,7 @@ impl Tool for SearchTool {
         &self.schema
     }
 
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let query = input["query"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidInput {
@@ -99,22 +101,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    #[test]
-    fn search_tool_has_correct_name() {
+    #[tokio::test]
+    async fn search_tool_has_correct_name() {
         let temp = TempDir::new().expect("temp dir");
         let tool = SearchTool::new(temp.path().to_path_buf());
         assert_eq!(tool.name(), "search");
     }
 
-    #[test]
-    fn search_tool_has_description() {
+    #[tokio::test]
+    async fn search_tool_has_description() {
         let temp = TempDir::new().expect("temp dir");
         let tool = SearchTool::new(temp.path().to_path_buf());
         assert!(!tool.description().is_empty());
     }
 
-    #[test]
-    fn search_tool_input_schema_has_query() {
+    #[tokio::test]
+    async fn search_tool_input_schema_has_query() {
         let temp = TempDir::new().expect("temp dir");
         let tool = SearchTool::new(temp.path().to_path_buf());
         let schema = tool.input_schema();
@@ -125,18 +127,18 @@ mod tests {
         assert!(required.iter().any(|r| r == "query"));
     }
 
-    #[test]
-    fn search_tool_is_not_a_write_tool() {
+    #[tokio::test]
+    async fn search_tool_is_not_a_write_tool() {
         let temp = TempDir::new().expect("temp dir");
         let tool = SearchTool::new(temp.path().to_path_buf());
         assert!(!tool.is_write_tool());
     }
 
-    #[test]
-    fn search_tool_requires_query_field() {
+    #[tokio::test]
+    async fn search_tool_requires_query_field() {
         let temp = TempDir::new().expect("temp dir");
         let tool = SearchTool::new(temp.path().to_path_buf());
-        let result = tool.execute(serde_json::json!({}));
+        let result = tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
         match result {
             Err(ToolError::InvalidInput { message }) => {
@@ -146,8 +148,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn search_tool_registered_in_registry() {
+    #[tokio::test]
+    async fn search_tool_registered_in_registry() {
         let temp = TempDir::new().expect("temp dir");
         let mut registry = crate::tools::ToolRegistry::new();
         let tool = SearchTool::new(temp.path().to_path_buf());
@@ -156,8 +158,8 @@ mod tests {
         assert_eq!(def.name(), "search");
     }
 
-    #[test]
-    fn rebuild_deletes_index_db() {
+    #[tokio::test]
+    async fn rebuild_deletes_index_db() {
         let temp = TempDir::new().expect("temp dir");
         let index_dir = temp.path().join(".search-index");
         std::fs::create_dir_all(&index_dir).expect("dir");
@@ -171,8 +173,8 @@ mod tests {
         assert!(!index_dir.join("search.db-wal").exists());
     }
 
-    #[test]
-    fn execute_returns_results_for_populated_project() {
+    #[tokio::test]
+    async fn execute_returns_results_for_populated_project() {
         let temp = TempDir::new().expect("temp dir");
         std::fs::write(
             temp.path().join("main.rs"),
@@ -185,6 +187,7 @@ mod tests {
             .execute(serde_json::json!({
                 "query": "calculate_total"
             }))
+            .await
             .expect("execute should succeed");
 
         assert!(!result.is_error);
@@ -203,8 +206,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn execute_with_rebuild_fresh_search() {
+    #[tokio::test]
+    async fn execute_with_rebuild_fresh_search() {
         let temp = TempDir::new().expect("temp dir");
         std::fs::write(
             temp.path().join("lib.rs"),
@@ -219,13 +222,14 @@ mod tests {
                 "query": "process_data",
                 "rebuild": true
             }))
+            .await
             .expect("execute with rebuild should succeed");
 
         assert!(!result.is_error);
     }
 
-    #[test]
-    fn execute_empty_project_returns_no_results() {
+    #[tokio::test]
+    async fn execute_empty_project_returns_no_results() {
         let temp = TempDir::new().expect("temp dir");
 
         let tool = SearchTool::new(temp.path().to_path_buf());
@@ -233,6 +237,7 @@ mod tests {
             .execute(serde_json::json!({
                 "query": "anything"
             }))
+            .await
             .expect("execute should succeed");
 
         assert!(!result.is_error);

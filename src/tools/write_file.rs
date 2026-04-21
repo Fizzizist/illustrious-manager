@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{Tool, ToolError, ToolResult};
@@ -33,6 +34,7 @@ impl WriteFileTool {
     }
 }
 
+#[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
         "write_file"
@@ -70,7 +72,7 @@ impl Tool for WriteFileTool {
     fn is_write_tool(&self) -> bool {
         true
     }
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let path_str = input["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidInput {
@@ -133,8 +135,8 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    #[test]
-    fn write_file_creates_new_file_with_correct_content() {
+    #[tokio::test]
+    async fn write_file_creates_new_file_with_correct_content() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -145,15 +147,15 @@ mod tests {
             "content": "Hello, world!"
         });
 
-        let result = tool.execute(input).expect("Write should succeed");
+        let result = tool.execute(input).await.expect("Write should succeed");
         assert!(!result.is_error);
 
         let written = fs::read_to_string(&file_path).expect("File should exist");
         assert_eq!(written, "Hello, world!");
     }
 
-    #[test]
-    fn write_file_overwrites_existing_file() {
+    #[tokio::test]
+    async fn write_file_overwrites_existing_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let file_path = temp_dir.path().join("existing.txt");
         fs::write(&file_path, "old content").expect("Failed to create file");
@@ -166,14 +168,14 @@ mod tests {
             "content": "new content"
         });
 
-        tool.execute(input).expect("Write should succeed");
+        tool.execute(input).await.expect("Write should succeed");
 
         let written = fs::read_to_string(&file_path).expect("File should exist");
         assert_eq!(written, "new content");
     }
 
-    #[test]
-    fn write_file_creates_parent_directories() {
+    #[tokio::test]
+    async fn write_file_creates_parent_directories() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -189,15 +191,15 @@ mod tests {
             "content": "nested content"
         });
 
-        let result = tool.execute(input).expect("Write should succeed");
+        let result = tool.execute(input).await.expect("Write should succeed");
         assert!(!result.is_error);
 
         let written = fs::read_to_string(&file_path).expect("File should exist");
         assert_eq!(written, "nested content");
     }
 
-    #[test]
-    fn write_file_outside_sandbox_is_rejected() {
+    #[tokio::test]
+    async fn write_file_outside_sandbox_is_rejected() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -212,7 +214,7 @@ mod tests {
             "content": "should not be written"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         match result {
             Err(ToolError::Execution { .. }) => {}
             Ok(_) => panic!("Write outside sandbox should fail"),
@@ -220,8 +222,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write_file_with_symlink_escaping_sandbox_is_rejected() {
+    #[tokio::test]
+    async fn write_file_with_symlink_escaping_sandbox_is_rejected() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let outside_dir = TempDir::new().expect("Failed to create outside dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
@@ -246,7 +248,7 @@ mod tests {
             "content": "should not be written"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         match result {
             Err(ToolError::Execution { .. }) => {}
             Ok(_) => panic!("Symlink escaping sandbox should be rejected"),
@@ -254,8 +256,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write_file_result_reports_bytes_written() {
+    #[tokio::test]
+    async fn write_file_result_reports_bytes_written() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -267,7 +269,7 @@ mod tests {
             "content": content
         });
 
-        let result = tool.execute(input).expect("Write should succeed");
+        let result = tool.execute(input).await.expect("Write should succeed");
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
         match &result.content[0] {
@@ -278,8 +280,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn markdown_input_formats_path_and_content() {
+    #[tokio::test]
+    async fn markdown_input_formats_path_and_content() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -294,8 +296,8 @@ mod tests {
         assert!(md.contains("fn main()"), "should include content");
     }
 
-    #[test]
-    fn markdown_output_returns_result_text() {
+    #[tokio::test]
+    async fn markdown_output_returns_result_text() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = WriteFileTool::new(sandbox);
@@ -305,7 +307,7 @@ mod tests {
             "path": file_path.to_str().expect("path"),
             "content": "data"
         });
-        let result = tool.execute(input).expect("Write should succeed");
+        let result = tool.execute(input).await.expect("Write should succeed");
         let md = tool.markdown_output(&result);
         assert!(md.contains("Wrote"), "should contain wrote message");
     }
