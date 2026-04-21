@@ -44,9 +44,15 @@ impl Agent {
     pub async fn new(
         backend: Box<dyn LlmBackend>,
         config: RequestConfig,
-        session: Session,
+        session: Arc<TokioMutex<Session>>,
     ) -> Self {
-        let history: Vec<Message> = session.load_history().await.unwrap_or_default();
+        let history: Vec<Message> = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .unwrap_or_default();
 
         Self {
             backend: Arc::from(backend),
@@ -56,7 +62,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            session: Arc::new(TokioMutex::new(session)),
+            session,
         }
     }
 
@@ -141,13 +147,18 @@ impl Agent {
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        self.session.lock().await.load_history().await
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
     }
 
     /// If the current session has no messages, delete its DB file from disk.
     pub async fn cleanup_empty_session(&self) -> Result<()> {
         let session = self.session.lock().await;
-        if session.is_empty().await? {
+        if session.conversation().is_empty().await? {
             session.delete_db()?;
         }
         Ok(())
@@ -157,7 +168,11 @@ impl Agent {
     /// Non-persisted context messages (context files, skill definitions) are preserved
     /// at the front of history; only the persisted portion is replaced.
     pub async fn load_session(&self, session: Session) {
-        let new_history = session.load_history().await.unwrap_or_default();
+        let new_history = session
+            .conversation()
+            .load_history()
+            .await
+            .unwrap_or_default();
         {
             let prefix_len = *self
                 .context_prefix_len
@@ -216,7 +231,12 @@ impl Agent {
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
 
-        self.session.lock().await.insert_message(&user_msg).await?;
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&user_msg)
+            .await?;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -286,7 +306,12 @@ impl Agent {
                                     content: vec![ContentBlock::Text(text_accumulated.clone())],
                                 };
                                 lock(&history_arc).push(partial_msg.clone());
-                                let _ = session.lock().await.insert_message(&partial_msg).await;
+                                let _ = session
+                                    .lock()
+                                    .await
+                                    .conversation()
+                                    .insert_message(&partial_msg)
+                                    .await;
                             }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
@@ -304,7 +329,12 @@ impl Agent {
                         content,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
-                    let _ = session.lock().await.insert_message(&assistant_msg).await;
+                    let _ = session
+                        .lock()
+                        .await
+                        .conversation()
+                        .insert_message(&assistant_msg)
+                        .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -324,14 +354,24 @@ impl Agent {
                     content: assistant_content,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
-                let _ = session.lock().await.insert_message(&assistant_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&assistant_msg)
+                    .await;
 
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
-                let _ = session.lock().await.insert_message(&tool_result_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&tool_result_msg)
+                    .await;
             }
         });
 
@@ -347,7 +387,12 @@ async fn record_error(
 ) {
     let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
     lock(history).push(error_user_msg.clone());
-    let _ = session.lock().await.insert_message(&error_user_msg).await;
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&error_user_msg)
+        .await;
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
@@ -368,13 +413,16 @@ async fn execute_tool_calls(
     let mut tool_result_blocks: Vec<ContentBlock> = vec![];
 
     for call in tool_calls {
-        let (input, parse_error) = match serde_json::from_str::<serde_json::Value>(&call.input_json)
-        {
-            Ok(v) => (v, None),
-            Err(e) => (
-                serde_json::Value::Null,
-                Some(format!("Invalid tool input JSON: {e}")),
-            ),
+        let (input, parse_error) = if call.input_json.trim().is_empty() {
+            (serde_json::Value::Object(serde_json::Map::new()), None)
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&call.input_json) {
+                Ok(v) => (v, None),
+                Err(e) => (
+                    serde_json::Value::Null,
+                    Some(format!("Invalid tool input JSON: {e}")),
+                ),
+            }
         };
 
         assistant_content.push(ContentBlock::ToolUse {
@@ -478,7 +526,7 @@ pub async fn spawn_agent(
     factory: &BackendFactory,
     role: &str,
     tool_config: &ToolsConfig,
-    session: Session,
+    session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let selection = factory.for_role(role).await?;
@@ -491,7 +539,7 @@ pub async fn spawn_agent(
 pub async fn spawn_agent_with_selection(
     selection: crate::backend::BackendSelection,
     tool_config: &ToolsConfig,
-    session: Session,
+    session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let request_config = RequestConfig {
@@ -517,6 +565,10 @@ mod tests {
     async fn test_session() -> Session {
         let dir = tempfile::TempDir::new().expect("temp dir");
         Session::new(None, dir.keep()).await.expect("test session")
+    }
+
+    async fn test_session_arc() -> Arc<TokioMutex<Session>> {
+        Arc::new(TokioMutex::new(test_session().await))
     }
 
     struct SequencedBackend {
@@ -632,7 +684,7 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config, test_session().await)
+        Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config)
@@ -743,7 +795,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -787,7 +839,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -832,7 +884,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -878,7 +930,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -933,7 +985,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -993,6 +1045,44 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "loop should continue and complete after malformed input"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tool_input_json_is_treated_as_empty_object() {
+        // Regression: LLM sends no input for a no-arg tool (e.g. list_tasks).
+        // The SSE stream delivers no ToolUseDelta events, leaving input_json = "".
+        // This must not produce an error — it should be treated as {}.
+        let empty_input_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            // No ToolUseDelta — input_json stays empty
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![empty_input_response, text_response("ok")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "echo output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("list".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { content, is_error, .. }
+                    if content == "echo output" && !is_error
+            )),
+            "empty input_json should execute successfully with empty object input"
         );
     }
 
@@ -1197,7 +1287,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1271,7 +1361,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1315,7 +1405,7 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&skills);
 
@@ -1342,7 +1432,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&std::collections::HashMap::new());
 
@@ -1361,6 +1451,7 @@ mod tests {
             .await
             .expect("session a");
         session_a
+            .conversation()
             .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
@@ -1369,6 +1460,7 @@ mod tests {
             .await
             .expect("session b");
         session_b
+            .conversation()
             .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
@@ -1378,7 +1470,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.history().len(), 1);
         assert!(
@@ -1402,6 +1499,7 @@ mod tests {
             .await
             .expect("session a");
         session_a
+            .conversation()
             .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
@@ -1410,6 +1508,7 @@ mod tests {
             .await
             .expect("session b");
         session_b
+            .conversation()
             .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
@@ -1426,9 +1525,13 @@ mod tests {
         std::fs::write(&skill_path, "---\ndescription: A test skill\n---\nContent").expect("write");
         skills.insert("test-skill".to_string(), skill_path);
 
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a)
-            .await
-            .with_skills(&skills);
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await
+        .with_skills(&skills);
 
         // history should be: [skill_prefix, session_a_message]
         assert_eq!(agent.history().len(), 2);
@@ -1468,7 +1571,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.session_id().await, id_a);
         agent.load_session(session_b).await;
@@ -1489,7 +1597,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(!db_path.exists());
@@ -1502,6 +1615,7 @@ mod tests {
 
         let session = Session::new(None, dir_path.clone()).await.expect("session");
         session
+            .conversation()
             .insert_message(&Message::text(Role::User, "hello".to_string()))
             .await
             .expect("insert");
@@ -1512,7 +1626,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(db_path.exists());
@@ -1525,9 +1644,11 @@ mod tests {
         use crate::tools::ToolRegistry;
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = Session::new(None, dir.path().to_path_buf())
-            .await
-            .expect("session");
+        let session = Arc::new(TokioMutex::new(
+            Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("session"),
+        ));
 
         let selection = BackendSelection {
             backend: Box::new(SequencedBackend::new(vec![])),

@@ -24,6 +24,7 @@ use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
+use tools::task::{CreateTaskTool, DeleteTaskTool, ListTasksTool, UpdateTaskTool};
 use tools::write_file::WriteFileTool;
 
 const DEFAULT_MAX_SCHEMA_RETRIES: u32 = 3;
@@ -160,14 +161,26 @@ async fn main() -> Result<()> {
     registry.register(Box::new(SkillTool::new(&skills)))?;
 
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
+    let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+    registry.register(Box::new(CreateTaskTool::new(Arc::clone(&session_arc))))?;
+    registry.register(Box::new(ListTasksTool::new(Arc::clone(&session_arc))))?;
+    registry.register(Box::new(UpdateTaskTool::new(Arc::clone(&session_arc))))?;
+    registry.register(Box::new(DeleteTaskTool::new(Arc::clone(&session_arc))))?;
 
     let agent = Arc::new(
-        spawn_agent(&factory, "default", &app_config.tools, session, registry)
-            .await?
-            // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
-            // because initial history is set from the input session
-            .with_skills(&skills)
-            .with_context_files()?,
+        spawn_agent(
+            &factory,
+            "default",
+            &app_config.tools,
+            session_arc,
+            registry,
+        )
+        .await?
+        // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
+        // because initial history is set from the input session
+        .with_skills(&skills)
+        .with_context_files()?,
     );
 
     let mut logger = if cli.debug {
