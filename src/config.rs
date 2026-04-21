@@ -351,6 +351,13 @@ pub fn apply_overrides(
         }
         _ => {}
     }
+
+    if let Some(m) = model
+        && let Some(default_role) = config.models.get_mut("default")
+    {
+        default_role.backend = config.backend.clone();
+        default_role.model = m.to_string();
+    }
 }
 
 /// Generate a markdown intro message displaying the currently loaded configuration.
@@ -1172,10 +1179,103 @@ mod tests {
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
-            config.ollama.as_ref().unwrap().model,
+            config
+                .ollama
+                .as_ref()
+                .expect("ollama config present in test fixture")
+                .model,
             "custom-model",
             "model override should be applied to ollama config"
         );
+    }
+
+    /// Regression: `--model` flag must override the synthesized `default`
+    /// model role, not just the per-backend `[vertex]/[zai]/[ollama]` table.
+    /// The backend resolves the model via `resolve_role("default")`, so an
+    /// override that only touches the per-backend table is silently ignored.
+    #[test]
+    fn apply_overrides_updates_default_model_role_for_vertex() {
+        let mut config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "p".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+        };
+        config.normalize_back_compat();
+
+        apply_overrides(&mut config, None, None, Some("cli-model"));
+
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(
+            resolved.model, "cli-model",
+            "--model flag must propagate into models[\"default\"]"
+        );
+    }
+
+    #[test]
+    fn apply_overrides_updates_default_model_role_for_zai() {
+        let mut config = AppConfig {
+            backend: "zai".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: Some(ZaiConfig {
+                api_key: "k".to_string(),
+                model: "glm-5.1".to_string(),
+            }),
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+        };
+        config.normalize_back_compat();
+
+        apply_overrides(&mut config, None, None, Some("glm-9000"));
+
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(resolved.model, "glm-9000");
+    }
+
+    #[test]
+    fn apply_overrides_updates_default_model_role_for_ollama() {
+        let mut config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "k".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+        };
+        config.normalize_back_compat();
+
+        apply_overrides(&mut config, None, None, Some("llama-cli"));
+
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(resolved.model, "llama-cli");
     }
 
     #[test]
