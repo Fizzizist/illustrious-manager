@@ -288,6 +288,11 @@ impl AppConfig {
                 .as_ref()
                 .map(|z| z.model.clone())
                 .unwrap_or_else(|| "glm-5.1".to_string()),
+            "ollama" => self
+                .ollama
+                .as_ref()
+                .map(|o| o.model.clone())
+                .unwrap_or_else(|| "gpt-oss:120b".to_string()),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
@@ -478,6 +483,22 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 Some(zai) if zai.api_key.is_empty() => {
                     bail!(
                         "Model role '{name}' uses backend 'zai' but [zai].api_key is not configured."
+                    );
+                }
+                _ => {}
+            },
+            "ollama" => match &config.ollama {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'ollama' but no [ollama] section is present."
+                    );
+                }
+                Some(ollama)
+                    if ollama.api_key.is_empty()
+                        && ollama.base_url == default_ollama_base_url() =>
+                {
+                    bail!(
+                        "Model role '{name}' uses backend 'ollama' but [ollama].api_key is not configured."
                     );
                 }
                 _ => {}
@@ -1098,6 +1119,102 @@ mod tests {
             config.ollama.as_ref().unwrap().model,
             "custom-model",
             "model override should be applied to ollama config"
+        );
+    }
+
+    #[test]
+    fn validate_errors_when_role_references_ollama_with_missing_config() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-ollama".to_string(),
+            ModelRole {
+                backend: "ollama".to_string(),
+                model: "gpt-oss:120b".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("my-ollama") || msg.contains("ollama"),
+            "error should mention the role or backend; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_succeeds_when_role_references_configured_ollama_backend() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-ollama".to_string(),
+            ModelRole {
+                backend: "ollama".to_string(),
+                model: "gpt-oss:120b".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_ok(), "ollama role with valid config should pass");
+    }
+
+    #[test]
+    fn legacy_ollama_config_synthesizes_default_role_with_ollama_model() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let toml_str = r#"
+            backend = "ollama"
+            [vertex]
+            project = ""
+            region = "us-east5"
+            model = "claude-sonnet-4-20250514"
+            [ollama]
+            api_key = "test-key"
+            model = "gpt-oss:120b"
+            base_url = "https://ollama.com/api/chat"
+        "#;
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        write!(tmp, "{toml_str}").expect("write");
+
+        let config = load_config_from_path(tmp.path()).expect("load config");
+
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized for ollama backend"
+        );
+        let default_role = &config.models["default"];
+        assert_eq!(default_role.backend, "ollama");
+        assert_eq!(
+            default_role.model, "gpt-oss:120b",
+            "model must come from [ollama].model, not vertex"
         );
     }
 
