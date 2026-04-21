@@ -1,6 +1,7 @@
 use crate::tools::sandbox::SandboxPolicy;
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
 
@@ -19,6 +20,7 @@ impl EditFile {
     }
 }
 
+#[async_trait]
 impl Tool for EditFile {
     fn name(&self) -> &str {
         "edit_file"
@@ -84,7 +86,7 @@ impl Tool for EditFile {
     fn is_write_tool(&self) -> bool {
         true
     }
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         use std::fs;
 
         let path_str =
@@ -175,8 +177,8 @@ mod tests {
         (temp_dir, file_path)
     }
 
-    #[test]
-    fn successful_replacement_writes_correct_content() {
+    #[tokio::test]
+    async fn successful_replacement_writes_correct_content() {
         let (_temp_dir, file_path) = create_test_file("hello world\nfoo bar\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -187,15 +189,15 @@ mod tests {
             "new_string": "goodbye world"
         });
 
-        let result = tool.execute(input).expect("Execution should succeed");
+        let result = tool.execute(input).await.expect("Execution should succeed");
         assert!(!result.is_error, "Result should not be an error");
 
         let content = fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(content, "goodbye world\nfoo bar\n");
     }
 
-    #[test]
-    fn old_string_not_found_returns_error() {
+    #[tokio::test]
+    async fn old_string_not_found_returns_error() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -206,15 +208,15 @@ mod tests {
             "new_string": "replacement"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         assert!(
             result.is_err(),
             "Should return error when old_string not found"
         );
     }
 
-    #[test]
-    fn old_string_matches_multiple_locations_returns_error() {
+    #[tokio::test]
+    async fn old_string_matches_multiple_locations_returns_error() {
         let (_temp_dir, file_path) = create_test_file("hello world\nhello there\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -225,15 +227,15 @@ mod tests {
             "new_string": "goodbye"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         assert!(
             result.is_err(),
             "Should return error when old_string matches multiple locations"
         );
     }
 
-    #[test]
-    fn path_outside_sandbox_returns_error() {
+    #[tokio::test]
+    async fn path_outside_sandbox_returns_error() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
 
@@ -248,15 +250,15 @@ mod tests {
             "new_string": "replacement"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         assert!(
             result.is_err(),
             "Should return error for path outside sandbox"
         );
     }
 
-    #[test]
-    fn file_doesnt_exist_returns_error() {
+    #[tokio::test]
+    async fn file_doesnt_exist_returns_error() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
         let tool = EditFile::new(sandbox);
@@ -267,15 +269,15 @@ mod tests {
             "new_string": "new"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         assert!(
             result.is_err(),
             "Should return error when file doesn't exist"
         );
     }
 
-    #[test]
-    fn empty_old_string_returns_error() {
+    #[tokio::test]
+    async fn empty_old_string_returns_error() {
         let (_temp_dir, file_path) = create_test_file("content\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -286,12 +288,12 @@ mod tests {
             "new_string": "replacement"
         });
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
         assert!(result.is_err(), "Should return error for empty old_string");
     }
 
-    #[test]
-    fn new_string_can_be_empty() {
+    #[tokio::test]
+    async fn new_string_can_be_empty() {
         let (_temp_dir, file_path) = create_test_file("hello world\nfoo bar\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -302,15 +304,15 @@ mod tests {
             "new_string": ""
         });
 
-        let result = tool.execute(input).expect("Execution should succeed");
+        let result = tool.execute(input).await.expect("Execution should succeed");
         assert!(!result.is_error, "Result should not be an error");
 
         let content = fs::read_to_string(&file_path).expect("Failed to read file");
         assert_eq!(content, "foo bar\n");
     }
 
-    #[test]
-    fn markdown_input_formats_as_diff() {
+    #[tokio::test]
+    async fn markdown_input_formats_as_diff() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -327,8 +329,8 @@ mod tests {
         assert!(md.contains("`test.txt`"), "should show file path");
     }
 
-    #[test]
-    fn markdown_output_returns_result_text() {
+    #[tokio::test]
+    async fn markdown_output_returns_result_text() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
         let tool = EditFile::new(sandbox);
@@ -338,7 +340,7 @@ mod tests {
             "old_string": "hello world",
             "new_string": "goodbye"
         });
-        let result = tool.execute(input).expect("should succeed");
+        let result = tool.execute(input).await.expect("should succeed");
         let md = tool.markdown_output(&result);
         assert!(
             md.contains("Successfully replaced"),
