@@ -240,6 +240,7 @@ impl OllamaBackend {
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools_json);
+            body["parallel_tool_calls"] = serde_json::json!(true);
         }
 
         body
@@ -445,6 +446,7 @@ mod tests {
         assert_eq!(tools[0]["function"]["name"], "bash");
         assert_eq!(tools[0]["function"]["description"], "Execute bash commands");
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+        assert_eq!(body["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -469,6 +471,10 @@ mod tests {
         assert!(
             body.get("tools").is_none(),
             "should not include tools field when empty"
+        );
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "should not include parallel_tool_calls when no tools provided"
         );
     }
 

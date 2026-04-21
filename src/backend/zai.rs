@@ -267,6 +267,7 @@ impl ZaiBackend {
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools_json);
+            body["parallel_tool_calls"] = serde_json::json!(true);
         }
 
         body
@@ -524,6 +525,9 @@ mod tests {
         assert_eq!(tools[1]["type"], "function");
         assert_eq!(tools[1]["function"]["name"], "read_file");
         assert_eq!(tools[1]["function"]["description"], "Read a file");
+
+        // Verify parallel_tool_calls is enabled
+        assert_eq!(body["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -546,6 +550,10 @@ mod tests {
             body.get("tools").is_none()
                 || body["tools"].as_array().map_or(true, |arr| arr.is_empty()),
             "body should not include tools field or it should be empty when no tools provided"
+        );
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "body should not include parallel_tool_calls when no tools provided"
         );
     }
 
