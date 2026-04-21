@@ -4,7 +4,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::fs::File;
 use std::io::Write;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::Mutex as TokioMutex;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
@@ -12,9 +14,11 @@ use illustrious_manager::context_files;
 use illustrious_manager::session::Session;
 use illustrious_manager::types::*;
 
-async fn test_session() -> Session {
+async fn test_session_arc() -> Arc<TokioMutex<Session>> {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    Session::new(None, dir.keep()).await.expect("test session")
+    Arc::new(TokioMutex::new(
+        Session::new(None, dir.keep()).await.expect("test session"),
+    ))
 }
 
 struct NullBackend;
@@ -61,7 +65,7 @@ async fn context_files_from_pwd_are_loaded_into_agent() {
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config, test_session().await).await;
+    let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);
 
     let history = agent.history();
@@ -94,7 +98,7 @@ async fn context_files_from_home_are_loaded_into_agent() {
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config, test_session().await).await;
+    let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);
 
     let history = agent.history();
@@ -136,7 +140,7 @@ async fn multiple_context_files_from_both_locations_are_all_loaded() {
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config, test_session().await).await;
+    let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);
 
     let history = agent.history();

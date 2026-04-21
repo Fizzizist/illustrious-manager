@@ -5,6 +5,7 @@ pub mod edit_file;
 pub mod sandbox;
 pub mod search;
 pub mod skill;
+pub mod task;
 pub mod write_file;
 
 use crate::types::ContentBlock;
