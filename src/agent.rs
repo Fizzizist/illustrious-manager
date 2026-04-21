@@ -147,7 +147,12 @@ impl Agent {
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        self.session.lock().await.conversation().load_history().await
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
     }
 
     /// If the current session has no messages, delete its DB file from disk.
@@ -163,7 +168,11 @@ impl Agent {
     /// Non-persisted context messages (context files, skill definitions) are preserved
     /// at the front of history; only the persisted portion is replaced.
     pub async fn load_session(&self, session: Session) {
-        let new_history = session.conversation().load_history().await.unwrap_or_default();
+        let new_history = session
+            .conversation()
+            .load_history()
+            .await
+            .unwrap_or_default();
         {
             let prefix_len = *self
                 .context_prefix_len
@@ -222,7 +231,12 @@ impl Agent {
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
 
-        self.session.lock().await.conversation().insert_message(&user_msg).await?;
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&user_msg)
+            .await?;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -292,7 +306,12 @@ impl Agent {
                                     content: vec![ContentBlock::Text(text_accumulated.clone())],
                                 };
                                 lock(&history_arc).push(partial_msg.clone());
-                                let _ = session.lock().await.conversation().insert_message(&partial_msg).await;
+                                let _ = session
+                                    .lock()
+                                    .await
+                                    .conversation()
+                                    .insert_message(&partial_msg)
+                                    .await;
                             }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
@@ -310,7 +329,12 @@ impl Agent {
                         content,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
-                    let _ = session.lock().await.conversation().insert_message(&assistant_msg).await;
+                    let _ = session
+                        .lock()
+                        .await
+                        .conversation()
+                        .insert_message(&assistant_msg)
+                        .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -330,14 +354,24 @@ impl Agent {
                     content: assistant_content,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
-                let _ = session.lock().await.conversation().insert_message(&assistant_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&assistant_msg)
+                    .await;
 
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
-                let _ = session.lock().await.conversation().insert_message(&tool_result_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&tool_result_msg)
+                    .await;
             }
         });
 
@@ -353,7 +387,12 @@ async fn record_error(
 ) {
     let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
     lock(history).push(error_user_msg.clone());
-    let _ = session.lock().await.conversation().insert_message(&error_user_msg).await;
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&error_user_msg)
+        .await;
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
@@ -1371,7 +1410,8 @@ mod tests {
             .await
             .expect("session a");
         session_a
-            .conversation().insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
 
@@ -1379,7 +1419,8 @@ mod tests {
             .await
             .expect("session b");
         session_b
-            .conversation().insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
 
@@ -1417,7 +1458,8 @@ mod tests {
             .await
             .expect("session a");
         session_a
-            .conversation().insert_message(&Message::text(Role::User, "session a message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
 
@@ -1425,7 +1467,8 @@ mod tests {
             .await
             .expect("session b");
         session_b
-            .conversation().insert_message(&Message::text(Role::User, "session b message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
 
@@ -1531,7 +1574,8 @@ mod tests {
 
         let session = Session::new(None, dir_path.clone()).await.expect("session");
         session
-            .conversation().insert_message(&Message::text(Role::User, "hello".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
             .await
             .expect("insert");
         let db_path = dir_path.join(format!("{}.db", session.id));

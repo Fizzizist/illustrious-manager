@@ -6,9 +6,8 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use turso::{Builder, Connection};
 
-pub use task::{TaskRecord, TaskRepo, TaskStatus};
 pub use conversation::ConversationRepo;
-
+pub use task::{TaskRecord, TaskRepo, TaskStatus};
 
 /// Summary of a session, used for the session picker.
 #[derive(Debug, Clone)]
@@ -217,7 +216,11 @@ mod tests {
         assert!(db_path.exists(), "DB file should be created");
 
         let msg = Message::text(Role::User, "hello".to_string());
-        session.conversation().insert_message(&msg).await.expect("insert");
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
         let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, Role::User);
@@ -255,13 +258,21 @@ mod tests {
                 .await
                 .expect("create");
             let msg = Message::text(Role::User, "saved message".to_string());
-            session.conversation().insert_message(&msg).await.expect("insert");
+            session
+                .conversation()
+                .insert_message(&msg)
+                .await
+                .expect("insert");
         }
 
         let session = Session::new(Some(id), dir.path().to_path_buf())
             .await
             .expect("reopen");
-        let history = session.conversation().load_history().await.expect("load history");
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, Role::User);
         match &history[0].content[0] {
@@ -279,15 +290,18 @@ mod tests {
             .expect("create");
 
         session
-            .conversation().insert_message(&Message::text(Role::User, "first".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "first".to_string()))
             .await
             .expect("insert 1");
         session
-            .conversation().insert_message(&Message::text(Role::Assistant, "second".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "second".to_string()))
             .await
             .expect("insert 2");
         session
-            .conversation().insert_message(&Message::text(Role::User, "third".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "third".to_string()))
             .await
             .expect("insert 3");
 
@@ -317,7 +331,11 @@ mod tests {
                 },
             ],
         };
-        session.conversation().insert_message(&msg).await.expect("insert");
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
 
         let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
@@ -348,7 +366,11 @@ mod tests {
                 is_error: false,
             }],
         };
-        session.conversation().insert_message(&msg).await.expect("insert");
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
 
         let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
@@ -402,7 +424,8 @@ mod tests {
             .await
             .expect("create");
         session
-            .conversation().insert_message(&Message::text(Role::User, "hello world".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello world".to_string()))
             .await
             .expect("insert");
 
@@ -453,7 +476,8 @@ mod tests {
             .await
             .expect("create a");
         session_a
-            .conversation().insert_message(&Message::text(Role::User, "first session".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "first session".to_string()))
             .await
             .expect("insert a");
 
@@ -463,7 +487,8 @@ mod tests {
             .await
             .expect("create b");
         session_b
-            .conversation().insert_message(&Message::text(Role::User, "second session".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "second session".to_string()))
             .await
             .expect("insert b");
 
@@ -497,15 +522,18 @@ mod tests {
             .await
             .expect("create");
         session
-            .conversation().insert_message(&Message::text(Role::User, "first message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "first message".to_string()))
             .await
             .expect("insert 1");
         session
-            .conversation().insert_message(&Message::text(Role::Assistant, "response".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "response".to_string()))
             .await
             .expect("insert 2");
         session
-            .conversation().insert_message(&Message::text(Role::User, "second message".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "second message".to_string()))
             .await
             .expect("insert 3");
 
@@ -529,7 +557,8 @@ mod tests {
             .await
             .expect("create");
         session
-            .conversation().insert_message(&Message::text(Role::User, "hello".to_string()))
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
             .await
             .expect("insert");
         assert!(!session.conversation().is_empty().await.expect("is_empty"));
@@ -595,7 +624,8 @@ mod tests {
                 .await
                 .expect("create");
             session
-                .conversation().insert_message(&Message::text(Role::User, "hello".to_string()))
+                .conversation()
+                .insert_message(&Message::text(Role::User, "hello".to_string()))
                 .await
                 .expect("insert");
         }
