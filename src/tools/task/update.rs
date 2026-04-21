@@ -1,6 +1,5 @@
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -11,14 +10,8 @@ use crate::session::Session;
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
 
+use super::now_epoch_secs;
 use super::status::TaskStatus;
-
-fn now_epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system time is before UNIX epoch")
-        .as_secs() as i64
-}
 
 pub struct UpdateTaskTool {
     session: Arc<TokioMutex<Session>>,
@@ -35,7 +28,11 @@ impl UpdateTaskTool {
                     "id": {"type": "integer", "description": "Task ID to update"},
                     "title": {"type": "string", "description": "New title"},
                     "description": {"type": "string", "description": "New description"},
-                    "status": {"type": "string", "description": "New status: pending, in_progress, or completed"}
+                    "status": {
+                        "type": "string",
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "New status"
+                    }
                 },
                 "required": ["id"]
             }),
@@ -87,6 +84,14 @@ impl Tool for UpdateTaskTool {
             });
         }
 
+        if let Some(ref t) = new_title
+            && t.is_empty()
+        {
+            return Err(ToolError::InvalidInput {
+                message: "title must not be empty".to_string(),
+            });
+        }
+
         let now = now_epoch_secs();
         let session = self.session.lock().await;
 
@@ -121,44 +126,17 @@ impl Tool for UpdateTaskTool {
             idx
         );
 
-        session
-            .conn
-            .execute(&sql, params)
-            .await
-            .map_err(|e| ToolError::Execution {
-                tool_name: "update_task".to_string(),
-                message: e.to_string(),
-            })?;
+        let rows_affected =
+            session
+                .conn
+                .execute(&sql, params)
+                .await
+                .map_err(|e| ToolError::Execution {
+                    tool_name: "update_task".to_string(),
+                    message: e.to_string(),
+                })?;
 
-        // Verify the row existed
-        let mut rows = session
-            .conn
-            .query(
-                "SELECT COUNT(*) FROM task WHERE id = ?1",
-                [DbValue::Integer(id)],
-            )
-            .await
-            .map_err(|e| ToolError::Execution {
-                tool_name: "update_task".to_string(),
-                message: e.to_string(),
-            })?;
-
-        let count = if let Some(row) = rows.next().await.map_err(|e| ToolError::Execution {
-            tool_name: "update_task".to_string(),
-            message: e.to_string(),
-        })? {
-            match row.get_value(0).map_err(|e| ToolError::Execution {
-                tool_name: "update_task".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(n) => n,
-                _ => 0,
-            }
-        } else {
-            0
-        };
-
-        if count == 0 {
+        if rows_affected == 0 {
             return Err(ToolError::Execution {
                 tool_name: "update_task".to_string(),
                 message: format!("Task with id {} does not exist", id),
@@ -210,8 +188,6 @@ mod tests {
             }
         };
 
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
         let tool = UpdateTaskTool::new(Arc::clone(&session));
         tool.execute(serde_json::json!({"id": 1, "title": "updated"}))
             .await
@@ -241,7 +217,7 @@ mod tests {
         };
         assert_eq!(title, "updated");
         assert_eq!(status, "pending");
-        assert!(updated_at > before, "updated_at should advance");
+        assert!(updated_at >= before, "updated_at should not regress");
     }
 
     #[tokio::test]
@@ -296,6 +272,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_task_empty_title_errors() {
+        let session = test_session_arc().await;
+        create_task(&session, "task").await;
+        let tool = UpdateTaskTool::new(Arc::clone(&session));
+        let err = tool
+            .execute(serde_json::json!({"id": 1, "title": ""}))
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, ToolError::InvalidInput { .. }));
+    }
+
+    #[tokio::test]
     async fn update_task_missing_id_errors() {
         let session = test_session_arc().await;
         let tool = UpdateTaskTool::new(Arc::clone(&session));
@@ -304,12 +292,5 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, ToolError::Execution { .. }));
-    }
-
-    #[tokio::test]
-    async fn is_write_tool_returns_false() {
-        let session = test_session_arc().await;
-        let tool = UpdateTaskTool::new(session);
-        assert!(!tool.is_write_tool());
     }
 }

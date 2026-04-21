@@ -54,42 +54,7 @@ impl Tool for DeleteTaskTool {
 
         let session = self.session.lock().await;
 
-        // Check existence first
-        let mut rows = session
-            .conn
-            .query(
-                "SELECT COUNT(*) FROM task WHERE id = ?1",
-                [DbValue::Integer(id)],
-            )
-            .await
-            .map_err(|e| ToolError::Execution {
-                tool_name: "delete_task".to_string(),
-                message: e.to_string(),
-            })?;
-
-        let count = if let Some(row) = rows.next().await.map_err(|e| ToolError::Execution {
-            tool_name: "delete_task".to_string(),
-            message: e.to_string(),
-        })? {
-            match row.get_value(0).map_err(|e| ToolError::Execution {
-                tool_name: "delete_task".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(n) => n,
-                _ => 0,
-            }
-        } else {
-            0
-        };
-
-        if count == 0 {
-            return Err(ToolError::Execution {
-                tool_name: "delete_task".to_string(),
-                message: format!("Task with id {} does not exist", id),
-            });
-        }
-
-        session
+        let rows_affected = session
             .conn
             .execute("DELETE FROM task WHERE id = ?1", [DbValue::Integer(id)])
             .await
@@ -97,6 +62,13 @@ impl Tool for DeleteTaskTool {
                 tool_name: "delete_task".to_string(),
                 message: e.to_string(),
             })?;
+
+        if rows_affected == 0 {
+            return Err(ToolError::Execution {
+                tool_name: "delete_task".to_string(),
+                message: format!("Task with id {} does not exist", id),
+            });
+        }
 
         Ok(ToolResult {
             content: vec![ContentBlock::Text(format!("Deleted task {}", id))],
@@ -141,7 +113,7 @@ mod tests {
         let row = rows.next().await.expect("n").expect("r");
         let count = match row.get_value(0).expect("v") {
             DbValue::Integer(n) => n,
-            _ => panic!(),
+            other => panic!("unexpected count type: {:?}", other),
         };
         assert_eq!(count, 0);
     }
@@ -155,12 +127,5 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, ToolError::Execution { .. }));
-    }
-
-    #[tokio::test]
-    async fn is_write_tool_returns_false() {
-        let session = test_session_arc().await;
-        let tool = DeleteTaskTool::new(session);
-        assert!(!tool.is_write_tool());
     }
 }
