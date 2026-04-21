@@ -486,72 +486,105 @@ async fn execute_tool_calls(
         approvals.push(approved);
     }
 
-    // Dispatch all approved tools concurrently; slot-vector preserves input order.
+    // Dispatch all approved tools concurrently via FuturesUnordered so each
+    // completion emits its ToolResult event immediately. Slot-vector preserves
+    // input order for the final tool_result_blocks.
     let n = parsed.len();
-    let mut slot_futures = Vec::with_capacity(n);
+    let mut slots: Vec<Option<(String, String, String, bool)>> = (0..n).map(|_| None).collect();
+
+    let mut futures = futures::stream::FuturesUnordered::new();
 
     for (i, call) in parsed.iter().enumerate() {
-        let tools_clone = Arc::clone(tools);
         let id = call.id.clone();
         let name = call.name.clone();
         let input = call.input.clone();
         let approved = approvals[i];
         let parse_error = call.parse_error.clone();
 
-        slot_futures.push(tokio::spawn(async move {
-            if let Some(err_msg) = parse_error {
-                return (i, id, name, err_msg, true);
-            }
-            if !approved {
-                return (
-                    i,
-                    id,
+        // Handle non-dispatchable cases: parse errors, declined tools, and
+        // unknown tools all produce synthetic error results without spawning.
+        if let Some(err_msg) = parse_error {
+            slots[i] = Some((id, name.clone(), err_msg, true));
+            let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+                id: call.id.clone(),
+                name,
+                content: slots[i].as_ref().expect("just-set").2.clone(),
+                is_error: true,
+            });
+            continue;
+        }
+        if !approved {
+            let msg = "User declined to execute this tool.".to_string();
+            slots[i] = Some((id, name.clone(), msg.clone(), true));
+            let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+                id: call.id.clone(),
+                name,
+                content: msg,
+                is_error: true,
+            });
+            continue;
+        }
+        let tool = match tools.lookup(&call.name) {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = e.to_string();
+                slots[i] = Some((id, name.clone(), msg.clone(), true));
+                let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+                    id: call.id.clone(),
                     name,
-                    "User declined to execute this tool.".to_string(),
-                    true,
-                );
+                    content: msg,
+                    is_error: true,
+                });
+                continue;
             }
-            let (content, is_error) = match tools_clone.lookup(&name) {
-                Ok(tool) => match tool.execute(input).await {
-                    Ok(result) => {
-                        let text = result
-                            .content
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text(s) = b {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (text, result.is_error)
-                    }
-                    Err(e) => (e.to_string(), true),
-                },
+        };
+
+        // The tool reference borrows &ToolRegistry which outlives the futures.
+        futures.push(async move {
+            let (content, is_error) = match tool.execute(input).await {
+                Ok(result) => {
+                    let text = result
+                        .content
+                        .iter()
+                        .filter_map(|b| {
+                            if let ContentBlock::Text(s) = b {
+                                Some(s.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (text, result.is_error)
+                }
                 Err(e) => (e.to_string(), true),
             };
             (i, id, name, content, is_error)
-        }));
+        });
     }
 
-    // Collect results preserving input order via slot-vector.
-    let mut slots: Vec<Option<(String, String, String, bool)>> = (0..n).map(|_| None).collect();
-    for fut in slot_futures {
-        if let Ok((i, id, name, content, is_error)) = fut.await {
-            slots[i] = Some((id, name, content, is_error));
-        }
-    }
-
-    let mut tool_result_blocks: Vec<ContentBlock> = Vec::with_capacity(n);
-    for slot in slots.into_iter().flatten() {
-        let (id, name, content, is_error) = slot;
+    // Collect results as they complete. Each result emits a ToolResult event
+    // immediately and fills its slot for ordered reassembly.
+    while let Some(result) = futures.next().await {
+        let (i, id, name, content, is_error) = result;
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
             id: id.clone(),
-            name,
+            name: name.clone(),
             content: content.clone(),
             is_error,
+        });
+        slots[i] = Some((id, name, content, is_error));
+    }
+
+    // Synthesize error results for any slot that was never filled to preserve
+    // the Anthropic tool_use/tool_result count invariant.
+    let mut tool_result_blocks: Vec<ContentBlock> = Vec::with_capacity(n);
+    for (i, slot) in slots.into_iter().enumerate() {
+        let (id, _name, content, is_error) = slot.unwrap_or_else(|| {
+            let id = parsed[i].id.clone();
+            let name = parsed[i].name.clone();
+            let content = "Tool execution failed: result was unexpectedly lost".to_string();
+            (id, name, content, true)
         });
         tool_result_blocks.push(ContentBlock::ToolResult {
             tool_use_id: id,
@@ -1871,16 +1904,22 @@ mod tests {
         let entries = log.lock().await;
         assert_eq!(entries.len(), 2, "both tools must have executed");
 
-        let wall_start = entries.iter().map(|(_, s, _)| *s).min().expect("min start");
-        let wall_end = entries.iter().map(|(_, _, e)| *e).max().expect("max end");
-        let wall_ms = (wall_end - wall_start).as_millis();
-        let sum_ms: u64 = 200 + 50;
-
-        // If sequential: wall ≈ 250 ms. If concurrent: wall ≈ 200 ms.
-        // Allow generous slack for CI; the key invariant is overlap.
+        // Assert true overlap: the fast tool must start before the slow tool ends.
+        // This is the actual definition of "ran concurrently" and is immune to
+        // wall-clock noise in CI environments.
+        let slow_entry = entries.iter().find(|(n, _, _)| n == "slow").expect("slow");
+        let fast_entry = entries.iter().find(|(n, _, _)| n == "fast").expect("fast");
         assert!(
-            wall_ms < sum_ms as u128,
-            "tools must overlap: wall={wall_ms}ms sum={sum_ms}ms"
+            fast_entry.1 < slow_entry.2,
+            "fast must start before slow ends: fast_start={:?} slow_end={:?}",
+            fast_entry.1,
+            slow_entry.2
+        );
+        assert!(
+            slow_entry.1 < fast_entry.2,
+            "slow must start before fast ends: slow_start={:?} fast_end={:?}",
+            slow_entry.1,
+            fast_entry.2
         );
     }
 
