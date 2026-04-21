@@ -17,6 +17,8 @@ This skill has two modes:
 1. **GitHub as shared memory** — Plans, reviews, and assessments are on the PR as comments with HTML markers.
 2. **No `#N` in comment bodies** — Use "finding 3", "item 3" etc. instead.
 3. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
+4. **Task tracking** — Use the `tasks_update` tool to show progress.
+5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Step 1: Parse input
 
@@ -50,35 +52,50 @@ Find the plan comment (contains `<!-- mach6-plan -->` marker) from the comments.
 
 Also read any progress updates, prior review findings, assessments, and discussion — all of this context informs implementation.
 
-### Step 4i: Read the codebase
+### Step 4i: Set up task tracking
+
+Create tasks based on the plan's deliverables/features. Example:
+```
+tasks_update([
+  { id: "read", title: "Read plan and codebase", status: "in_progress" },
+  { id: "feature-1", title: "Implement feature 1", status: "pending" },
+  { id: "feature-2", title: "Implement feature 2", status: "pending" },
+  { id: "test", title: "Add/update tests", status: "pending" },
+  { id: "verify", title: "Build and verify", status: "pending" }
+])
+```
+
+### Step 5i: Read the codebase
 
 Read all files mentioned in the plan. Understand the existing code before making changes.
 
-### Step 5i: Implement
+### Step 6i: Implement
 
-Implement each deliverable directly using the available tools (read, edit, write, bash, search, grep, find, ls).
+Use the `feature-dev` subagent to implement each deliverable. `feature-dev` is a **pre-existing agent definition** shipped with dreb — it has full tool access (read, write, edit, grep, find, ls, bash, search) and uses a strong-tier model with a provider fallback list. Do not override its model unless there's a specific reason.
 
-**For each deliverable in the plan**:
-- Identify the specific files to modify and what changes are needed
-- Read existing code for understanding
-- Make the changes using edit_file, write_file, and bash tools
-- Run tests and linting after making changes
+**For each deliverable in the plan**, launch a `feature-dev` subagent via the `subagent` tool. Provide each agent with:
+- The specific deliverable to implement (files to modify, what to change, expected behavior)
+- The full plan context and any relevant PR discussion
+- The list of files to read for understanding existing patterns
+- Instructions to run tests and linting after making changes
 - **If the plan includes tests for this deliverable, tests MUST be written as part of the implementation — not deferred**
 
-**Test coverage is part of the deliverable, not an afterthought.** If the plan specifies tests for a deliverable, implement them directly. If the target package lacks test infrastructure, add it.
+**Test coverage is part of the deliverable, not an afterthought.** If the plan specifies tests for a deliverable, the feature-dev agent must implement them. If the target package lacks test infrastructure, add it.
 
-**Dependency ordering:** If deliverables are independent (don't modify the same files), you may work on them in any order. If they have dependencies, implement them sequentially — later features may depend on earlier ones.
+**Parallelism:** If deliverables are independent (don't modify the same files), run their `feature-dev` agents in parallel. If they have dependencies, use chain mode or run them sequentially — later features may depend on earlier ones.
 
-**Small plans (1-2 simple deliverables):** These should be straightforward to implement directly.
+**Small plans (1-2 simple deliverables):** You may implement directly instead of delegating, if the changes are straightforward enough that subagent overhead isn't justified.
 
-### Step 6i: Verify
+Update task tracking as each deliverable completes.
 
-After implementing all deliverables:
+### Step 7i: Verify
+
+After all `feature-dev` agents complete:
 - Run the project's test suite
 - Run any linting/formatting tools
 - Build the project if applicable
 - Verify each deliverable from the plan is addressed
-- If any issues remain, address the gaps
+- If any agent reported issues or partial completion, address the gaps
 
 Suggest next step: `/skill:mach6-push` then `/skill:mach6-review <pr-number>` for review.
 
@@ -86,7 +103,17 @@ Suggest next step: `/skill:mach6-push` then `/skill:mach6-review <pr-number>` fo
 
 ## Fix Mode (finding numbers or `ci`)
 
-### Step 3f: Gather context
+### Step 3f: Set up task tracking
+
+```
+tasks_update([
+  { id: "gather", title: "Gather findings to fix", status: "in_progress" },
+  { id: "fix", title: "Implement fixes", status: "pending" },
+  { id: "verify", title: "Verify fixes", status: "pending" }
+])
+```
+
+### Step 4f: Gather context
 
 #### If `ci` was specified:
 
@@ -94,6 +121,8 @@ Suggest next step: `/skill:mach6-push` then `/skill:mach6-review <pr-number>` fo
 gh pr checks <pr-number>
 gh run view <run-id> --log-failed
 ```
+
+**Note:** `gh pr checks` returns exit code 8 while checks are still pending — this is expected, not a failure. Wait and re-run if needed.
 
 Read the failed CI logs and identify issues. Extract test failures, stack traces, error messages. If all checks pass, report this and stop.
 
@@ -110,7 +139,7 @@ Find the review (`<!-- mach6-review -->`) and assessment (`<!-- mach6-assessment
 
 Read ALL PR comments, find review/assessment comments, present genuine findings, and ask which to fix.
 
-### Step 4f: Batch sizing
+### Step 5f: Batch sizing
 
 - **Simple fixes** (typos, naming, imports): ~10 per batch
 - **Moderate fixes** (logic changes, refactors): ~6 per batch
@@ -118,25 +147,27 @@ Read ALL PR comments, find review/assessment comments, present genuine findings,
 
 If more than batch size, fix first batch and tell user to re-run.
 
-### Step 5f: Implement fixes
+### Step 6f: Implement fixes
 
-Implement fixes directly using the available tools (read, edit, write, bash, search, grep, find, ls).
+Use the `feature-dev` subagent to implement fixes. `feature-dev` is a **pre-existing agent definition** shipped with dreb — it has full tool access and uses a strong-tier model with a provider fallback list. Do not override its model unless there's a specific reason.
 
-**For each finding** (or batch of related findings):
-- Understand the finding description and the assessment's classification/reasoning
-- Identify the specific files and code locations involved
-- Make the fixes using edit_file, write_file, and bash tools
-- Run tests after fixing
+**For each finding** (or batch of related findings), launch a `feature-dev` subagent with:
+- The finding description and the assessment's classification/reasoning
+- The specific files and code locations involved
+- Instructions on what to fix and how
+- Instructions to run tests after fixing
 
-**Simple fixes** (typos, naming, one-line changes): Fix these directly.
+**Parallelism:** If findings touch different files, run their `feature-dev` agents in parallel. If findings overlap (same file/function), batch them into a single agent.
 
-Defer out-of-scope items to new issues.
+**Simple fixes** (typos, naming, one-line changes): You may fix these directly instead of delegating.
 
-### Step 6f: Verify
+Defer out-of-scope items to new issues. Update task tracking per finding.
 
-After implementing all fixes:
+### Step 7f: Verify
+
+After all `feature-dev` agents complete:
 - Run tests and linting
 - Verify each fix addresses its finding
-- If any issues remain, address the gaps
+- If any agent reported issues, address the gaps
 
 Suggest next step: `/skill:mach6-push` then `/skill:mach6-review <pr-number>` for re-review.
