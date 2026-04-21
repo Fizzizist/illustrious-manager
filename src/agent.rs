@@ -417,7 +417,7 @@ async fn execute_tool_calls(
 
         let (result_content, is_error) = if approved {
             match tools.lookup(&call.name) {
-                Ok(tool) => match tool.execute(input) {
+                Ok(tool) => match tool.execute(input).await {
                     Ok(result) => {
                         let content = result
                             .content
@@ -544,6 +544,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Tool for EchoTool {
         fn name(&self) -> &str {
             &self.name
@@ -557,7 +558,7 @@ mod tests {
         fn is_write_tool(&self) -> bool {
             self.is_write
         }
-        fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+        async fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
             Ok(ToolExecResult {
                 content: vec![ContentBlock::Text(self.output.clone())],
                 is_error: false,
