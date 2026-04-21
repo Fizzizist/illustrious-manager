@@ -210,8 +210,17 @@ pub enum StreamEvent {
     ToolUseStart {
         id: String,
         name: String,
+        /// Tool index for OpenAI-compatible streaming where multiple tool calls
+        /// are interleaved. `None` for Anthropic-style backends.
+        index: Option<u64>,
     },
-    ToolUseDelta(String),
+    ToolUseDelta {
+        chunk: String,
+        /// Tool index for OpenAI-compatible streaming where multiple tool calls
+        /// are interleaved in a single response. `None` for Anthropic-style
+        /// backends where per-tool `ToolUseDone` signals handle sequencing.
+        index: Option<u64>,
+    },
     ToolUseDone,
     /// Token usage and stop reason reported by the backend at the end of a response.
     Usage {
@@ -464,9 +473,10 @@ mod tests {
         let event = StreamEvent::ToolUseStart {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
+            index: None,
         };
         assert!(matches!(event, StreamEvent::ToolUseStart { .. }));
-        if let StreamEvent::ToolUseStart { id, name } = event {
+        if let StreamEvent::ToolUseStart { id, name, .. } = event {
             assert_eq!(id, "tool-123");
             assert_eq!(name, "bash");
         }
@@ -474,9 +484,12 @@ mod tests {
 
     #[test]
     fn stream_event_tool_use_delta_variant_contains_string_delta() {
-        let event = StreamEvent::ToolUseDelta("{".to_string());
-        assert!(matches!(event, StreamEvent::ToolUseDelta(_)));
-        if let StreamEvent::ToolUseDelta(delta) = event {
+        let event = StreamEvent::ToolUseDelta {
+            chunk: "{".to_string(),
+            index: None,
+        };
+        assert!(matches!(event, StreamEvent::ToolUseDelta { .. }));
+        if let StreamEvent::ToolUseDelta { chunk: delta, .. } = event {
             assert_eq!(delta, "{");
         }
     }

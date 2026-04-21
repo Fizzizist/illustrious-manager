@@ -100,14 +100,17 @@ impl ZaiSseParser {
                         self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),
+                            index: Some(index),
                         });
                     }
 
                     if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
                         && !arguments.is_empty()
                     {
-                        self.event_buffer
-                            .push(StreamEvent::ToolUseDelta(arguments.to_string()));
+                        self.event_buffer.push(StreamEvent::ToolUseDelta {
+                            chunk: arguments.to_string(),
+                            index: Some(index),
+                        });
                     }
                 }
             }
@@ -574,7 +577,7 @@ mod tests {
             "Should be ToolUseStart, got: {:?}",
             event
         );
-        if let Some(StreamEvent::ToolUseStart { id, name }) = event {
+        if let Some(StreamEvent::ToolUseStart { id, name, .. }) = event {
             assert_eq!(name, "bash");
             // For OpenAI-compatible format, we generate our own ID
             assert!(!id.is_empty(), "ID should not be empty");
@@ -594,11 +597,11 @@ mod tests {
         let event = result.unwrap();
         assert!(event.is_some(), "Should return Some(event)");
         assert!(
-            matches!(event, Some(StreamEvent::ToolUseDelta(_))),
+            matches!(event, Some(StreamEvent::ToolUseDelta { .. })),
             "Should be ToolUseDelta, got: {:?}",
             event
         );
-        if let Some(StreamEvent::ToolUseDelta(delta)) = event {
+        if let Some(StreamEvent::ToolUseDelta { chunk: delta, .. }) = event {
             assert_eq!(delta, "{\"comm");
         }
     }
@@ -724,7 +727,7 @@ mod tests {
         assert!(result2.is_ok());
         let event2 = result2.unwrap();
         assert!(event2.is_some());
-        if let Some(StreamEvent::ToolUseDelta(delta)) = event2 {
+        if let Some(StreamEvent::ToolUseDelta { chunk: delta, .. }) = event2 {
             assert_eq!(delta, "ls");
         } else {
             panic!("Second event should be ToolUseDelta for bash");
@@ -744,7 +747,7 @@ mod tests {
         assert!(result4.is_ok());
         let event4 = result4.unwrap();
         assert!(event4.is_some());
-        if let Some(StreamEvent::ToolUseDelta(delta)) = event4 {
+        if let Some(StreamEvent::ToolUseDelta { chunk: delta, .. }) = event4 {
             assert_eq!(delta, "tmp");
         } else {
             panic!("Fourth event should be ToolUseDelta for read_file");

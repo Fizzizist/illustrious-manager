@@ -77,8 +77,11 @@ impl VertexSseParser {
                             anyhow::anyhow!("tool_use content_block_start missing 'name'")
                         })?
                         .to_string();
-                    self.event_buffer
-                        .push(StreamEvent::ToolUseStart { id, name });
+                    self.event_buffer.push(StreamEvent::ToolUseStart {
+                        id,
+                        name,
+                        index: None,
+                    });
                 }
             }
             "content_block_delta" => {
@@ -90,7 +93,8 @@ impl VertexSseParser {
                         .as_str()
                         .ok_or_else(|| anyhow::anyhow!("input_json_delta missing 'partial_json'"))?
                         .to_string();
-                    self.event_buffer.push(StreamEvent::ToolUseDelta(chunk));
+                    self.event_buffer
+                        .push(StreamEvent::ToolUseDelta { chunk, index: None });
                 } else {
                     let text = json["delta"]["text"].as_str().unwrap_or("").to_string();
                     self.event_buffer.push(StreamEvent::TextDelta(text));
@@ -414,9 +418,10 @@ mod tests {
         let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"bash"}}"#;
         let result = parser.parse(data).expect("should parse successfully");
         match result {
-            Some(StreamEvent::ToolUseStart { id, name }) => {
+            Some(StreamEvent::ToolUseStart { id, name, index }) => {
                 assert_eq!(id, "toolu_01");
                 assert_eq!(name, "bash");
+                assert_eq!(index, None);
             }
             other => panic!("expected ToolUseStart, got {:?}", other),
         }
@@ -428,8 +433,9 @@ mod tests {
         let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}"#;
         let result = parser.parse(data).expect("should parse successfully");
         match result {
-            Some(StreamEvent::ToolUseDelta(chunk)) => {
+            Some(StreamEvent::ToolUseDelta { chunk, index }) => {
                 assert_eq!(chunk, "{\"command\":");
+                assert_eq!(index, None);
             }
             other => panic!("expected ToolUseDelta, got {:?}", other),
         }

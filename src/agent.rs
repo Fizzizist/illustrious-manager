@@ -262,6 +262,9 @@ impl Agent {
                 let mut text_accumulated = String::new();
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
+                let mut pending_by_index: std::collections::HashMap<u64, PendingToolCall> =
+                    std::collections::HashMap::new();
+                let mut has_indexed_tools = false;
                 let mut stream = backend_stream;
 
                 while let Some(result) = stream.next().await {
@@ -270,21 +273,51 @@ impl Agent {
                             text_accumulated.push_str(&text);
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                         }
-                        Ok(StreamEvent::ToolUseStart { id, name }) => {
-                            current_tool = Some(PendingToolCall {
+                        Ok(StreamEvent::ToolUseStart { id, name, index }) => {
+                            let tool = PendingToolCall {
                                 id,
                                 name,
                                 input_json: String::new(),
-                            });
-                        }
-                        Ok(StreamEvent::ToolUseDelta(chunk)) => {
-                            if let Some(ref mut t) = current_tool {
-                                t.input_json.push_str(&chunk);
+                            };
+                            match index {
+                                Some(idx) => {
+                                    has_indexed_tools = true;
+                                    pending_by_index.insert(idx, tool);
+                                }
+                                None => {
+                                    current_tool = Some(tool);
+                                }
                             }
                         }
+                        Ok(StreamEvent::ToolUseDelta { chunk, index }) => match index {
+                            Some(idx) => {
+                                if let Some(t) = pending_by_index.get_mut(&idx) {
+                                    t.input_json.push_str(&chunk);
+                                }
+                            }
+                            None => {
+                                if let Some(ref mut t) = current_tool {
+                                    t.input_json.push_str(&chunk);
+                                }
+                            }
+                        },
                         Ok(StreamEvent::ToolUseDone) => {
                             if let Some(t) = current_tool.take() {
                                 tool_calls.push(t);
+                            }
+                            // For indexed tools (OpenAI-compatible), ToolUseDone
+                            // signals all tools are complete. Collect them in
+                            // index order.
+                            if has_indexed_tools && current_tool.is_none() {
+                                let max_index = pending_by_index.keys().max().copied();
+                                if let Some(max) = max_index {
+                                    for i in 0..=max {
+                                        if let Some(t) = pending_by_index.remove(&i) {
+                                            tool_calls.push(t);
+                                        }
+                                    }
+                                }
+                                has_indexed_tools = false;
                             }
                         }
                         Ok(StreamEvent::Usage {
@@ -693,8 +726,12 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: id.to_string(),
                 name: name.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(input.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: input.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::Done),
         ]
@@ -1040,14 +1077,22 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: "tool-1".to_string(),
                 name: "bash".to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::ToolUseStart {
                 id: "tool-2".to_string(),
                 name: "bash".to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::Done),
         ];
@@ -1096,8 +1141,12 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta("not valid json {{{".to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: "not valid json {{{".to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::Done),
         ];
@@ -1138,6 +1187,7 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
+                index: None,
             }),
             // No ToolUseDelta — input_json stays empty
             Ok(StreamEvent::ToolUseDone),
@@ -1823,14 +1873,22 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: id1.to_string(),
                 name: name1.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::ToolUseStart {
                 id: id2.to_string(),
                 name: name2.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::Done),
         ]
@@ -1848,20 +1906,32 @@ mod tests {
             Ok(StreamEvent::ToolUseStart {
                 id: id1.to_string(),
                 name: name1.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::ToolUseStart {
                 id: id2.to_string(),
                 name: name2.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::ToolUseStart {
                 id: id3.to_string(),
                 name: name3.to_string(),
+                index: None,
             }),
-            Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: None,
+            }),
             Ok(StreamEvent::ToolUseDone),
             Ok(StreamEvent::Done),
         ]
@@ -2159,5 +2229,97 @@ mod tests {
             assert!(!is_error, "{id} must not be an error");
             assert_eq!(*content, "real output", "{id} must have real output");
         }
+    }
+
+    #[tokio::test]
+    async fn indexed_tool_calls_from_openai_backend_accumulate_correctly() {
+        // Regression: OpenAI-compatible backends (zai, ollama) emit tool calls
+        // with index fields and a single ToolUseDone at the end. The accumulation
+        // loop must track each tool by index, not overwrite with the last one.
+        let log = Arc::new(tokio::sync::Mutex::new(vec![]));
+        let indexed_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "tool_0".to_string(),
+                name: "slow".to_string(),
+                index: Some(0),
+            }),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: Some(0),
+            }),
+            Ok(StreamEvent::ToolUseStart {
+                id: "tool_1".to_string(),
+                name: "fast".to_string(),
+                index: Some(1),
+            }),
+            Ok(StreamEvent::ToolUseDelta {
+                chunk: r#"{}"#.to_string(),
+                index: Some(1),
+            }),
+            // Single ToolUseDone for all indexed tools
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![indexed_response, text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(SleepyTool::new("slow", 50, Arc::clone(&log))))
+            .expect("register slow");
+        registry
+            .register(Box::new(SleepyTool::new("fast", 10, Arc::clone(&log))))
+            .expect("register fast");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        // Both tools must have executed.
+        let entries = log.lock().await;
+        assert_eq!(entries.len(), 2, "both indexed tools must have executed");
+
+        // Verify history has tool_result blocks in index order (tool_0, tool_1).
+        let history = agent.history();
+        let tool_result_msg = history
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .expect("must have a tool result message");
+
+        let ids: Vec<&str> = tool_result_msg
+            .content
+            .iter()
+            .filter_map(|b| {
+                if let ContentBlock::ToolResult { tool_use_id, .. } = b {
+                    Some(tool_use_id.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["tool_0", "tool_1"],
+            "indexed tool_result blocks must appear in index order"
+        );
     }
 }

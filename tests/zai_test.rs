@@ -55,7 +55,7 @@ fn test_parse_sse_tool_use_start() {
     let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#;
     let event = parser.parse(data).unwrap();
     match event {
-        Some(illustrious_manager::types::StreamEvent::ToolUseStart { id, name }) => {
+        Some(illustrious_manager::types::StreamEvent::ToolUseStart { id, name, .. }) => {
             assert_eq!(name, "bash");
             assert_eq!(id, "tool_0");
         }
@@ -70,7 +70,7 @@ fn test_parse_sse_tool_use_delta() {
         r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ls"}}]}}]}"#;
     let event = parser.parse(data).unwrap();
     match event {
-        Some(illustrious_manager::types::StreamEvent::ToolUseDelta(delta)) => {
+        Some(illustrious_manager::types::StreamEvent::ToolUseDelta { chunk: delta, .. }) => {
             assert_eq!(delta, "ls");
         }
         other => panic!("Expected ToolUseDelta, got {:?}", other),

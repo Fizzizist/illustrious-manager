@@ -63,8 +63,15 @@ impl OllamaParser {
                     "{}".to_string()
                 };
 
-                events.push(StreamEvent::ToolUseStart { id, name });
-                events.push(StreamEvent::ToolUseDelta(arguments));
+                events.push(StreamEvent::ToolUseStart {
+                    id,
+                    name,
+                    index: Some(idx as u64),
+                });
+                events.push(StreamEvent::ToolUseDelta {
+                    chunk: arguments,
+                    index: Some(idx as u64),
+                });
                 events.push(StreamEvent::ToolUseDone);
             }
         }
@@ -316,9 +323,11 @@ mod tests {
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 3);
         assert!(
-            matches!(&events[0], StreamEvent::ToolUseStart { id, name } if id == "call_1" && name == "bash")
+            matches!(&events[0], StreamEvent::ToolUseStart { id, name, .. } if id == "call_1" && name == "bash")
         );
-        assert!(matches!(&events[1], StreamEvent::ToolUseDelta(args) if args.contains("ls")));
+        assert!(
+            matches!(&events[1], StreamEvent::ToolUseDelta { chunk: args, .. } if args.contains("ls"))
+        );
         assert!(matches!(&events[2], StreamEvent::ToolUseDone));
     }
 
@@ -329,12 +338,12 @@ mod tests {
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 6);
         assert!(matches!(&events[0], StreamEvent::ToolUseStart { name, .. } if name == "bash"));
-        assert!(matches!(&events[1], StreamEvent::ToolUseDelta(_)));
+        assert!(matches!(&events[1], StreamEvent::ToolUseDelta { .. }));
         assert!(matches!(&events[2], StreamEvent::ToolUseDone));
         assert!(
             matches!(&events[3], StreamEvent::ToolUseStart { name, .. } if name == "read_file")
         );
-        assert!(matches!(&events[4], StreamEvent::ToolUseDelta(_)));
+        assert!(matches!(&events[4], StreamEvent::ToolUseDelta { .. }));
         assert!(matches!(&events[5], StreamEvent::ToolUseDone));
     }
 
@@ -662,7 +671,7 @@ mod tests {
         let chunk = r#"{"message":{"tool_calls":[{"function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 3);
-        if let StreamEvent::ToolUseStart { id, name } = &events[0] {
+        if let StreamEvent::ToolUseStart { id, name, .. } = &events[0] {
             assert_eq!(name, "bash");
             assert_eq!(id, "tool_0", "should generate fallback ID with index");
         } else {
@@ -678,7 +687,7 @@ mod tests {
         assert_eq!(events.len(), 4);
         assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Thinking..."));
         assert!(matches!(&events[1], StreamEvent::ToolUseStart { .. }));
-        assert!(matches!(&events[2], StreamEvent::ToolUseDelta(_)));
+        assert!(matches!(&events[2], StreamEvent::ToolUseDelta { .. }));
         assert!(matches!(&events[3], StreamEvent::ToolUseDone));
     }
 }
