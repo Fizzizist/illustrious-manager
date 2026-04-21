@@ -133,6 +133,16 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
+
+# Named model roles for multi-agent workflows.
+# When absent, a "default" role is synthesized from the top-level backend
+# and the matching [vertex]/[zai]/[ollama] model field above.
+# [models.thinking]
+# backend = "vertex"
+# model = "claude-3-5-thinking"
+# [models.implement]
+# backend = "vertex"
+# model = "claude-sonnet-4-20250514"
 "#;
 
 /// A named model role binding a backend to a specific model string.
