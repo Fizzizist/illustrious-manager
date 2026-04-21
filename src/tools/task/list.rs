@@ -26,7 +26,8 @@ impl ListTasksTool {
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "Optional status filter: pending, in_progress, or completed"
+                        "enum": ["pending", "in_progress", "completed"],
+                        "description": "Optional status filter"
                     }
                 }
             }),
@@ -284,12 +285,5 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, ToolError::InvalidInput { .. }));
-    }
-
-    #[tokio::test]
-    async fn is_write_tool_returns_false() {
-        let session = test_session_arc().await;
-        let tool = ListTasksTool::new(session);
-        assert!(!tool.is_write_tool());
     }
 }

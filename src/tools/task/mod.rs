@@ -9,6 +9,15 @@ pub use delete::DeleteTaskTool;
 pub use list::ListTasksTool;
 pub use update::UpdateTaskTool;
 
+use std::time::SystemTime;
+
+pub(super) fn now_epoch_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system time is before UNIX epoch")
+        .as_secs() as i64
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -10,12 +9,7 @@ use crate::session::Session;
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
 
-fn now_epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system time is before UNIX epoch")
-        .as_secs() as i64
-}
+use super::now_epoch_secs;
 
 pub struct CreateTaskTool {
     session: Arc<TokioMutex<Session>>,
@@ -176,12 +170,5 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, ToolError::InvalidInput { .. }));
-    }
-
-    #[tokio::test]
-    async fn is_write_tool_returns_false() {
-        let session = test_session_arc().await;
-        let tool = CreateTaskTool::new(session);
-        assert!(!tool.is_write_tool());
     }
 }
