@@ -3,13 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
-use turso::Value as DbValue;
 
 use crate::session::Session;
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
-
-use super::now_epoch_secs;
 
 pub struct CreateTaskTool {
     session: Arc<TokioMutex<Session>>,
@@ -52,57 +49,20 @@ impl Tool for CreateTaskTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .ok_or_else(|| ToolError::InvalidInput {
-                message: "title is required".to_string(),
-            })?
-            .to_string();
+                message: "title is required and must not be empty".to_string(),
+            })?;
 
-        let description = input
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+        let description = input.get("description").and_then(|v| v.as_str());
 
-        let now = now_epoch_secs();
         let session = self.session.lock().await;
-
-        let mut rows = session
-            .conn
-            .query(
-                "INSERT INTO task (title, description, status, created_at, updated_at) VALUES (?1, ?2, 'pending', ?3, ?4) RETURNING id",
-                [
-                    DbValue::Text(title),
-                    description.map(DbValue::Text).unwrap_or(DbValue::Null),
-                    DbValue::Integer(now),
-                    DbValue::Integer(now),
-                ],
-            )
+        let id = session
+            .tasks()
+            .create(title, description)
             .await
             .map_err(|e| ToolError::Execution {
                 tool_name: "create_task".to_string(),
                 message: e.to_string(),
             })?;
-
-        let id = if let Some(row) = rows.next().await.map_err(|e| ToolError::Execution {
-            tool_name: "create_task".to_string(),
-            message: e.to_string(),
-        })? {
-            match row.get_value(0).map_err(|e| ToolError::Execution {
-                tool_name: "create_task".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(id) => id,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "create_task".to_string(),
-                        message: format!("Unexpected id type: {:?}", other),
-                    });
-                }
-            }
-        } else {
-            return Err(ToolError::Execution {
-                tool_name: "create_task".to_string(),
-                message: "INSERT returned no rows".to_string(),
-            });
-        };
 
         Ok(ToolResult {
             content: vec![ContentBlock::Text(format!("Created task with id {}", id))],
@@ -142,23 +102,12 @@ mod tests {
     async fn create_task_with_description() {
         let session = test_session_arc().await;
         let tool = CreateTaskTool::new(Arc::clone(&session));
-        let result = tool
-            .execute(serde_json::json!({"title": "t", "description": "desc"}))
+        tool.execute(serde_json::json!({"title": "t", "description": "desc"}))
             .await
             .expect("create");
-        assert!(!result.is_error);
 
-        let sess = session.lock().await;
-        let mut rows = sess
-            .conn
-            .query("SELECT description FROM task WHERE id = 1", ())
-            .await
-            .expect("query");
-        let row = rows.next().await.expect("next").expect("row");
-        match row.get_value(0).expect("val") {
-            DbValue::Text(d) => assert_eq!(d, "desc"),
-            other => panic!("unexpected: {:?}", other),
-        }
+        let tasks = session.lock().await.tasks().list(None).await.expect("list");
+        assert_eq!(tasks[0].description.as_deref(), Some("desc"));
     }
 
     #[tokio::test]

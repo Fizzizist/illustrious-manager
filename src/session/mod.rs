@@ -1,9 +1,15 @@
-use anyhow::{Context, Result, bail};
+pub mod task;
+
+mod conversation;
+
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::time::SystemTime;
-use turso::{Builder, Connection, Value};
+use turso::{Builder, Connection};
 
-use crate::types::{ContentBlock, Message, Role};
+pub use task::{TaskRecord, TaskRepo, TaskStatus};
+
+use crate::types::Message;
 
 /// Summary of a session, used for the session picker.
 #[derive(Debug, Clone)]
@@ -14,7 +20,6 @@ pub struct SessionSummary {
 }
 
 /// List all sessions in the given directory, ordered by most recently modified first.
-/// Each summary includes the session ID and the first user message text.
 pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionSummary>> {
     let mut summaries = Vec::new();
 
@@ -53,7 +58,9 @@ pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionS
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let first_user_message = read_first_user_message(&path).await.unwrap_or_default();
+        let first_user_message = read_first_user_message_from_path(&path)
+            .await
+            .unwrap_or_default();
 
         summaries.push(SessionSummary {
             id: file_stem,
@@ -67,36 +74,18 @@ pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionS
     Ok(summaries)
 }
 
-async fn read_first_user_message(db_path: &std::path::Path) -> Result<String> {
+async fn read_first_user_message_from_path(db_path: &std::path::Path) -> Result<String> {
     let db = Builder::new_local(db_path.to_string_lossy().as_ref())
         .build()
         .await
         .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
     let conn = db.connect()?;
-
-    let mut rows = conn
-        .query(
-            "SELECT content FROM conversation WHERE role = 'user' ORDER BY id ASC LIMIT 1",
-            (),
-        )
-        .await
-        .context("Failed to query first user message")?;
-
-    if let Some(row) = rows.next().await? {
-        let content_str = match row.get_value(0)? {
-            Value::Text(s) => s,
-            _ => return Ok(String::new()),
-        };
-        let blocks: Vec<ContentBlock> =
-            serde_json::from_str(&content_str).context("Failed to deserialize content blocks")?;
-        for block in blocks {
-            if let ContentBlock::Text(text) = block {
-                return Ok(text);
-            }
-        }
-    }
-
-    Ok(String::new())
+    let session = Session {
+        id: String::new(),
+        conn,
+        db_path: db_path.to_path_buf(),
+    };
+    conversation::read_first_user_message(&session).await
 }
 
 const SCHEMA: &str = "\
@@ -147,39 +136,20 @@ impl Session {
         })
     }
 
+    pub fn tasks(&self) -> TaskRepo<'_> {
+        TaskRepo::new(self)
+    }
+
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        let content_json = serde_json::to_string(&message.content)
-            .context("Failed to serialize message content")?;
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
-        self.conn
-            .execute(
-                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
-                [Value::Text(role_str.to_string()), Value::Text(content_json)],
-            )
-            .await
-            .context("Failed to insert message into session")?;
-        Ok(())
+        conversation::insert_message(self, message).await
     }
 
     pub async fn is_empty(&self) -> Result<bool> {
-        let mut rows = self
-            .conn
-            .query("SELECT COUNT(*) FROM conversation", ())
-            .await
-            .context("Failed to count conversation messages")?;
+        conversation::is_empty(self).await
+    }
 
-        if let Some(row) = rows.next().await? {
-            let count = match row.get_value(0)? {
-                Value::Integer(n) => n,
-                _ => return Ok(true),
-            };
-            return Ok(count == 0);
-        }
-
-        Ok(true)
+    pub async fn load_history(&self) -> Result<Vec<Message>> {
+        conversation::load_history(self).await
     }
 
     pub fn delete_db(&self) -> Result<()> {
@@ -196,39 +166,6 @@ impl Session {
         }
         Ok(())
     }
-
-    pub async fn load_history(&self) -> Result<Vec<Message>> {
-        let mut rows = self
-            .conn
-            .query("SELECT role, content FROM conversation ORDER BY id ASC", ())
-            .await
-            .context("Failed to query conversation history")?;
-
-        let mut messages = Vec::new();
-        while let Some(row) = rows.next().await? {
-            let role_str = match row.get_value(0)? {
-                Value::Text(s) => s,
-                other => bail!("Unexpected role type in DB: {:?}", other),
-            };
-            let content_str = match row.get_value(1)? {
-                Value::Text(s) => s,
-                other => bail!("Unexpected content type in DB: {:?}", other),
-            };
-
-            let role = match role_str.as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                other => bail!("Unknown role in DB: {}", other),
-            };
-
-            let content: Vec<ContentBlock> =
-                serde_json::from_str(&content_str).context("Failed to deserialize content")?;
-
-            messages.push(Message { role, content });
-        }
-
-        Ok(messages)
-    }
 }
 
 fn generate_uuidv7() -> String {
@@ -240,7 +177,7 @@ fn validate_uuidv7(id: &str) -> Result<()> {
     let version = parsed.get_version();
     match version {
         Some(uuid::Version::SortRand) | Some(uuid::Version::SortMac) => Ok(()),
-        _ => bail!(
+        _ => anyhow::bail!(
             "Session ID must be a valid UUIDv7, got version {:?}",
             version
         ),
@@ -250,6 +187,7 @@ fn validate_uuidv7(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{ContentBlock, Role};
     use tempfile::TempDir;
 
     #[test]
@@ -642,7 +580,6 @@ mod tests {
         let session = Session::new(None, dir.path().to_path_buf())
             .await
             .expect("create");
-        // No WAL/SHM files — should still succeed
         session.delete_db().expect("delete_db");
     }
 
@@ -653,19 +590,8 @@ mod tests {
             .await
             .expect("create session");
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("time")
-            .as_secs() as i64;
-
-        session
-            .conn
-            .execute(
-                "INSERT INTO task (title, status, created_at, updated_at) VALUES ('t', 'pending', ?1, ?2)",
-                [turso::Value::Integer(now), turso::Value::Integer(now)],
-            )
-            .await
-            .expect("task insert should succeed");
+        let id = session.tasks().create("t", None).await.expect("create");
+        assert_eq!(id, 1);
     }
 
     #[tokio::test]
@@ -677,26 +603,16 @@ mod tests {
             let session = Session::new(Some(id.clone()), dir.path().to_path_buf())
                 .await
                 .expect("create");
-            let msg = Message::text(Role::User, "hello".to_string());
-            session.insert_message(&msg).await.expect("insert");
+            session
+                .insert_message(&Message::text(Role::User, "hello".to_string()))
+                .await
+                .expect("insert");
         }
 
         let session = Session::new(Some(id), dir.path().to_path_buf())
             .await
             .expect("reopen");
-
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("time")
-            .as_secs() as i64;
-
-        session
-            .conn
-            .execute(
-                "INSERT INTO task (title, status, created_at, updated_at) VALUES ('t', 'pending', ?1, ?2)",
-                [turso::Value::Integer(now), turso::Value::Integer(now)],
-            )
-            .await
-            .expect("task insert on reopened session should succeed");
+        let task_id = session.tasks().create("t", None).await.expect("create");
+        assert_eq!(task_id, 1);
     }
 }

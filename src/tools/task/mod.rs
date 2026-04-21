@@ -1,22 +1,12 @@
 pub mod create;
 pub mod delete;
 pub mod list;
-pub mod status;
 pub mod update;
 
 pub use create::CreateTaskTool;
 pub use delete::DeleteTaskTool;
 pub use list::ListTasksTool;
 pub use update::UpdateTaskTool;
-
-use std::time::SystemTime;
-
-pub(super) fn now_epoch_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .expect("system time is before UNIX epoch")
-        .as_secs() as i64
-}
 
 #[cfg(test)]
 mod tests {
@@ -25,16 +15,17 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     use crate::session::Session;
-    use crate::tools::{Tool, ToolError};
+    use crate::tools::Tool;
     use crate::types::ContentBlock;
 
     use super::*;
 
     async fn test_session_arc_in(dir: &std::path::Path) -> Arc<TokioMutex<Session>> {
-        let session = Session::new(None, dir.to_path_buf())
-            .await
-            .expect("session");
-        Arc::new(TokioMutex::new(session))
+        Arc::new(TokioMutex::new(
+            Session::new(None, dir.to_path_buf())
+                .await
+                .expect("session"),
+        ))
     }
 
     async fn test_session_arc() -> Arc<TokioMutex<Session>> {
@@ -49,7 +40,7 @@ mod tests {
             .expect("create");
     }
 
-    fn task_titles(result: &crate::tools::ToolResult) -> Vec<String> {
+    fn task_titles_from_result(result: &crate::tools::ToolResult) -> Vec<String> {
         let text = match &result.content[0] {
             ContentBlock::Text(t) => t.clone(),
             _ => panic!("expected text"),
@@ -66,22 +57,23 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         let dir_path = dir.keep();
 
-        let id = {
+        let session_id = {
             let session = Session::new(None, dir_path.clone()).await.expect("create");
             let id = session.id.clone();
-            let arc = Arc::new(TokioMutex::new(session));
-            create_task(&arc, "persisted task").await;
+            session
+                .tasks()
+                .create("persisted task", None)
+                .await
+                .expect("create");
             id
         };
 
-        let session2 = Session::new(Some(id), dir_path).await.expect("reopen");
-        let arc2 = Arc::new(TokioMutex::new(session2));
-        let result = ListTasksTool::new(arc2)
-            .execute(serde_json::json!({}))
+        let session2 = Session::new(Some(session_id), dir_path)
             .await
-            .expect("list");
-        let titles = task_titles(&result);
-        assert_eq!(titles, vec!["persisted task"]);
+            .expect("reopen");
+        let tasks = session2.tasks().list(None).await.expect("list");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "persisted task");
     }
 
     #[tokio::test]
@@ -93,13 +85,14 @@ mod tests {
         create_task(&session_a, "session a task").await;
 
         let session_b = test_session_arc_in(&dir_path).await;
-
-        let result = ListTasksTool::new(session_b)
-            .execute(serde_json::json!({}))
+        let tasks = session_b
+            .lock()
+            .await
+            .tasks()
+            .list(None)
             .await
             .expect("list");
-        let titles = task_titles(&result);
-        assert!(titles.is_empty(), "session B should have no tasks");
+        assert!(tasks.is_empty(), "session B should have no tasks");
     }
 
     #[tokio::test]
@@ -113,23 +106,23 @@ mod tests {
         let arc = Arc::new(TokioMutex::new(session_a));
         create_task(&arc, "task in A").await;
 
-        // Swap inner session to B
         *arc.lock().await = session_b;
 
         let result = ListTasksTool::new(Arc::clone(&arc))
             .execute(serde_json::json!({}))
             .await
-            .expect("list");
-        let titles = task_titles(&result);
-        assert!(titles.is_empty(), "after swap to B, list should be empty");
+            .expect("list after swap");
+        assert!(
+            task_titles_from_result(&result).is_empty(),
+            "after swap to B, list should be empty"
+        );
 
         create_task(&arc, "task in B").await;
         let result2 = ListTasksTool::new(Arc::clone(&arc))
             .execute(serde_json::json!({}))
             .await
             .expect("list after create in B");
-        let titles2 = task_titles(&result2);
-        assert_eq!(titles2, vec!["task in B"]);
+        assert_eq!(task_titles_from_result(&result2), vec!["task in B"]);
     }
 
     #[tokio::test]
