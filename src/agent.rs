@@ -44,9 +44,14 @@ impl Agent {
     pub async fn new(
         backend: Box<dyn LlmBackend>,
         config: RequestConfig,
-        session: Session,
+        session: Arc<TokioMutex<Session>>,
     ) -> Self {
-        let history: Vec<Message> = session.load_history().await.unwrap_or_default();
+        let history: Vec<Message> = session
+            .lock()
+            .await
+            .load_history()
+            .await
+            .unwrap_or_default();
 
         Self {
             backend: Arc::from(backend),
@@ -56,7 +61,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            session: Arc::new(TokioMutex::new(session)),
+            session,
         }
     }
 
@@ -478,7 +483,7 @@ pub async fn spawn_agent(
     factory: &BackendFactory,
     role: &str,
     tool_config: &ToolsConfig,
-    session: Session,
+    session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let selection = factory.for_role(role).await?;
@@ -491,7 +496,7 @@ pub async fn spawn_agent(
 pub async fn spawn_agent_with_selection(
     selection: crate::backend::BackendSelection,
     tool_config: &ToolsConfig,
-    session: Session,
+    session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let request_config = RequestConfig {
@@ -517,6 +522,10 @@ mod tests {
     async fn test_session() -> Session {
         let dir = tempfile::TempDir::new().expect("temp dir");
         Session::new(None, dir.keep()).await.expect("test session")
+    }
+
+    async fn test_session_arc() -> Arc<TokioMutex<Session>> {
+        Arc::new(TokioMutex::new(test_session().await))
     }
 
     struct SequencedBackend {
@@ -632,7 +641,7 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config, test_session().await)
+        Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config)
@@ -743,7 +752,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -787,7 +796,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -832,7 +841,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -878,7 +887,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -933,7 +942,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1197,7 +1206,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1271,7 +1280,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1315,7 +1324,7 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&skills);
 
@@ -1342,7 +1351,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&std::collections::HashMap::new());
 
@@ -1378,7 +1387,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.history().len(), 1);
         assert!(
@@ -1426,9 +1440,13 @@ mod tests {
         std::fs::write(&skill_path, "---\ndescription: A test skill\n---\nContent").expect("write");
         skills.insert("test-skill".to_string(), skill_path);
 
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a)
-            .await
-            .with_skills(&skills);
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await
+        .with_skills(&skills);
 
         // history should be: [skill_prefix, session_a_message]
         assert_eq!(agent.history().len(), 2);
@@ -1468,7 +1486,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.session_id().await, id_a);
         agent.load_session(session_b).await;
@@ -1489,7 +1512,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(!db_path.exists());
@@ -1512,7 +1540,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(db_path.exists());
@@ -1525,9 +1558,11 @@ mod tests {
         use crate::tools::ToolRegistry;
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = Session::new(None, dir.path().to_path_buf())
-            .await
-            .expect("session");
+        let session = Arc::new(TokioMutex::new(
+            Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("session"),
+        ));
 
         let selection = BackendSelection {
             backend: Box::new(SequencedBackend::new(vec![])),

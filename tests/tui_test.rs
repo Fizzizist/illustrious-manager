@@ -192,7 +192,9 @@ async fn user_message_appears_immediately() {
         call_count: call_count.clone(),
     });
     let dir = tempfile::TempDir::new().expect("temp dir");
-    let session = Session::new(None, dir.keep()).await.expect("test session");
+    let session = Arc::new(tokio::sync::Mutex::new(
+        Session::new(None, dir.keep()).await.expect("test session"),
+    ));
     let agent = Arc::new(Agent::new(backend, config, session).await);
 
     let mut app = App::new(std::sync::Arc::new(

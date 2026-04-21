@@ -744,7 +744,9 @@ mod tests {
             responses: Arc::new(tokio::sync::Mutex::new(responses)),
         };
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = Session::new(None, dir.keep()).await.expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Session::new(None, dir.keep()).await.expect("test session"),
+        ));
         let config = crate::types::RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,

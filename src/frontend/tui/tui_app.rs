@@ -757,9 +757,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1303,6 +1305,11 @@ mod tests {
             .await
             .expect("insert");
 
+        let initial_session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir_path.clone())
+                .await
+                .expect("initial session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1311,9 +1318,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                 },
-                crate::session::Session::new(None, dir_path.clone())
-                    .await
-                    .expect("initial session"),
+                initial_session,
             )
             .await,
         );
@@ -1568,9 +1573,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1610,9 +1617,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),

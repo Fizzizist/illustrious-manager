@@ -223,9 +223,10 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
             let agent = Arc::new(
                 crate::agent::Agent::new(
                     Box::new(FakeBackend),
@@ -261,9 +262,10 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
             let agent = Arc::new(
                 crate::agent::Agent::new(
                     Box::new(FakeBackend),
@@ -298,9 +300,10 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
             let agent = Arc::new(
                 crate::agent::Agent::new(
                     Box::new(FakeBackend),
@@ -335,9 +338,10 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
             let agent = Arc::new(
                 crate::agent::Agent::new(
                     Box::new(FakeBackend),
@@ -372,9 +376,10 @@ mod tests {
 
         rt.block_on(async {
             let dir = tempfile::TempDir::new().expect("temp dir");
-            let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
                 .await
                 .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
             let agent = Arc::new(
                 crate::agent::Agent::new(
                     Box::new(FakeBackend),

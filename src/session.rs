@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
     content TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS task (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );";
 
 pub struct Session {
@@ -123,22 +131,14 @@ impl Session {
         };
 
         let db_path = session_dir.join(format!("{}.db", &sess_id));
-        let needs_migration = !db_path.exists();
         let db = Builder::new_local(db_path.to_string_lossy().as_ref())
             .build()
             .await
             .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
         let conn = db.connect()?;
-        if !needs_migration {
-            return Ok(Self {
-                id: sess_id,
-                conn,
-                db_path,
-            });
-        }
-        conn.execute(SCHEMA, ())
+        conn.execute_batch(SCHEMA)
             .await
-            .context("Failed to create conversation table")?;
+            .context("Failed to run schema DDL")?;
 
         Ok(Self {
             id: sess_id,
@@ -644,5 +644,59 @@ mod tests {
             .expect("create");
         // No WAL/SHM files — should still succeed
         session.delete_db().expect("delete_db");
+    }
+
+    #[tokio::test]
+    async fn task_table_is_created_on_new_session() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create session");
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+
+        session
+            .conn
+            .execute(
+                "INSERT INTO task (title, status, created_at, updated_at) VALUES ('t', 'pending', ?1, ?2)",
+                [turso::Value::Integer(now), turso::Value::Integer(now)],
+            )
+            .await
+            .expect("task insert should succeed");
+    }
+
+    #[tokio::test]
+    async fn task_table_is_added_on_reopen_of_existing_db() {
+        let dir = TempDir::new().expect("temp dir");
+        let id = uuid::Uuid::now_v7().to_string();
+
+        {
+            let session = Session::new(Some(id.clone()), dir.path().to_path_buf())
+                .await
+                .expect("create");
+            let msg = Message::text(Role::User, "hello".to_string());
+            session.insert_message(&msg).await.expect("insert");
+        }
+
+        let session = Session::new(Some(id), dir.path().to_path_buf())
+            .await
+            .expect("reopen");
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_secs() as i64;
+
+        session
+            .conn
+            .execute(
+                "INSERT INTO task (title, status, created_at, updated_at) VALUES ('t', 'pending', ?1, ?2)",
+                [turso::Value::Integer(now), turso::Value::Integer(now)],
+            )
+            .await
+            .expect("task insert on reopened session should succeed");
     }
 }
