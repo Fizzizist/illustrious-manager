@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
-use turso::Value as DbValue;
 
 use crate::session::Session;
 use crate::tools::{Tool, ToolError, ToolResult};
@@ -53,17 +52,16 @@ impl Tool for DeleteTaskTool {
                 })?;
 
         let session = self.session.lock().await;
-
-        let rows_affected = session
-            .conn
-            .execute("DELETE FROM task WHERE id = ?1", [DbValue::Integer(id)])
+        let deleted = session
+            .tasks()
+            .delete(id)
             .await
             .map_err(|e| ToolError::Execution {
                 tool_name: "delete_task".to_string(),
                 message: e.to_string(),
             })?;
 
-        if rows_affected == 0 {
+        if !deleted {
             return Err(ToolError::Execution {
                 tool_name: "delete_task".to_string(),
                 message: format!("Task with id {} does not exist", id),
@@ -92,37 +90,24 @@ mod tests {
     #[tokio::test]
     async fn delete_task_removes_row() {
         let session = test_session_arc().await;
-        let create = CreateTaskTool::new(Arc::clone(&session));
-        create
+        CreateTaskTool::new(Arc::clone(&session))
             .execute(serde_json::json!({"title": "to delete"}))
             .await
             .expect("create");
 
-        let delete = DeleteTaskTool::new(Arc::clone(&session));
-        delete
+        DeleteTaskTool::new(Arc::clone(&session))
             .execute(serde_json::json!({"id": 1}))
             .await
             .expect("delete");
 
-        let sess = session.lock().await;
-        let mut rows = sess
-            .conn
-            .query("SELECT COUNT(*) FROM task", ())
-            .await
-            .expect("q");
-        let row = rows.next().await.expect("n").expect("r");
-        let count = match row.get_value(0).expect("v") {
-            DbValue::Integer(n) => n,
-            other => panic!("unexpected count type: {:?}", other),
-        };
-        assert_eq!(count, 0);
+        let tasks = session.lock().await.tasks().list(None).await.expect("list");
+        assert!(tasks.is_empty());
     }
 
     #[tokio::test]
     async fn delete_task_missing_id_errors() {
         let session = test_session_arc().await;
-        let tool = DeleteTaskTool::new(session);
-        let err = tool
+        let err = DeleteTaskTool::new(session)
             .execute(serde_json::json!({"id": 999}))
             .await
             .expect_err("should fail");

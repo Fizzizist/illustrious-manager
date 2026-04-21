@@ -4,13 +4,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::sync::Mutex as TokioMutex;
-use turso::Value as DbValue;
 
-use crate::session::Session;
+use crate::session::{Session, TaskStatus};
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
-
-use super::status::TaskStatus;
 
 pub struct ListTasksTool {
     session: Arc<TokioMutex<Session>>,
@@ -50,128 +47,26 @@ impl Tool for ListTasksTool {
     }
 
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
-        let status_filter = if let Some(s) = input.get("status").and_then(|v| v.as_str()) {
-            Some(TaskStatus::from_str(s)?)
-        } else {
-            None
-        };
+        let status_filter = input
+            .get("status")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                TaskStatus::from_str(s).map_err(|e| ToolError::InvalidInput {
+                    message: e.to_string(),
+                })
+            })
+            .transpose()?;
 
         let session = self.session.lock().await;
-
-        let mut rows = if let Some(status) = status_filter {
+        let tasks =
             session
-                .conn
-                .query(
-                    "SELECT id, title, description, status, created_at, updated_at FROM task WHERE status = ?1 ORDER BY id ASC",
-                    [DbValue::Text(status.as_str().to_string())],
-                )
+                .tasks()
+                .list(status_filter)
                 .await
                 .map_err(|e| ToolError::Execution {
                     tool_name: "list_tasks".to_string(),
                     message: e.to_string(),
-                })?
-        } else {
-            session
-                .conn
-                .query(
-                    "SELECT id, title, description, status, created_at, updated_at FROM task ORDER BY id ASC",
-                    (),
-                )
-                .await
-                .map_err(|e| ToolError::Execution {
-                    tool_name: "list_tasks".to_string(),
-                    message: e.to_string(),
-                })?
-        };
-
-        let mut tasks: Vec<serde_json::Value> = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|e| ToolError::Execution {
-            tool_name: "list_tasks".to_string(),
-            message: e.to_string(),
-        })? {
-            let id = match row.get_value(0).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(n) => n,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected id type: {:?}", other),
-                    });
-                }
-            };
-            let title = match row.get_value(1).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Text(s) => s,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected title type: {:?}", other),
-                    });
-                }
-            };
-            let description = match row.get_value(2).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Text(s) => Some(s),
-                DbValue::Null => None,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected description type: {:?}", other),
-                    });
-                }
-            };
-            let status = match row.get_value(3).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Text(s) => s,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected status type: {:?}", other),
-                    });
-                }
-            };
-            let created_at = match row.get_value(4).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(n) => n,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected created_at type: {:?}", other),
-                    });
-                }
-            };
-            let updated_at = match row.get_value(5).map_err(|e| ToolError::Execution {
-                tool_name: "list_tasks".to_string(),
-                message: e.to_string(),
-            })? {
-                DbValue::Integer(n) => n,
-                other => {
-                    return Err(ToolError::Execution {
-                        tool_name: "list_tasks".to_string(),
-                        message: format!("unexpected updated_at type: {:?}", other),
-                    });
-                }
-            };
-
-            tasks.push(serde_json::json!({
-                "id": id,
-                "title": title,
-                "description": description,
-                "status": status,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            }));
-        }
+                })?;
 
         let output = serde_json::to_string_pretty(&tasks).map_err(|e| ToolError::Execution {
             tool_name: "list_tasks".to_string(),
@@ -197,90 +92,75 @@ mod tests {
         Arc::new(TokioMutex::new(session))
     }
 
-    #[tokio::test]
-    async fn list_tasks_returns_empty_when_none() {
-        let session = test_session_arc().await;
-        let tool = ListTasksTool::new(session);
-        let result = tool.execute(serde_json::json!({})).await.expect("list");
+    fn titles_from_result(result: &ToolResult) -> Vec<String> {
         let text = match &result.content[0] {
             ContentBlock::Text(t) => t.clone(),
             _ => panic!("expected text"),
         };
-        let parsed: serde_json::Value = serde_json::from_str(&text).expect("json");
-        assert_eq!(parsed.as_array().expect("array").len(), 0);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
+        parsed
+            .iter()
+            .map(|t| t["title"].as_str().expect("title").to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_tasks_returns_empty_when_none() {
+        let session = test_session_arc().await;
+        let result = ListTasksTool::new(session)
+            .execute(serde_json::json!({}))
+            .await
+            .expect("list");
+        assert!(titles_from_result(&result).is_empty());
     }
 
     #[tokio::test]
     async fn list_tasks_returns_all_in_id_order() {
         let session = test_session_arc().await;
-        let create = CreateTaskTool::new(Arc::clone(&session));
-        create
-            .execute(serde_json::json!({"title": "a"}))
+        for title in ["a", "b", "c"] {
+            CreateTaskTool::new(Arc::clone(&session))
+                .execute(serde_json::json!({"title": title}))
+                .await
+                .expect("create");
+        }
+        let result = ListTasksTool::new(Arc::clone(&session))
+            .execute(serde_json::json!({}))
             .await
-            .expect("c1");
-        create
-            .execute(serde_json::json!({"title": "b"}))
-            .await
-            .expect("c2");
-        create
-            .execute(serde_json::json!({"title": "c"}))
-            .await
-            .expect("c3");
-
-        let list = ListTasksTool::new(Arc::clone(&session));
-        let result = list.execute(serde_json::json!({})).await.expect("list");
-        let text = match &result.content[0] {
-            ContentBlock::Text(t) => t.clone(),
-            _ => panic!("expected text"),
-        };
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0]["title"], "a");
-        assert_eq!(parsed[1]["title"], "b");
-        assert_eq!(parsed[2]["title"], "c");
+            .expect("list");
+        assert_eq!(titles_from_result(&result), vec!["a", "b", "c"]);
     }
 
     #[tokio::test]
     async fn list_tasks_filters_by_status() {
         let session = test_session_arc().await;
-        let create = CreateTaskTool::new(Arc::clone(&session));
-        create
+        CreateTaskTool::new(Arc::clone(&session))
             .execute(serde_json::json!({"title": "pending-task"}))
             .await
             .expect("c1");
-        create
-            .execute(serde_json::json!({"title": "another"}))
+        CreateTaskTool::new(Arc::clone(&session))
+            .execute(serde_json::json!({"title": "active"}))
             .await
             .expect("c2");
 
-        // Manually update one to in_progress
-        {
-            let sess = session.lock().await;
-            sess.conn
-                .execute("UPDATE task SET status = 'in_progress' WHERE id = 2", ())
-                .await
-                .expect("update");
-        }
+        session
+            .lock()
+            .await
+            .tasks()
+            .update(2, None, None, Some(TaskStatus::InProgress))
+            .await
+            .expect("update");
 
-        let list = ListTasksTool::new(Arc::clone(&session));
-        let result = list
+        let result = ListTasksTool::new(Arc::clone(&session))
             .execute(serde_json::json!({"status": "in_progress"}))
             .await
             .expect("list");
-        let text = match &result.content[0] {
-            ContentBlock::Text(t) => t.clone(),
-            _ => panic!("expected text"),
-        };
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&text).expect("json");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["title"], "another");
+        assert_eq!(titles_from_result(&result), vec!["active"]);
     }
 
     #[tokio::test]
     async fn list_tasks_invalid_status_filter_errors() {
         let session = test_session_arc().await;
-        let tool = ListTasksTool::new(session);
-        let err = tool
+        let err = ListTasksTool::new(session)
             .execute(serde_json::json!({"status": "bogus"}))
             .await
             .expect_err("should fail");
