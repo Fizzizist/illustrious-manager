@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use agent::Agent;
+use agent::spawn_agent;
+use backend::BackendFactory;
 use logging::Logger;
 use session::Session;
 use tools::ToolRegistry;
@@ -24,11 +25,8 @@ use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
 use tools::write_file::WriteFileTool;
-use types::RequestConfig;
 
 const DEFAULT_MAX_SCHEMA_RETRIES: u32 = 3;
-
-const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 #[derive(Parser)]
 #[command(name = "illustrious-manager")]
@@ -139,7 +137,7 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let selection = backend::from_config(&app_config).await?;
+    let factory = BackendFactory::new(app_config.clone());
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(BashTool::new(
@@ -161,19 +159,11 @@ async fn main() -> Result<()> {
     let skills = discover_skills_from_env();
     registry.register(Box::new(SkillTool::new(&skills)))?;
 
-    let request_config = RequestConfig {
-        model: selection.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        tools: registry.definitions(),
-    };
-
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
 
     let agent = Arc::new(
-        Agent::new(selection.backend, request_config, session)
-            .await
-            .with_tools(registry)
-            .with_tool_config(&app_config.tools)
+        spawn_agent(&factory, "default", &app_config.tools, session, registry)
+            .await?
             // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
             // because initial history is set from the input session
             .with_skills(&skills)

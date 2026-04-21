@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::commands::{CommandContext, DispatchResult, default_registry};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
@@ -25,7 +26,6 @@ use super::status_line::{self, StatusLineInfo, TokenUsage};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
-use crate::session::list_sessions;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -436,6 +436,7 @@ async fn run_app(
     app.set_intro_message(crate::config::generate_intro_message(config));
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
+    let cmd_registry = default_registry();
 
     if let Some(prompt) = initial_prompt {
         if let Some(ref mut log) = logger {
@@ -474,42 +475,22 @@ async fn run_app(
                                     ..
                                 } => {
                                     let text = app.input_text();
-                                    if text.trim() == "/sessions" {
-                                        app.input.clear();
-                                        match list_sessions(&config.sessions_dir).await {
-                                            Ok(sessions) => {
-                                                app.session_picker = Some(SessionPicker::new(sessions));
-                                                app.set_state(AppState::SessionPicker);
+                                    if !text.trim().is_empty() {
+                                        let mut ctx = CommandContext {
+                                            app: &mut app,
+                                            agent: agent.clone(),
+                                            config,
+                                        };
+                                        let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
+                                        if dispatch == DispatchResult::Passthrough {
+                                            if let Some(ref mut log) = logger {
+                                                log.log_user_input(&text)?;
                                             }
-                                            Err(e) => {
-                                                app.conversation.push(ConversationEntry::new(
-                                                    ConversationRole::Error,
-                                                    format!("Failed to list sessions: {e}"),
-                                                ));
-                                            }
+                                            stream_task = Some(
+                                                submit_message(&mut app, agent.clone(), &event_tx)
+                                                    .await?,
+                                            );
                                         }
-                                    } else if let Some(model) = text.trim().strip_prefix("/model ") {
-                                        let model = model.trim().to_string();
-                                        app.input.clear();
-                                        if model.is_empty() {
-                                            app.conversation.push(ConversationEntry::new(
-                                                ConversationRole::Error,
-                                                "Usage: /model <model-name>".to_string(),
-                                            ));
-                                        } else {
-                                            agent.set_model(model.clone());
-                                            app.model = model.clone();
-                                            app.conversation.push(ConversationEntry::new(
-                                                ConversationRole::Info,
-                                                format!("Model switched to `{model}`"),
-                                            ));
-                                        }
-                                    } else if !text.trim().is_empty() {
-                                        if let Some(ref mut log) = logger {
-                                            log.log_user_input(&text)?;
-                                        }
-                                        stream_task =
-                                            Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                                     }
                                 }
                                 _ => {
@@ -1423,6 +1404,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
+            models: std::collections::BTreeMap::new(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));

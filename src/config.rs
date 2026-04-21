@@ -1,4 +1,5 @@
 use dirs;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
     pub confirmation: ConfirmationMode,
@@ -132,9 +133,33 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
+
+# Named model roles for multi-agent workflows.
+# When absent, a "default" role is synthesized from the top-level backend
+# and the matching [vertex]/[zai]/[ollama] model field above.
+# [models.thinking]
+# backend = "vertex"
+# model = "claude-3-5-thinking"
+# [models.implement]
+# backend = "vertex"
+# model = "claude-sonnet-4-20250514"
 "#;
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+/// A named model role binding a backend to a specific model string.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ModelRole {
+    pub backend: String,
+    pub model: String,
+}
+
+/// Concrete backend + model resolved from a `ModelRole`.
+#[derive(Debug)]
+pub struct ResolvedRole {
+    pub backend_name: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AppConfig {
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -147,9 +172,13 @@ pub struct AppConfig {
     pub ollama: Option<OllamaConfig>,
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Named model roles. When empty, a `default` role is synthesized from
+    /// the top-level `backend` + `[vertex]`/`[zai]` blocks for back-compat.
+    #[serde(default, rename = "models")]
+    pub models: BTreeMap<String, ModelRole>,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct VertexConfig {
     pub project: String,
     #[serde(default = "default_region")]
@@ -158,7 +187,7 @@ pub struct VertexConfig {
     pub model: String,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct OllamaConfig {
     #[serde(skip_serializing)]
     pub api_key: String,
@@ -176,7 +205,7 @@ fn default_ollama_base_url() -> String {
     "https://ollama.com/api/chat".to_string()
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ZaiConfig {
     #[serde(skip_serializing)]
     pub api_key: String,
@@ -216,6 +245,7 @@ pub fn load_config_from_path(path: &Path) -> Result<AppConfig> {
         .to_string_lossy()
         .into_owned();
     fs::create_dir_all(&config.sessions_dir)?;
+    config.normalize_back_compat();
     Ok(config)
 }
 
@@ -238,6 +268,52 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
     }
 
     load_config_from_path(&path)
+}
+
+impl AppConfig {
+    /// Resolve a named role to its concrete backend and model names.
+    pub fn resolve_role(&self, role: &str) -> Result<ResolvedRole> {
+        let role_def = self
+            .models
+            .get(role)
+            .ok_or_else(|| anyhow::anyhow!("Undefined model role '{role}'"))?;
+        Ok(ResolvedRole {
+            backend_name: role_def.backend.clone(),
+            model: role_def.model.clone(),
+        })
+    }
+
+    /// Ensure a `"default"` model role always exists, synthesized from the
+    /// top-level `backend` + `[vertex]`/`[zai]`/`[ollama]` fields if the user
+    /// hasn't explicitly defined one.  Other named roles are left untouched.
+    ///
+    /// Called by `load_config_from_path` after deserialization so that code
+    /// that predates the model registry continues to work unchanged.
+    pub fn normalize_back_compat(&mut self) {
+        if self.models.contains_key("default") {
+            return;
+        }
+        let model = match self.backend.as_str() {
+            "zai" => self
+                .zai
+                .as_ref()
+                .map(|z| z.model.clone())
+                .unwrap_or_else(|| "glm-5.1".to_string()),
+            "ollama" => self
+                .ollama
+                .as_ref()
+                .map(|o| o.model.clone())
+                .unwrap_or_else(|| "gpt-oss:120b".to_string()),
+            _ => self.vertex.model.clone(),
+        };
+        self.models.insert(
+            "default".to_string(),
+            ModelRole {
+                backend: self.backend.clone(),
+                model,
+            },
+        );
+    }
 }
 
 /// Apply CLI flag overrides to the config.
@@ -398,12 +474,61 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
             );
         }
     }
+
+    // Validate named roles: each role must reference a configured backend.
+    for (name, role) in &config.models {
+        match role.backend.as_str() {
+            "vertex" => {
+                if config.vertex.project.is_empty() {
+                    bail!(
+                        "Model role '{name}' uses backend 'vertex' but [vertex].project is not configured."
+                    );
+                }
+            }
+            "zai" => match &config.zai {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'zai' but no [zai] section is present."
+                    );
+                }
+                Some(zai) if zai.api_key.is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'zai' but [zai].api_key is not configured."
+                    );
+                }
+                _ => {}
+            },
+            "ollama" => match &config.ollama {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'ollama' but no [ollama] section is present."
+                    );
+                }
+                Some(ollama)
+                    if ollama.api_key.is_empty()
+                        && ollama.base_url == default_ollama_base_url() =>
+                {
+                    bail!(
+                        "Model role '{name}' uses backend 'ollama' but [ollama].api_key is not configured."
+                    );
+                }
+                _ => {}
+            },
+            other => {
+                bail!(
+                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn default_tools_config_has_correct_defaults() {
@@ -470,6 +595,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -489,6 +615,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -507,6 +634,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -529,6 +657,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -551,6 +680,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -569,6 +699,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -588,6 +719,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
@@ -615,6 +747,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
@@ -640,6 +773,7 @@ mod tests {
                 ..Default::default()
             },
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
@@ -661,6 +795,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(
@@ -682,9 +817,248 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
+    }
+
+    #[test]
+    fn legacy_config_without_models_section_synthesizes_default_role() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            region = "us-east5"
+            model = "claude-sonnet-4-20250514"
+        "#;
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        write!(tmp, "{toml_str}").expect("write");
+
+        let config = load_config_from_path(tmp.path()).expect("load config");
+
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized by load_config_from_path"
+        );
+        let default_role = &config.models["default"];
+        assert_eq!(default_role.backend, "vertex");
+        assert_eq!(default_role.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn normalize_back_compat_synthensizes_default_alongside_existing_roles() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "thinking".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let mut config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "should synthesize default role from backend config even when other roles exist"
+        );
+        assert!(config.models.contains_key("thinking"));
+        assert_eq!(
+            config.models["default"].backend, "vertex",
+            "default role backend should match top-level backend"
+        );
+        assert_eq!(
+            config.models["default"].model, "claude-sonnet-4-20250514",
+            "default role model should come from [vertex].model"
+        );
+    }
+
+    #[test]
+    fn normalize_back_compat_preserves_explicit_default() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "default".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "custom-default-model".to_string(),
+            },
+        );
+        models.insert(
+            "thinking".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let mut config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        config.normalize_back_compat();
+        assert_eq!(
+            config.models["default"].model, "custom-default-model",
+            "should not overwrite an explicitly defined default role"
+        );
+        assert_eq!(config.models.len(), 2);
+    }
+
+    #[test]
+    fn models_section_parses_multiple_roles() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "proj"
+            [models.thinking]
+            backend = "vertex"
+            model = "claude-3-5-thinking"
+            [models.implement]
+            backend = "vertex"
+            model = "claude-sonnet-4-20250514"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(config.models.contains_key("thinking"));
+        assert!(config.models.contains_key("implement"));
+        assert_eq!(config.models["thinking"].model, "claude-3-5-thinking");
+        assert_eq!(config.models["implement"].model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn resolve_role_returns_concrete_backend_and_model_for_named_role() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "fast".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let resolved = config.resolve_role("fast").expect("should resolve");
+        assert_eq!(resolved.backend_name, "vertex");
+        assert_eq!(resolved.model, "claude-haiku");
+    }
+
+    #[test]
+    fn resolve_role_errors_for_undefined_role() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+        };
+        let result = config.resolve_role("nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn validate_errors_when_role_references_unconfigured_zai_backend() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "zai".to_string(),
+                model: "glm-5.1".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("my-role") || msg.contains("zai"),
+            "error should mention the role or backend"
+        );
+    }
+
+    #[test]
+    fn validate_errors_when_role_references_zai_with_empty_api_key() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "zai".to_string(),
+                model: "glm-5.1".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: Some(ZaiConfig {
+                api_key: "".to_string(),
+                model: "glm-5.1".to_string(),
+            }),
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("api_key") || msg.contains("my-role") || msg.contains("zai"),
+            "error should mention key, role, or backend; got: {msg}"
+        );
     }
 
     #[test]
@@ -700,6 +1074,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -723,6 +1098,7 @@ mod tests {
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -746,6 +1122,7 @@ mod tests {
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -768,6 +1145,7 @@ mod tests {
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -790,12 +1168,109 @@ mod tests {
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
             config.ollama.as_ref().unwrap().model,
             "custom-model",
             "model override should be applied to ollama config"
+        );
+    }
+
+    #[test]
+    fn validate_errors_when_role_references_ollama_with_missing_config() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-ollama".to_string(),
+            ModelRole {
+                backend: "ollama".to_string(),
+                model: "gpt-oss:120b".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("my-ollama") || msg.contains("ollama"),
+            "error should mention the role or backend; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_succeeds_when_role_references_configured_ollama_backend() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-ollama".to_string(),
+            ModelRole {
+                backend: "ollama".to_string(),
+                model: "gpt-oss:120b".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let result = validate(&config, None);
+        assert!(result.is_ok(), "ollama role with valid config should pass");
+    }
+
+    #[test]
+    fn legacy_ollama_config_synthesizes_default_role_with_ollama_model() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let toml_str = r#"
+            backend = "ollama"
+            [vertex]
+            project = ""
+            region = "us-east5"
+            model = "claude-sonnet-4-20250514"
+            [ollama]
+            api_key = "test-key"
+            model = "gpt-oss:120b"
+            base_url = "https://ollama.com/api/chat"
+        "#;
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        write!(tmp, "{toml_str}").expect("write");
+
+        let config = load_config_from_path(tmp.path()).expect("load config");
+
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized for ollama backend"
+        );
+        let default_role = &config.models["default"];
+        assert_eq!(default_role.backend, "ollama");
+        assert_eq!(
+            default_role.model, "gpt-oss:120b",
+            "model must come from [ollama].model, not vertex"
         );
     }
 
@@ -816,6 +1291,7 @@ mod tests {
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
