@@ -1,6 +1,5 @@
+pub mod conversation;
 pub mod task;
-
-mod conversation;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -8,8 +7,8 @@ use std::time::SystemTime;
 use turso::{Builder, Connection};
 
 pub use task::{TaskRecord, TaskRepo, TaskStatus};
+pub use conversation::ConversationRepo;
 
-use crate::types::Message;
 
 /// Summary of a session, used for the session picker.
 #[derive(Debug, Clone)]
@@ -85,7 +84,7 @@ async fn read_first_user_message_from_path(db_path: &std::path::Path) -> Result<
         conn,
         db_path: db_path.to_path_buf(),
     };
-    conversation::read_first_user_message(&session).await
+    session.conversation().read_first_user_message().await
 }
 
 const SCHEMA: &str = "\
@@ -136,20 +135,12 @@ impl Session {
         })
     }
 
+    pub fn conversation(&self) -> ConversationRepo<'_> {
+        ConversationRepo::new(self)
+    }
+
     pub fn tasks(&self) -> TaskRepo<'_> {
         TaskRepo::new(self)
-    }
-
-    pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        conversation::insert_message(self, message).await
-    }
-
-    pub async fn is_empty(&self) -> Result<bool> {
-        conversation::is_empty(self).await
-    }
-
-    pub async fn load_history(&self) -> Result<Vec<Message>> {
-        conversation::load_history(self).await
     }
 
     pub fn delete_db(&self) -> Result<()> {
@@ -187,7 +178,7 @@ fn validate_uuidv7(id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ContentBlock, Role};
+    use crate::types::{ContentBlock, Message, Role};
     use tempfile::TempDir;
 
     #[test]
@@ -226,8 +217,8 @@ mod tests {
         assert!(db_path.exists(), "DB file should be created");
 
         let msg = Message::text(Role::User, "hello".to_string());
-        session.insert_message(&msg).await.expect("insert");
-        let history = session.load_history().await.expect("load");
+        session.conversation().insert_message(&msg).await.expect("insert");
+        let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, Role::User);
     }
@@ -264,13 +255,13 @@ mod tests {
                 .await
                 .expect("create");
             let msg = Message::text(Role::User, "saved message".to_string());
-            session.insert_message(&msg).await.expect("insert");
+            session.conversation().insert_message(&msg).await.expect("insert");
         }
 
         let session = Session::new(Some(id), dir.path().to_path_buf())
             .await
             .expect("reopen");
-        let history = session.load_history().await.expect("load history");
+        let history = session.conversation().load_history().await.expect("load history");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].role, Role::User);
         match &history[0].content[0] {
@@ -288,19 +279,19 @@ mod tests {
             .expect("create");
 
         session
-            .insert_message(&Message::text(Role::User, "first".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "first".to_string()))
             .await
             .expect("insert 1");
         session
-            .insert_message(&Message::text(Role::Assistant, "second".to_string()))
+            .conversation().insert_message(&Message::text(Role::Assistant, "second".to_string()))
             .await
             .expect("insert 2");
         session
-            .insert_message(&Message::text(Role::User, "third".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "third".to_string()))
             .await
             .expect("insert 3");
 
-        let history = session.load_history().await.expect("load");
+        let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].role, Role::User);
         assert_eq!(history[1].role, Role::Assistant);
@@ -326,9 +317,9 @@ mod tests {
                 },
             ],
         };
-        session.insert_message(&msg).await.expect("insert");
+        session.conversation().insert_message(&msg).await.expect("insert");
 
-        let history = session.load_history().await.expect("load");
+        let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].content.len(), 2);
         match &history[0].content[0] {
@@ -357,9 +348,9 @@ mod tests {
                 is_error: false,
             }],
         };
-        session.insert_message(&msg).await.expect("insert");
+        session.conversation().insert_message(&msg).await.expect("insert");
 
-        let history = session.load_history().await.expect("load");
+        let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
         match &history[0].content[0] {
             ContentBlock::ToolResult {
@@ -411,7 +402,7 @@ mod tests {
             .await
             .expect("create");
         session
-            .insert_message(&Message::text(Role::User, "hello world".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "hello world".to_string()))
             .await
             .expect("insert");
 
@@ -462,7 +453,7 @@ mod tests {
             .await
             .expect("create a");
         session_a
-            .insert_message(&Message::text(Role::User, "first session".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "first session".to_string()))
             .await
             .expect("insert a");
 
@@ -472,7 +463,7 @@ mod tests {
             .await
             .expect("create b");
         session_b
-            .insert_message(&Message::text(Role::User, "second session".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "second session".to_string()))
             .await
             .expect("insert b");
 
@@ -506,15 +497,15 @@ mod tests {
             .await
             .expect("create");
         session
-            .insert_message(&Message::text(Role::User, "first message".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "first message".to_string()))
             .await
             .expect("insert 1");
         session
-            .insert_message(&Message::text(Role::Assistant, "response".to_string()))
+            .conversation().insert_message(&Message::text(Role::Assistant, "response".to_string()))
             .await
             .expect("insert 2");
         session
-            .insert_message(&Message::text(Role::User, "second message".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "second message".to_string()))
             .await
             .expect("insert 3");
 
@@ -528,7 +519,7 @@ mod tests {
         let session = Session::new(None, dir.path().to_path_buf())
             .await
             .expect("create");
-        assert!(session.is_empty().await.expect("is_empty"));
+        assert!(session.conversation().is_empty().await.expect("is_empty"));
     }
 
     #[tokio::test]
@@ -538,10 +529,10 @@ mod tests {
             .await
             .expect("create");
         session
-            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .conversation().insert_message(&Message::text(Role::User, "hello".to_string()))
             .await
             .expect("insert");
-        assert!(!session.is_empty().await.expect("is_empty"));
+        assert!(!session.conversation().is_empty().await.expect("is_empty"));
     }
 
     #[tokio::test]
@@ -604,7 +595,7 @@ mod tests {
                 .await
                 .expect("create");
             session
-                .insert_message(&Message::text(Role::User, "hello".to_string()))
+                .conversation().insert_message(&Message::text(Role::User, "hello".to_string()))
                 .await
                 .expect("insert");
         }

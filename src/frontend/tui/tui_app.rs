@@ -531,7 +531,7 @@ async fn run_app(
                                         .await
                                         {
                                             Ok(session) => {
-                                                match session.load_history().await {
+                                                match session.conversation().load_history().await {
                                                     Ok(history) => {
                                                         app.conversation.clear();
                                                         app.current_response.clear();
@@ -1301,6 +1301,7 @@ mod tests {
             .await
             .expect("session");
         session
+            .conversation()
             .insert_message(&Message::text(Role::User, "loaded message".to_string()))
             .await
             .expect("insert");
@@ -1332,7 +1333,7 @@ mod tests {
         app.scroll_offset = 10;
 
         // simulate selecting the session
-        let history = session.load_history().await.expect("load history");
+        let history = session.conversation().load_history().await.expect("load history");
         app.conversation.clear();
         app.current_response.clear();
         app.scroll_offset = 0;
