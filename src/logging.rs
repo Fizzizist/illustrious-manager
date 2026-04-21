@@ -109,6 +109,7 @@ impl Logger {
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 self.log_tool_result(name, content, *is_error)?;
             }
@@ -260,6 +261,7 @@ mod tests {
         {
             let mut logger = Logger::new(Some(log_path.clone())).expect("Failed to create logger");
             let event = AgentEvent::ToolResult {
+                id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "output".to_string(),
                 is_error: false,

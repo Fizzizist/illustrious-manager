@@ -124,6 +124,7 @@ async fn run_text<W: Write, R: BufRead>(
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 if is_error {
                     writeln!(writer, "[error from {}]: {}", name, content)?;
@@ -450,6 +451,7 @@ mod tests {
     async fn tool_result_success_prints_result_content() {
         let events = vec![
             AgentEvent::ToolResult {
+                id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "file1.txt".to_string(),
                 is_error: false,
@@ -467,6 +469,7 @@ mod tests {
     async fn tool_result_error_prints_error_label() {
         let events = vec![
             AgentEvent::ToolResult {
+                id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "permission denied".to_string(),
                 is_error: true,
@@ -570,6 +573,7 @@ mod tests {
                 input: serde_json::json!({"command": "ls"}),
             },
             AgentEvent::ToolResult {
+                id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
@@ -592,6 +596,7 @@ mod tests {
                 input: serde_json::json!({"command": "ls"}),
             },
             AgentEvent::ToolResult {
+                id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,

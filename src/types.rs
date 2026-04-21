@@ -232,6 +232,7 @@ pub enum AgentEvent {
         input: serde_json::Value,
     },
     ToolResult {
+        id: String,
         name: String,
         content: String,
         is_error: bool,
@@ -508,19 +509,22 @@ mod tests {
     }
 
     #[test]
-    fn agent_event_tool_result_variant_contains_name_content_and_error_flag() {
+    fn agent_event_tool_result_variant_contains_id_name_content_and_error_flag() {
         let event = AgentEvent::ToolResult {
+            id: "tool-123".to_string(),
             name: "bash".to_string(),
             content: "file1.txt".to_string(),
             is_error: false,
         };
         assert!(matches!(event, AgentEvent::ToolResult { .. }));
         if let AgentEvent::ToolResult {
+            id,
             name,
             content,
             is_error,
         } = event
         {
+            assert_eq!(id, "tool-123");
             assert_eq!(name, "bash");
             assert_eq!(content, "file1.txt");
             assert!(!is_error);

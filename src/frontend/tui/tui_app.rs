@@ -352,6 +352,7 @@ pub fn handle_agent_event(
             name,
             content,
             is_error,
+            ..
         } => {
             let role = if is_error {
                 ConversationRole::Error
