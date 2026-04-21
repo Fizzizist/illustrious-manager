@@ -283,13 +283,14 @@ impl AppConfig {
         })
     }
 
-    /// Synthesize a `default` model role from the legacy top-level `backend` +
-    /// `[vertex]`/`[zai]` fields when no `[models.*]` blocks are present.
+    /// Ensure a `"default"` model role always exists, synthesized from the
+    /// top-level `backend` + `[vertex]`/`[zai]`/`[ollama]` fields if the user
+    /// hasn't explicitly defined one.  Other named roles are left untouched.
     ///
     /// Called by `load_config_from_path` after deserialization so that code
     /// that predates the model registry continues to work unchanged.
     pub fn normalize_back_compat(&mut self) {
-        if !self.models.is_empty() {
+        if self.models.contains_key("default") {
             return;
         }
         let model = match self.backend.as_str() {
@@ -849,10 +850,56 @@ mod tests {
     }
 
     #[test]
-    fn normalize_back_compat_is_idempotent_when_models_already_present() {
+    fn normalize_back_compat_synthensizes_default_alongside_existing_roles() {
         let mut models = BTreeMap::new();
         models.insert(
-            "custom".to_string(),
+            "thinking".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let mut config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "should synthesize default role from backend config even when other roles exist"
+        );
+        assert!(config.models.contains_key("thinking"));
+        assert_eq!(
+            config.models["default"].backend, "vertex",
+            "default role backend should match top-level backend"
+        );
+        assert_eq!(
+            config.models["default"].model, "claude-sonnet-4-20250514",
+            "default role model should come from [vertex].model"
+        );
+    }
+
+    #[test]
+    fn normalize_back_compat_preserves_explicit_default() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "default".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "custom-default-model".to_string(),
+            },
+        );
+        models.insert(
+            "thinking".to_string(),
             ModelRole {
                 backend: "vertex".to_string(),
                 model: "claude-haiku".to_string(),
@@ -873,11 +920,10 @@ mod tests {
         };
         config.normalize_back_compat();
         assert_eq!(
-            config.models.len(),
-            1,
-            "should not add a default role when models already present"
+            config.models["default"].model, "custom-default-model",
+            "should not overwrite an explicitly defined default role"
         );
-        assert!(config.models.contains_key("custom"));
+        assert_eq!(config.models.len(), 2);
     }
 
     #[test]
