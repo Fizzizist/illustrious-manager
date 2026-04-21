@@ -531,7 +531,7 @@ async fn run_app(
                                         .await
                                         {
                                             Ok(session) => {
-                                                match session.load_history().await {
+                                                match session.conversation().load_history().await {
                                                     Ok(history) => {
                                                         app.conversation.clear();
                                                         app.current_response.clear();
@@ -757,9 +757,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1299,10 +1301,16 @@ mod tests {
             .await
             .expect("session");
         session
+            .conversation()
             .insert_message(&Message::text(Role::User, "loaded message".to_string()))
             .await
             .expect("insert");
 
+        let initial_session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir_path.clone())
+                .await
+                .expect("initial session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1311,9 +1319,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                 },
-                crate::session::Session::new(None, dir_path.clone())
-                    .await
-                    .expect("initial session"),
+                initial_session,
             )
             .await,
         );
@@ -1327,7 +1333,11 @@ mod tests {
         app.scroll_offset = 10;
 
         // simulate selecting the session
-        let history = session.load_history().await.expect("load history");
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
         app.conversation.clear();
         app.current_response.clear();
         app.scroll_offset = 0;
@@ -1568,9 +1578,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1610,9 +1622,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
