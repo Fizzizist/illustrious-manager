@@ -413,13 +413,16 @@ async fn execute_tool_calls(
     let mut tool_result_blocks: Vec<ContentBlock> = vec![];
 
     for call in tool_calls {
-        let (input, parse_error) = match serde_json::from_str::<serde_json::Value>(&call.input_json)
-        {
-            Ok(v) => (v, None),
-            Err(e) => (
-                serde_json::Value::Null,
-                Some(format!("Invalid tool input JSON: {e}")),
-            ),
+        let (input, parse_error) = if call.input_json.trim().is_empty() {
+            (serde_json::Value::Object(serde_json::Map::new()), None)
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&call.input_json) {
+                Ok(v) => (v, None),
+                Err(e) => (
+                    serde_json::Value::Null,
+                    Some(format!("Invalid tool input JSON: {e}")),
+                ),
+            }
         };
 
         assistant_content.push(ContentBlock::ToolUse {
@@ -1042,6 +1045,44 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "loop should continue and complete after malformed input"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tool_input_json_is_treated_as_empty_object() {
+        // Regression: LLM sends no input for a no-arg tool (e.g. list_tasks).
+        // The SSE stream delivers no ToolUseDelta events, leaving input_json = "".
+        // This must not produce an error — it should be treated as {}.
+        let empty_input_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            // No ToolUseDelta — input_json stays empty
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![empty_input_response, text_response("ok")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "echo output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("list".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { content, is_error, .. }
+                    if content == "echo output" && !is_error
+            )),
+            "empty input_json should execute successfully with empty object input"
         );
     }
 
