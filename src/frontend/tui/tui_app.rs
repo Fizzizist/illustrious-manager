@@ -1333,7 +1333,11 @@ mod tests {
         app.scroll_offset = 10;
 
         // simulate selecting the session
-        let history = session.conversation().load_history().await.expect("load history");
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
         app.conversation.clear();
         app.current_response.clear();
         app.scroll_offset = 0;
