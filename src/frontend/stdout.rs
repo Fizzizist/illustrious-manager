@@ -117,19 +117,36 @@ async fn run_text<W: Write, R: BufRead>(
                 eprintln!("\nError: {}", msg);
                 anyhow::bail!("LLM error: {}", msg);
             }
-            AgentEvent::ToolUseReceived { name, input, .. } => {
-                writeln!(writer, "\n[tool: {}] {}", name, input)?;
+            AgentEvent::ToolUseReceived {
+                id, name, input, ..
+            } => {
+                let idx = id
+                    .strip_prefix("tool_")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|i| i + 1);
+                match idx {
+                    Some(i) => writeln!(writer, "\n[tool({}): {}] {}", i, name, input)?,
+                    None => writeln!(writer, "\n[tool: {}] {}", name, input)?,
+                };
             }
             AgentEvent::ToolResult {
+                id,
                 name,
                 content,
                 is_error,
                 ..
             } => {
+                let idx = id
+                    .strip_prefix("tool_")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(|i| i + 1);
                 if is_error {
                     writeln!(writer, "[error from {}]: {}", name, content)?;
                 } else {
-                    writeln!(writer, "[result from {}]: {}", name, content)?;
+                    match idx {
+                        Some(i) => writeln!(writer, "[result({}): {}]: {}", i, name, content)?,
+                        None => writeln!(writer, "[result from {}]: {}", name, content)?,
+                    };
                 }
             }
             AgentEvent::Usage { .. } => {}

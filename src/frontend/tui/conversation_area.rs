@@ -46,6 +46,8 @@ impl ConversationRole {
 pub struct ConversationEntry {
     pub role: ConversationRole,
     pub content: String,
+    #[allow(dead_code)]
+    tool_index: Option<u64>,
     cached_lines: Vec<Line<'static>>,
     cached_wrapped_count: u16,
     cached_width: u16,
@@ -53,10 +55,23 @@ pub struct ConversationEntry {
 
 impl ConversationEntry {
     pub fn new(role: ConversationRole, content: String) -> Self {
-        let cached_lines = render_entry_lines(&role, &content);
+        let cached_lines = render_entry_lines(&role, &content, None);
         Self {
             role,
             content,
+            tool_index: None,
+            cached_lines,
+            cached_wrapped_count: 0,
+            cached_width: 0,
+        }
+    }
+
+    pub fn new_indexed(role: ConversationRole, content: String, index: u64) -> Self {
+        let cached_lines = render_entry_lines(&role, &content, Some(index));
+        Self {
+            role,
+            content,
+            tool_index: Some(index),
             cached_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -86,6 +101,7 @@ impl ConversationEntry {
         Self {
             role,
             content,
+            tool_index: None,
             cached_lines: all_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -108,14 +124,26 @@ impl ConversationEntry {
     }
 }
 
+fn format_label(role: &ConversationRole, index: Option<u64>) -> String {
+    match index {
+        Some(i) => match role {
+            ConversationRole::ToolUse => format!("[Tool({})]:", i),
+            ConversationRole::ToolResult => format!("[Result({})]:", i),
+            _ => format!("{}:", role.display_label()),
+        },
+        None => format!("{}:", role.display_label()),
+    }
+}
+
 fn render_role_lines(
     role: &ConversationRole,
     content: &str,
     trailing_blank: bool,
+    tool_index: Option<u64>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!("{}:", role.display_label()),
+        format_label(role, tool_index),
         Style::default().fg(role.color()),
     )));
     let display_content = maybe_truncate(content, role);
@@ -135,14 +163,18 @@ fn render_role_lines(
     lines
 }
 
-fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
-    render_role_lines(role, content, true)
+fn render_entry_lines(
+    role: &ConversationRole,
+    content: &str,
+    tool_index: Option<u64>,
+) -> Vec<Line<'static>> {
+    render_role_lines(role, content, true, tool_index)
 }
 
 // TODO: For long responses with complex markdown, this O(response_size) per-frame
 // cost during streaming could become a bottleneck. Consider caching if it becomes an issue.
 fn render_current_response_lines(current_response: &str) -> Vec<Line<'static>> {
-    render_role_lines(&ConversationRole::Assistant, current_response, false)
+    render_role_lines(&ConversationRole::Assistant, current_response, false, None)
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {

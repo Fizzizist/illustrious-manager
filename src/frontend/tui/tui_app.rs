@@ -121,7 +121,7 @@ impl App {
                         Some(ConversationEntry::new(role.clone(), text.clone()))
                     }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        Some(self.tool_use_entry(name, input, self.text_width as usize))
+                        Some(self.tool_use_entry(name, input, self.text_width as usize, None))
                     }
                     crate::types::ContentBlock::ToolResult {
                         content, is_error, ..
@@ -193,6 +193,7 @@ impl App {
         name: &str,
         input: &serde_json::Value,
         width: usize,
+        tool_index: Option<u64>,
     ) -> ConversationEntry {
         let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
@@ -217,7 +218,10 @@ impl App {
             }
             _ => {}
         }
-        ConversationEntry::new(ConversationRole::ToolUse, content)
+        match tool_index {
+            Some(idx) => ConversationEntry::new_indexed(ConversationRole::ToolUse, content, idx),
+            None => ConversationEntry::new(ConversationRole::ToolUse, content),
+        }
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -304,6 +308,15 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     }
 }
 
+/// Extract a 1-based display index from a tool call ID.
+/// OpenAI-compatible backends use `tool_0`, `tool_1`, etc.
+/// Anthropic backends use opaque IDs — returns None.
+fn extract_tool_index(id: &str) -> Option<u64> {
+    id.strip_prefix("tool_")
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|i| i + 1)
+}
+
 pub fn handle_agent_event(
     app: &mut App,
     event: AgentEvent,
@@ -336,7 +349,9 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
         }
-        AgentEvent::ToolUseReceived { name, input, .. } => {
+        AgentEvent::ToolUseReceived {
+            id, name, input, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
@@ -344,11 +359,13 @@ pub fn handle_agent_event(
                 ));
             }
             let width = app.text_width as usize;
-            let entry = app.tool_use_entry(&name, &input, width);
+            let index = extract_tool_index(&id);
+            let entry = app.tool_use_entry(&name, &input, width, index);
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
+            id,
             name,
             content,
             is_error,
@@ -369,7 +386,16 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry::new(role, display));
+            let index = if is_error {
+                None
+            } else {
+                extract_tool_index(&id)
+            };
+            let entry = match index {
+                Some(idx) => ConversationEntry::new_indexed(role, display, idx),
+                None => ConversationEntry::new(role, display),
+            };
+            app.conversation.push(entry);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
@@ -585,7 +611,7 @@ async fn run_app(
                                     _ => unreachable!(),
                                 };
                                 let width = app.text_width as usize;
-                                let entry = app.tool_use_entry(&name, &input, width);
+                                let entry = app.tool_use_entry(&name, &input, width, None);
                                 app.conversation.push(entry);
                                 let sent = app
                                     .confirmation_tx
@@ -1478,7 +1504,7 @@ mod tests {
             "old_string": "let x = 1;",
             "new_string": "let x = 42;"
         });
-        let entry = app.tool_use_entry("edit_file", &input, 80);
+        let entry = app.tool_use_entry("edit_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The diff renderer produces spans with colour styles; verify that
         // at least one span has a coloured foreground (indicating diff styling)
@@ -1501,7 +1527,7 @@ mod tests {
             "path": "hello.txt",
             "content": "Hello, world!\n"
         });
-        let entry = app.tool_use_entry("write_file", &input, 80);
+        let entry = app.tool_use_entry("write_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // write_file renders as a syntax-highlighted code block (green + markers)
         let has_plus_marker = entry
@@ -1518,7 +1544,7 @@ mod tests {
     fn regression_non_diff_tool_use_still_renders_via_markdown() {
         let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let input = serde_json::json!({"command": "ls -la"});
-        let entry = app.tool_use_entry("bash", &input, 80);
+        let entry = app.tool_use_entry("bash", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The content (markdown string) should mention the tool name.
         assert!(
