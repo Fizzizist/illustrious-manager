@@ -1261,17 +1261,17 @@ mod tests {
             .collect();
         assert_eq!(tool_entries.len(), 3, "expected 3 tool use entries");
         assert_eq!(
-            tool_entries[0].index,
+            tool_entries[0].tool_index,
             Some(1),
             "first tool use should have index 1"
         );
         assert_eq!(
-            tool_entries[1].index,
+            tool_entries[1].tool_index,
             Some(2),
             "second tool use should have index 2"
         );
         assert_eq!(
-            tool_entries[2].index,
+            tool_entries[2].tool_index,
             Some(3),
             "third tool use should have index 3"
         );
@@ -1283,17 +1283,17 @@ mod tests {
             .collect();
         assert_eq!(result_entries.len(), 3, "expected 3 tool result entries");
         assert_eq!(
-            result_entries[0].index,
+            result_entries[0].tool_index,
             Some(1),
             "first result should have index 1"
         );
         assert_eq!(
-            result_entries[1].index,
+            result_entries[1].tool_index,
             Some(2),
             "second result should have index 2"
         );
         assert_eq!(
-            result_entries[2].index,
+            result_entries[2].tool_index,
             Some(3),
             "third result should have index 3"
         );
@@ -1327,7 +1327,7 @@ mod tests {
         };
         let entry = app.tool_use_entry_indexed(&name, &input, 80, Some(index));
         assert_eq!(
-            entry.index,
+            entry.tool_index,
             Some(3),
             "approved tool entry must carry index 3"
         );
