@@ -47,7 +47,7 @@ pub struct ConversationEntry {
     pub role: ConversationRole,
     pub content: String,
     /// Per-turn 1-based index for tool use / result entries. `None` for other roles.
-    pub index: Option<usize>,
+    pub tool_index: Option<usize>,
     cached_lines: Vec<Line<'static>>,
     cached_wrapped_count: u16,
     cached_width: u16,
@@ -59,7 +59,7 @@ impl ConversationEntry {
         Self {
             role,
             content,
-            index: None,
+            tool_index: None,
             cached_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -71,7 +71,7 @@ impl ConversationEntry {
         Self {
             role,
             content,
-            index: Some(index),
+            tool_index: Some(index),
             cached_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -110,7 +110,7 @@ impl ConversationEntry {
         Self {
             role,
             content,
-            index,
+            tool_index: index,
             cached_lines: all_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
