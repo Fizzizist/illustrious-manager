@@ -194,30 +194,46 @@ impl App {
         input: &serde_json::Value,
         width: usize,
     ) -> ConversationEntry {
+        self.tool_use_entry_indexed(name, input, width, 0)
+    }
+
+    fn tool_use_entry_indexed(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        width: usize,
+        index: usize,
+    ) -> ConversationEntry {
         let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
+        let idx = if index > 0 { Some(index) } else { None };
         match name {
             "edit_file" => {
                 if let Some(lines) = render_edit_file_diff(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        idx,
                     );
                 }
             }
             "write_file" => {
                 if let Some(lines) = render_write_file(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        idx,
                     );
                 }
             }
             _ => {}
         }
-        ConversationEntry::new(ConversationRole::ToolUse, content)
+        match idx {
+            Some(i) => ConversationEntry::new_indexed(ConversationRole::ToolUse, content, i),
+            None => ConversationEntry::new(ConversationRole::ToolUse, content),
+        }
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -336,7 +352,9 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
         }
-        AgentEvent::ToolUseReceived { name, input, .. } => {
+        AgentEvent::ToolUseReceived {
+            name, input, index, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
@@ -344,7 +362,7 @@ pub fn handle_agent_event(
                 ));
             }
             let width = app.text_width as usize;
-            let entry = app.tool_use_entry(&name, &input, width);
+            let entry = app.tool_use_entry_indexed(&name, &input, width, index);
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
@@ -352,6 +370,7 @@ pub fn handle_agent_event(
             name,
             content,
             is_error,
+            index,
         } => {
             let role = if is_error {
                 ConversationRole::Error
@@ -368,7 +387,12 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry::new(role, display));
+            let entry = if role == ConversationRole::ToolResult {
+                ConversationEntry::new_indexed(role, display, index)
+            } else {
+                ConversationEntry::new(role, display)
+            };
+            app.conversation.push(entry);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolConfirmationRequired { name, input, .. } => {
@@ -801,6 +825,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
 
         handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
@@ -996,6 +1021,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1034,6 +1060,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1057,6 +1084,7 @@ mod tests {
             id: "t1".to_string(),
             name: "edit_file".to_string(),
             input: serde_json::json!({"path": "/tmp/test.txt"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1539,6 +1567,7 @@ mod tests {
                 "old_string": "fn old() {}",
                 "new_string": "fn new() {}"
             }),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
