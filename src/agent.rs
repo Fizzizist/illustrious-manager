@@ -474,7 +474,10 @@ async fn execute_tool_calls(
         })
         .collect();
 
-    for call in &parsed {
+    let batch_size = parsed.len();
+    let show_index = batch_size > 1;
+
+    for (i, call) in parsed.iter().enumerate() {
         assistant_content.push(ContentBlock::ToolUse {
             id: call.id.clone(),
             name: call.name.clone(),
@@ -484,6 +487,7 @@ async fn execute_tool_calls(
             id: call.id.clone(),
             name: call.name.clone(),
             input: call.input.clone(),
+            index: if show_index { Some(i as u64 + 1) } else { None },
         });
     }
 
@@ -528,6 +532,7 @@ async fn execute_tool_calls(
     let mut futures = futures::stream::FuturesUnordered::new();
 
     for (i, call) in parsed.iter().enumerate() {
+        let display_index = if show_index { Some(i as u64 + 1) } else { None };
         let id = call.id.clone();
         let name = call.name.clone();
         let input = call.input.clone();
@@ -543,6 +548,7 @@ async fn execute_tool_calls(
                 name,
                 content: slots[i].as_ref().expect("just-set").2.clone(),
                 is_error: true,
+                index: display_index,
             });
             continue;
         }
@@ -554,6 +560,7 @@ async fn execute_tool_calls(
                 name,
                 content: msg,
                 is_error: true,
+                index: display_index,
             });
             continue;
         }
@@ -567,12 +574,14 @@ async fn execute_tool_calls(
                     name,
                     content: msg,
                     is_error: true,
+                    index: display_index,
                 });
                 continue;
             }
         };
 
         // The tool reference borrows &ToolRegistry which outlives the futures.
+        let idx_for_closure = i;
         futures.push(async move {
             let (content, is_error) = match tool.execute(input).await {
                 Ok(result) => {
@@ -592,7 +601,7 @@ async fn execute_tool_calls(
                 }
                 Err(e) => (e.to_string(), true),
             };
-            (i, id, name, content, is_error)
+            (idx_for_closure, id, name, content, is_error)
         });
     }
 
@@ -600,11 +609,13 @@ async fn execute_tool_calls(
     // immediately and fills its slot for ordered reassembly.
     while let Some(result) = futures.next().await {
         let (i, id, name, content, is_error) = result;
+        let display_index = if show_index { Some(i as u64 + 1) } else { None };
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
             id: id.clone(),
             name: name.clone(),
             content: content.clone(),
             is_error,
+            index: display_index,
         });
         slots[i] = Some((id, name, content, is_error));
     }

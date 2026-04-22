@@ -118,32 +118,24 @@ async fn run_text<W: Write, R: BufRead>(
                 anyhow::bail!("LLM error: {}", msg);
             }
             AgentEvent::ToolUseReceived {
-                id, name, input, ..
+                name, input, index, ..
             } => {
-                let idx = id
-                    .strip_prefix("tool_")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|i| i + 1);
-                match idx {
+                match index {
                     Some(i) => writeln!(writer, "\n[tool({}): {}] {}", i, name, input)?,
                     None => writeln!(writer, "\n[tool: {}] {}", name, input)?,
                 };
             }
             AgentEvent::ToolResult {
-                id,
                 name,
                 content,
                 is_error,
+                index,
                 ..
             } => {
-                let idx = id
-                    .strip_prefix("tool_")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|i| i + 1);
                 if is_error {
                     writeln!(writer, "[error from {}]: {}", name, content)?;
                 } else {
-                    match idx {
+                    match index {
                         Some(i) => writeln!(writer, "[result({}): {}]: {}", i, name, content)?,
                         None => writeln!(writer, "[result from {}]: {}", name, content)?,
                     };
@@ -451,6 +443,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: None,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
@@ -471,6 +464,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "file1.txt".to_string(),
+                index: None,
                 is_error: false,
             },
             AgentEvent::ResponseComplete(String::new()),
@@ -488,6 +482,7 @@ mod tests {
             AgentEvent::ToolResult {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
+                index: None,
                 content: "permission denied".to_string(),
                 is_error: true,
             },
@@ -588,11 +583,13 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: None,
             },
             AgentEvent::ToolResult {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
+                index: None,
                 is_error: false,
             },
             AgentEvent::TokenReceived("done".to_string()),
@@ -610,6 +607,7 @@ mod tests {
             AgentEvent::ToolUseReceived {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
+                index: None,
                 input: serde_json::json!({"command": "ls"}),
             },
             AgentEvent::ToolResult {
@@ -617,6 +615,7 @@ mod tests {
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
+                index: None,
             },
             AgentEvent::TokenReceived("The directory contains file.txt.".to_string()),
             AgentEvent::ResponseComplete("The directory contains file.txt.".to_string()),

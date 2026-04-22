@@ -239,12 +239,16 @@ pub enum AgentEvent {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// 1-based index of this tool call within its batch.
+        index: Option<u64>,
     },
     ToolResult {
         id: String,
         name: String,
         content: String,
         is_error: bool,
+        /// 1-based index of this tool call within its batch.
+        index: Option<u64>,
     },
     ToolConfirmationRequired {
         id: String,
@@ -507,12 +511,14 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: input.clone(),
+            index: None,
         };
         assert!(matches!(event, AgentEvent::ToolUseReceived { .. }));
         if let AgentEvent::ToolUseReceived {
             id,
             name,
             input: event_input,
+            ..
         } = event
         {
             assert_eq!(id, "tool-123");
@@ -528,6 +534,7 @@ mod tests {
             name: "bash".to_string(),
             content: "file1.txt".to_string(),
             is_error: false,
+            index: None,
         };
         assert!(matches!(event, AgentEvent::ToolResult { .. }));
         if let AgentEvent::ToolResult {
@@ -535,6 +542,7 @@ mod tests {
             name,
             content,
             is_error,
+            ..
         } = event
         {
             assert_eq!(id, "tool-123");

@@ -308,15 +308,6 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     }
 }
 
-/// Extract a 1-based display index from a tool call ID.
-/// OpenAI-compatible backends use `tool_0`, `tool_1`, etc.
-/// Anthropic backends use opaque IDs — returns None.
-fn extract_tool_index(id: &str) -> Option<u64> {
-    id.strip_prefix("tool_")
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(|i| i + 1)
-}
-
 pub fn handle_agent_event(
     app: &mut App,
     event: AgentEvent,
@@ -350,7 +341,7 @@ pub fn handle_agent_event(
             app.git_branch = status_line::detect_git_branch();
         }
         AgentEvent::ToolUseReceived {
-            id, name, input, ..
+            name, input, index, ..
         } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
@@ -359,16 +350,15 @@ pub fn handle_agent_event(
                 ));
             }
             let width = app.text_width as usize;
-            let index = extract_tool_index(&id);
             let entry = app.tool_use_entry(&name, &input, width, index);
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
         AgentEvent::ToolResult {
-            id,
             name,
             content,
             is_error,
+            index,
             ..
         } => {
             let role = if is_error {
@@ -386,14 +376,9 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            let index = if is_error {
-                None
-            } else {
-                extract_tool_index(&id)
-            };
             let entry = match index {
-                Some(idx) => ConversationEntry::new_indexed(role, display, idx),
-                None => ConversationEntry::new(role, display),
+                Some(idx) if !is_error => ConversationEntry::new_indexed(role, display, idx),
+                _ => ConversationEntry::new(role, display),
             };
             app.conversation.push(entry);
             app.scroll_offset = 0;
@@ -828,6 +813,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: None,
         };
 
         handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
@@ -1022,6 +1008,7 @@ mod tests {
         let event = AgentEvent::ToolUseReceived {
             id: "t1".to_string(),
             name: "bash".to_string(),
+            index: None,
             input: serde_json::json!({"command": "ls"}),
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
@@ -1059,6 +1046,7 @@ mod tests {
 
         let event = AgentEvent::ToolUseReceived {
             id: "t1".to_string(),
+            index: None,
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
         };
@@ -1566,6 +1554,7 @@ mod tests {
                 "old_string": "fn old() {}",
                 "new_string": "fn new() {}"
             }),
+            index: None,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
