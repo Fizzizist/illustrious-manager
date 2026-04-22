@@ -410,15 +410,21 @@ async fn execute_tool_calls(
         assistant_content.push(ContentBlock::Text(text_prefix));
     }
 
-    // Parsed inputs and parse errors, keyed by position.
+    enum ToolDecision {
+        ParseError(String),
+        Declined,
+        Approved,
+    }
+
     struct Resolved {
         id: String,
         name: String,
         input: serde_json::Value,
-        parse_error: Option<String>,
+        decision: ToolDecision,
         index: usize,
     }
 
+    // Parse inputs, emit ToolUseReceived, then gather confirmations sequentially.
     let mut resolved: Vec<Resolved> = Vec::with_capacity(tool_calls.len());
     for (i, call) in tool_calls.into_iter().enumerate() {
         let index = i + 1;
@@ -446,67 +452,63 @@ async fn execute_tool_calls(
             index,
         });
 
+        let decision = if let Some(err) = parse_error {
+            ToolDecision::ParseError(err)
+        } else {
+            let needs_confirmation = match confirmation_mode {
+                ConfirmationMode::Always => true,
+                ConfirmationMode::Never => false,
+                ConfirmationMode::WriteOnly => {
+                    tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool())
+                }
+            };
+            if needs_confirmation {
+                let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: input.clone(),
+                    index,
+                });
+                let approved = if let Some(rx) = confirmation_rx.as_mut() {
+                    matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+                } else {
+                    false
+                };
+                if approved {
+                    ToolDecision::Approved
+                } else {
+                    ToolDecision::Declined
+                }
+            } else {
+                ToolDecision::Approved
+            }
+        };
+
         resolved.push(Resolved {
             id: call.id,
             name: call.name,
             input,
-            parse_error,
+            decision,
             index,
         });
-    }
-
-    // Gather confirmations sequentially before launching any parallel execution.
-    // Each entry: Some(true) = approved, Some(false) = rejected, None = parse error (skip).
-    let mut approvals: Vec<Option<bool>> = Vec::with_capacity(resolved.len());
-    for r in &resolved {
-        if r.parse_error.is_some() {
-            approvals.push(None);
-            continue;
-        }
-
-        let needs_confirmation = match confirmation_mode {
-            ConfirmationMode::Always => true,
-            ConfirmationMode::Never => false,
-            ConfirmationMode::WriteOnly => tools.lookup(&r.name).is_ok_and(|t| t.is_write_tool()),
-        };
-
-        let approved = if needs_confirmation {
-            let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                id: r.id.clone(),
-                name: r.name.clone(),
-                input: r.input.clone(),
-                index: r.index,
-            });
-            if let Some(rx) = confirmation_rx.as_mut() {
-                matches!(rx.next().await, Some(ConfirmationResponse::Approved))
-            } else {
-                false
-            }
-        } else {
-            true
-        };
-
-        approvals.push(Some(approved));
     }
 
     // Execute approved tools concurrently; produce results in input order.
     let futures: Vec<_> = resolved
         .iter()
-        .zip(approvals.iter())
-        .map(|(r, approval)| async move {
-            if let Some(err_msg) = &r.parse_error {
-                return (r.index, r.id.clone(), r.name.clone(), err_msg.clone(), true);
-            }
-            match approval {
-                None => unreachable!("parse_error and approval are in sync"),
-                Some(false) => (
+        .map(|r| async move {
+            match &r.decision {
+                ToolDecision::ParseError(err) => {
+                    (r.index, r.id.clone(), r.name.clone(), err.clone(), true)
+                }
+                ToolDecision::Declined => (
                     r.index,
                     r.id.clone(),
                     r.name.clone(),
                     "User declined to execute this tool.".to_string(),
                     true,
                 ),
-                Some(true) => match tools.lookup(&r.name) {
+                ToolDecision::Approved => match tools.lookup(&r.name) {
                     Ok(tool) => match tool.execute(r.input.clone()).await {
                         Ok(result) => {
                             let content = result
@@ -1697,9 +1699,11 @@ mod tests {
             model: "claude-test-model".to_string(),
         };
 
-        let mut tool_config = ToolsConfig::default();
-        tool_config.max_tool_iterations = 7;
-        tool_config.confirmation = ConfirmationMode::Never;
+        let tool_config = ToolsConfig {
+            max_tool_iterations: 7,
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
 
         let registry = ToolRegistry::new();
 

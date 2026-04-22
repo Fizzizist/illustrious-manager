@@ -80,6 +80,7 @@ fn test_tui_confirmation_prompt_state_renders() {
     app.set_state(AppState::ToolConfirmation {
         name: "write_file".to_string(),
         input: serde_json::json!({"path": "/tmp/test.txt", "content": "hello"}),
+        index: 1,
     });
 
     let backend = TestBackend::new(80, 24);

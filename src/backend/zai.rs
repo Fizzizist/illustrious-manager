@@ -544,7 +544,7 @@ mod tests {
 
         assert!(
             body.get("tools").is_none()
-                || body["tools"].as_array().map_or(true, |arr| arr.is_empty()),
+                || body["tools"].as_array().is_none_or(|arr| arr.is_empty()),
             "body should not include tools field or it should be empty when no tools provided"
         );
         assert!(
