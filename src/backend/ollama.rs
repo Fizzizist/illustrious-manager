@@ -473,6 +473,32 @@ mod tests {
     }
 
     #[test]
+    fn ollama_request_body_does_not_include_parallel_tool_calls_field() {
+        // Ollama's /api/chat does not support a parallel_tool_calls flag.
+        // This test pins the body shape to ensure no such field is ever added.
+        let backend = OllamaBackend::new(&OllamaConfig {
+            api_key: "test-key".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "https://ollama.com/api/chat".to_string(),
+        })
+        .unwrap();
+        let config = RequestConfig {
+            model: "gpt-oss:120b".to_string(),
+            max_tokens: 4096,
+            tools: vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: "Run bash".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        };
+        let body = backend.build_request_body(&[], &config);
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "Ollama /api/chat has no parallel_tool_calls field; got: {body}"
+        );
+    }
+
+    #[test]
     fn request_body_assistant_tool_calls_arguments_as_object() {
         let backend = OllamaBackend::new(&OllamaConfig {
             api_key: "test-key".to_string(),

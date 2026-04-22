@@ -46,6 +46,8 @@ impl ConversationRole {
 pub struct ConversationEntry {
     pub role: ConversationRole,
     pub content: String,
+    /// Per-turn 1-based index for tool use / result entries. `None` for other roles.
+    pub index: Option<usize>,
     cached_lines: Vec<Line<'static>>,
     cached_wrapped_count: u16,
     cached_width: u16,
@@ -53,10 +55,23 @@ pub struct ConversationEntry {
 
 impl ConversationEntry {
     pub fn new(role: ConversationRole, content: String) -> Self {
-        let cached_lines = render_entry_lines(&role, &content);
+        let cached_lines = render_entry_lines(&role, None, &content);
         Self {
             role,
             content,
+            index: None,
+            cached_lines,
+            cached_wrapped_count: 0,
+            cached_width: 0,
+        }
+    }
+
+    pub fn new_indexed(role: ConversationRole, content: String, index: usize) -> Self {
+        let cached_lines = render_entry_lines(&role, Some(index), &content);
+        Self {
+            role,
+            content,
+            index: Some(index),
             cached_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -71,10 +86,19 @@ impl ConversationEntry {
         content: String,
         lines: Vec<Line<'static>>,
     ) -> Self {
-        // Wrap in the role header + trailing blank, then append the pre-built lines.
+        Self::new_with_lines_indexed(role, content, lines, None)
+    }
+
+    pub fn new_with_lines_indexed(
+        role: ConversationRole,
+        content: String,
+        lines: Vec<Line<'static>>,
+        index: Option<usize>,
+    ) -> Self {
+        let label = role_label(&role, index);
         let mut all_lines = Vec::new();
         all_lines.push(Line::from(Span::styled(
-            format!("{}:", role.display_label()),
+            format!("{label}:"),
             Style::default().fg(role.color()),
         )));
         all_lines.extend(lines.into_iter().map(|mut l| {
@@ -86,6 +110,7 @@ impl ConversationEntry {
         Self {
             role,
             content,
+            index,
             cached_lines: all_lines,
             cached_wrapped_count: 0,
             cached_width: 0,
@@ -108,14 +133,24 @@ impl ConversationEntry {
     }
 }
 
+fn role_label(role: &ConversationRole, index: Option<usize>) -> String {
+    match (role, index) {
+        (ConversationRole::ToolUse, Some(n)) => format!("[Tool({})]", n),
+        (ConversationRole::ToolResult, Some(n)) => format!("[Result({})]", n),
+        _ => role.display_label().to_string(),
+    }
+}
+
 fn render_role_lines(
     role: &ConversationRole,
+    index: Option<usize>,
     content: &str,
     trailing_blank: bool,
 ) -> Vec<Line<'static>> {
+    let label = role_label(role, index);
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!("{}:", role.display_label()),
+        format!("{label}:"),
         Style::default().fg(role.color()),
     )));
     let display_content = maybe_truncate(content, role);
@@ -135,14 +170,16 @@ fn render_role_lines(
     lines
 }
 
-fn render_entry_lines(role: &ConversationRole, content: &str) -> Vec<Line<'static>> {
-    render_role_lines(role, content, true)
+fn render_entry_lines(
+    role: &ConversationRole,
+    index: Option<usize>,
+    content: &str,
+) -> Vec<Line<'static>> {
+    render_role_lines(role, index, content, true)
 }
 
-// TODO: For long responses with complex markdown, this O(response_size) per-frame
-// cost during streaming could become a bottleneck. Consider caching if it becomes an issue.
 fn render_current_response_lines(current_response: &str) -> Vec<Line<'static>> {
-    render_role_lines(&ConversationRole::Assistant, current_response, false)
+    render_role_lines(&ConversationRole::Assistant, None, current_response, false)
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
@@ -336,6 +373,23 @@ mod tests {
         assert_eq!(ConversationRole::ToolUse.display_label(), "[Tool]");
         assert_eq!(ConversationRole::ToolResult.display_label(), "[Result]");
         assert_eq!(ConversationRole::Info.display_label(), "Info");
+    }
+
+    #[test]
+    fn role_label_without_index_uses_display_label() {
+        assert_eq!(role_label(&ConversationRole::ToolUse, None), "[Tool]");
+        assert_eq!(role_label(&ConversationRole::ToolResult, None), "[Result]");
+        assert_eq!(role_label(&ConversationRole::User, None), "You");
+    }
+
+    #[test]
+    fn role_label_with_index_formats_tool_labels() {
+        assert_eq!(role_label(&ConversationRole::ToolUse, Some(1)), "[Tool(1)]");
+        assert_eq!(
+            role_label(&ConversationRole::ToolResult, Some(2)),
+            "[Result(2)]"
+        );
+        assert_eq!(role_label(&ConversationRole::User, Some(3)), "You");
     }
 
     #[test]
@@ -647,6 +701,55 @@ mod tests {
             "render_tool_entry_not_rendered_as_markdown",
             terminal.backend()
         );
+    }
+
+    #[test]
+    fn render_indexed_tool_entries_show_numbered_labels() {
+        let mut entries = vec![
+            ConversationEntry::new_indexed(
+                ConversationRole::ToolUse,
+                "bash\n  {\"command\": \"ls\"}".to_string(),
+                1,
+            ),
+            ConversationEntry::new_indexed(
+                ConversationRole::ToolResult,
+                "file1.txt\nfile2.txt".to_string(),
+                1,
+            ),
+            ConversationEntry::new_indexed(
+                ConversationRole::ToolUse,
+                "bash\n  {\"command\": \"pwd\"}".to_string(),
+                2,
+            ),
+            ConversationEntry::new_indexed(
+                ConversationRole::ToolResult,
+                "/home/user".to_string(),
+                2,
+            ),
+        ];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(rendered.contains("[Tool(1)]"), "should show Tool(1) label");
+        assert!(
+            rendered.contains("[Result(1)]"),
+            "should show Result(1) label"
+        );
+        assert!(rendered.contains("[Tool(2)]"), "should show Tool(2) label");
+        assert!(
+            rendered.contains("[Result(2)]"),
+            "should show Result(2) label"
+        );
+
+        insta::assert_snapshot!("render_indexed_tool_entries", terminal.backend());
     }
 
     #[test]

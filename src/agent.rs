@@ -13,6 +13,7 @@ use crate::types::{
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
+use futures::future::join_all;
 
 struct PendingToolCall {
     id: String,
@@ -409,10 +410,18 @@ async fn execute_tool_calls(
         assistant_content.push(ContentBlock::Text(text_prefix));
     }
 
-    // TODO: tool calls within a single response are independent and could be executed concurrently.
-    let mut tool_result_blocks: Vec<ContentBlock> = vec![];
+    // Parsed inputs and parse errors, keyed by position.
+    struct Resolved {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        parse_error: Option<String>,
+        index: usize,
+    }
 
-    for call in tool_calls {
+    let mut resolved: Vec<Resolved> = Vec::with_capacity(tool_calls.len());
+    for (i, call) in tool_calls.into_iter().enumerate() {
+        let index = i + 1;
         let (input, parse_error) = if call.input_json.trim().is_empty() {
             (serde_json::Value::Object(serde_json::Map::new()), None)
         } else {
@@ -434,35 +443,39 @@ async fn execute_tool_calls(
             id: call.id.clone(),
             name: call.name.clone(),
             input: input.clone(),
+            index,
         });
 
-        if let Some(err_msg) = parse_error {
-            let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
-                name: call.name.clone(),
-                content: err_msg.clone(),
-                is_error: true,
-            });
-            tool_result_blocks.push(ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: err_msg,
-                is_error: true,
-            });
+        resolved.push(Resolved {
+            id: call.id,
+            name: call.name,
+            input,
+            parse_error,
+            index,
+        });
+    }
+
+    // Gather confirmations sequentially before launching any parallel execution.
+    // Each entry: Some(true) = approved, Some(false) = rejected, None = parse error (skip).
+    let mut approvals: Vec<Option<bool>> = Vec::with_capacity(resolved.len());
+    for r in &resolved {
+        if r.parse_error.is_some() {
+            approvals.push(None);
             continue;
         }
 
         let needs_confirmation = match confirmation_mode {
             ConfirmationMode::Always => true,
             ConfirmationMode::Never => false,
-            ConfirmationMode::WriteOnly => {
-                tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool())
-            }
+            ConfirmationMode::WriteOnly => tools.lookup(&r.name).is_ok_and(|t| t.is_write_tool()),
         };
 
         let approved = if needs_confirmation {
             let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                input: input.clone(),
+                id: r.id.clone(),
+                name: r.name.clone(),
+                input: r.input.clone(),
+                index: r.index,
             });
             if let Some(rx) = confirmation_rx.as_mut() {
                 matches!(rx.next().await, Some(ConfirmationResponse::Approved))
@@ -473,41 +486,70 @@ async fn execute_tool_calls(
             true
         };
 
-        let (result_content, is_error) = if approved {
-            match tools.lookup(&call.name) {
-                Ok(tool) => match tool.execute(input).await {
-                    Ok(result) => {
-                        let content = result
-                            .content
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text(s) = b {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (content, result.is_error)
-                    }
-                    Err(e) => (e.to_string(), true),
-                },
-                Err(e) => (e.to_string(), true),
+        approvals.push(Some(approved));
+    }
+
+    // Execute approved tools concurrently; produce results in input order.
+    let futures: Vec<_> = resolved
+        .iter()
+        .zip(approvals.iter())
+        .map(|(r, approval)| async move {
+            if let Some(err_msg) = &r.parse_error {
+                return (r.index, r.id.clone(), r.name.clone(), err_msg.clone(), true);
             }
-        } else {
-            ("User declined to execute this tool.".to_string(), true)
-        };
+            match approval {
+                None => unreachable!("parse_error and approval are in sync"),
+                Some(false) => (
+                    r.index,
+                    r.id.clone(),
+                    r.name.clone(),
+                    "User declined to execute this tool.".to_string(),
+                    true,
+                ),
+                Some(true) => match tools.lookup(&r.name) {
+                    Ok(tool) => match tool.execute(r.input.clone()).await {
+                        Ok(result) => {
+                            let content = result
+                                .content
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ContentBlock::Text(s) = b {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (
+                                r.index,
+                                r.id.clone(),
+                                r.name.clone(),
+                                content,
+                                result.is_error,
+                            )
+                        }
+                        Err(e) => (r.index, r.id.clone(), r.name.clone(), e.to_string(), true),
+                    },
+                    Err(e) => (r.index, r.id.clone(), r.name.clone(), e.to_string(), true),
+                },
+            }
+        })
+        .collect();
 
+    let results = join_all(futures).await;
+
+    let mut tool_result_blocks: Vec<ContentBlock> = Vec::with_capacity(results.len());
+    for (index, id, name, content, is_error) in results {
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
-            name: call.name.clone(),
-            content: result_content.clone(),
+            name: name.clone(),
+            content: content.clone(),
             is_error,
+            index,
         });
-
         tool_result_blocks.push(ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: result_content,
+            tool_use_id: id,
+            content,
             is_error,
         });
     }
@@ -758,7 +800,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AgentEvent::ToolResult { name, content, is_error }
+                AgentEvent::ToolResult { name, content, is_error, .. }
                     if name == "bash" && content == "ls output" && !is_error
             )),
             "expected ToolResult with ls output"
@@ -1680,5 +1722,459 @@ mod tests {
             &ConfirmationMode::Never,
             "agent confirmation_mode must reflect tool_config"
         );
+    }
+
+    struct SleepTool {
+        duration_ms: u64,
+    }
+
+    #[async_trait]
+    impl Tool for SleepTool {
+        fn name(&self) -> &str {
+            "sleep"
+        }
+        fn description(&self) -> &str {
+            "Sleep for duration_ms milliseconds"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "duration_ms": {"type": "number"}
+                    }
+                })
+            })
+        }
+        fn is_write_tool(&self) -> bool {
+            false
+        }
+        async fn execute(&self, input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+            let ms = input["duration_ms"].as_u64().unwrap_or(self.duration_ms);
+            tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+            Ok(ToolExecResult {
+                content: vec![ContentBlock::Text(format!("slept {}ms", ms))],
+                is_error: false,
+            })
+        }
+    }
+
+    fn multi_sleep_response() -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "s1".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":300}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "s2".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":100}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "s3".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":200}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ]
+    }
+
+    async fn agent_with_sleep_tool() -> Agent {
+        let backend = SequencedBackend::new(vec![multi_sleep_response(), text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(SleepTool { duration_ms: 300 }))
+            .expect("register sleep");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config)
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_complete_faster_than_sequential_bound() {
+        let agent = agent_with_sleep_tool().await;
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("sleep".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete"
+        );
+        assert!(
+            elapsed.as_millis() < 600,
+            "three concurrent sleeps (300+100+200ms) should finish well under 600ms sequential bound; took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_preserve_input_order_in_results() {
+        let agent = agent_with_sleep_tool().await;
+        let stream = agent
+            .send("sleep".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let result_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(result_events.len(), 3, "expected 3 ToolResult events");
+
+        // Results must be in input order (s1=300ms, s2=100ms, s3=200ms)
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[0] {
+            assert_eq!(*index, 1, "first result should have index 1");
+            assert!(content.contains("300"), "first result should be s1 (300ms)");
+        }
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[1] {
+            assert_eq!(*index, 2, "second result should have index 2");
+            assert!(
+                content.contains("100"),
+                "second result should be s2 (100ms)"
+            );
+        }
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[2] {
+            assert_eq!(*index, 3, "third result should have index 3");
+            assert!(content.contains("200"), "third result should be s3 (200ms)");
+        }
+
+        // The history tool_result_blocks must also be in input order.
+        let history = agent.history();
+        let result_blocks: Vec<_> = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .collect();
+        assert_eq!(result_blocks.len(), 3);
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[0] {
+            assert_eq!(tool_use_id, "s1", "first block must correspond to s1");
+        }
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[1] {
+            assert_eq!(tool_use_id, "s2", "second block must correspond to s2");
+        }
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[2] {
+            assert_eq!(tool_use_id, "s3", "third block must correspond to s3");
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_failure_isolation_all_results_emitted() {
+        struct FailOnSecond {
+            call_count: Arc<tokio::sync::Mutex<u32>>,
+        }
+
+        #[async_trait]
+        impl Tool for FailOnSecond {
+            fn name(&self) -> &str {
+                "maybe_fail"
+            }
+            fn description(&self) -> &str {
+                "Fails on second call"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+                SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+            }
+            fn is_write_tool(&self) -> bool {
+                false
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+            ) -> Result<ToolExecResult, ToolError> {
+                let mut count = self.call_count.lock().await;
+                *count += 1;
+                let n = *count;
+                drop(count);
+                if n == 2 {
+                    Err(ToolError::Execution {
+                        tool_name: "maybe_fail".to_string(),
+                        message: "intentional failure".to_string(),
+                    })
+                } else {
+                    Ok(ToolExecResult {
+                        content: vec![ContentBlock::Text(format!("ok call {n}"))],
+                        is_error: false,
+                    })
+                }
+            }
+        }
+
+        let multi_call_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t3".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_call_response, text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(FailOnSecond {
+                call_count: Arc::new(tokio::sync::Mutex::new(0)),
+            }))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let results: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(
+            results.len(),
+            3,
+            "all three ToolResult events must be emitted even when one fails"
+        );
+
+        let error_results: Vec<_> = results
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { is_error, .. } if *is_error))
+            .collect();
+        assert_eq!(error_results.len(), 1, "exactly one error result expected");
+
+        let ok_results: Vec<_> = results
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { is_error, .. } if !is_error))
+            .collect();
+        assert_eq!(ok_results.len(), 2, "two successful results expected");
+    }
+
+    #[tokio::test]
+    async fn index_propagation_tool_use_received_and_result_carry_matching_indices() {
+        let multi_tool_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t3".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_tool_response, text_response("done")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let use_indices: Vec<usize> = events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::ToolUseReceived { index, .. } = e {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            use_indices,
+            vec![1, 2, 3],
+            "ToolUseReceived indices must be 1,2,3"
+        );
+
+        let result_indices: Vec<usize> = events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::ToolResult { index, .. } = e {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            result_indices,
+            vec![1, 2, 3],
+            "ToolResult indices must be 1,2,3"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmation_then_parallel_all_confirmations_before_execution() {
+        // With ConfirmationMode::Always, all N confirmations are sent before any
+        // tool starts executing. A denied tool produces the "declined" result without
+        // blocking the others.
+        let multi_tool_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_tool_response, text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "echo output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Always,
+            ..Default::default()
+        };
+
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        // Approve first, reject second
+        confirm_tx
+            .unbounded_send(ConfirmationResponse::Approved)
+            .expect("send approval");
+        confirm_tx
+            .unbounded_send(ConfirmationResponse::Rejected)
+            .expect("send rejection");
+
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Both ToolConfirmationRequired events must appear before any ToolResult.
+        let mut saw_confirmation = false;
+        let mut all_confirmations_before_first_result = true;
+        let mut first_result_seen = false;
+        for event in &events {
+            match event {
+                AgentEvent::ToolConfirmationRequired { .. } => {
+                    saw_confirmation = true;
+                    if first_result_seen {
+                        all_confirmations_before_first_result = false;
+                    }
+                }
+                AgentEvent::ToolResult { .. } => {
+                    first_result_seen = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_confirmation,
+            "expected at least one ToolConfirmationRequired"
+        );
+        assert!(
+            all_confirmations_before_first_result,
+            "all confirmations must occur before the first ToolResult"
+        );
+
+        let results: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(results.len(), 2, "two ToolResult events expected");
+
+        // First approved → success, second rejected → error
+        if let AgentEvent::ToolResult {
+            is_error, index, ..
+        } = results[0]
+        {
+            assert!(!is_error, "approved tool should succeed");
+            assert_eq!(*index, 1);
+        }
+        if let AgentEvent::ToolResult {
+            is_error, index, ..
+        } = results[1]
+        {
+            assert!(is_error, "rejected tool should produce error result");
+            assert_eq!(*index, 2);
+        }
     }
 }
