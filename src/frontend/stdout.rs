@@ -146,6 +146,12 @@ async fn run_text<W: Write, R: BufRead>(
 
 // Collects a single LLM response from the stream, returning the final text and
 // whether an error occurred.
+//
+// Not the same as `agent::run_headless`: this function is interactive (prompts
+// the user for tool confirmations, streams tokens to a logger, works with a
+// confirm channel) and display-coupled (lives in the frontend layer). By
+// contrast, `run_headless` is fully non-interactive (auto-rejects confirmations,
+// accumulates usage totals, no logger) and lives in the agent layer.
 async fn collect_response<R: BufRead>(
     stream: &mut BoxStream<AgentEvent>,
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
