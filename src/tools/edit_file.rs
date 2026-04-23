@@ -159,6 +159,7 @@ impl Tool for EditFile {
                 validated_path
             ))],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

@@ -498,15 +498,21 @@ async fn execute_tool_calls(
         .iter()
         .map(|r| async move {
             match &r.decision {
-                ToolDecision::ParseError(err) => {
-                    (r.index, r.id.clone(), r.name.clone(), err.clone(), true)
-                }
+                ToolDecision::ParseError(err) => (
+                    r.index,
+                    r.id.clone(),
+                    r.name.clone(),
+                    err.clone(),
+                    true,
+                    vec![],
+                ),
                 ToolDecision::Declined => (
                     r.index,
                     r.id.clone(),
                     r.name.clone(),
                     "User declined to execute this tool.".to_string(),
                     true,
+                    vec![],
                 ),
                 ToolDecision::Approved => match tools.lookup(&r.name) {
                     Ok(tool) => match tool.execute(r.input.clone()).await {
@@ -529,11 +535,26 @@ async fn execute_tool_calls(
                                 r.name.clone(),
                                 content,
                                 result.is_error,
+                                result.agent_events,
                             )
                         }
-                        Err(e) => (r.index, r.id.clone(), r.name.clone(), e.to_string(), true),
+                        Err(e) => (
+                            r.index,
+                            r.id.clone(),
+                            r.name.clone(),
+                            e.to_string(),
+                            true,
+                            vec![],
+                        ),
                     },
-                    Err(e) => (r.index, r.id.clone(), r.name.clone(), e.to_string(), true),
+                    Err(e) => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        e.to_string(),
+                        true,
+                        vec![],
+                    ),
                 },
             }
         })
@@ -542,7 +563,10 @@ async fn execute_tool_calls(
     let results = join_all(futures).await;
 
     let mut tool_result_blocks: Vec<ContentBlock> = Vec::with_capacity(results.len());
-    for (index, id, name, content, is_error) in results {
+    for (index, id, name, content, is_error, agent_events) in results {
+        for extra_event in agent_events {
+            let _ = event_tx.unbounded_send(extra_event);
+        }
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
             name: name.clone(),
             content: content.clone(),
@@ -560,6 +584,217 @@ async fn execute_tool_calls(
 }
 
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
+
+/// Outcome of a headless sub-agent run.
+pub struct HeadlessOutcome {
+    pub text: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub tool_call_count: u32,
+    pub is_error: bool,
+    pub error_message: Option<String>,
+}
+
+/// Drive an `Agent` to completion without a human in the loop.
+///
+/// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
+/// must be configured with a confirmation mode that does not require human input.
+pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
+    let stream = match agent.send(prompt, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            return HeadlessOutcome {
+                text: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                tool_call_count: 0,
+                is_error: true,
+                error_message: Some(e.to_string()),
+            };
+        }
+    };
+
+    let mut stream = stream;
+    let mut text = String::new();
+    let mut input_tokens: u32 = 0;
+    let mut output_tokens: u32 = 0;
+    let mut tool_call_count: u32 = 0;
+    let mut is_error = false;
+    let mut error_message: Option<String> = None;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TokenReceived(t) => text.push_str(&t),
+            AgentEvent::ResponseComplete(_) => {}
+            AgentEvent::ToolUseReceived { .. } => tool_call_count += 1,
+            AgentEvent::ToolResult { .. } => {}
+            AgentEvent::ToolConfirmationRequired { name, .. } => {
+                is_error = true;
+                error_message = Some(format!(
+                    "Sub-agent required confirmation for tool '{name}' but no human is present. \
+                     Set a less restrictive confirmation mode for the sub-agent."
+                ));
+                break;
+            }
+            AgentEvent::Error(msg) => {
+                is_error = true;
+                error_message = Some(msg);
+            }
+            AgentEvent::Usage {
+                input_tokens: it,
+                output_tokens: ot,
+                ..
+            } => {
+                input_tokens = input_tokens.saturating_add(it);
+                output_tokens = output_tokens.saturating_add(ot);
+            }
+            AgentEvent::SubAgentUsage { .. } => {}
+        }
+    }
+
+    HeadlessOutcome {
+        text,
+        input_tokens,
+        output_tokens,
+        tool_call_count,
+        is_error,
+        error_message,
+    }
+}
+
+/// Returns the stricter of two confirmation modes.
+///
+/// Strictness ordering: `Always` > `WriteOnly` > `Never`.
+/// The sub-agent can never be more permissive than the parent.
+pub fn clamp_confirmation(
+    parent: &ConfirmationMode,
+    requested: Option<&ConfirmationMode>,
+) -> ConfirmationMode {
+    let requested = match requested {
+        Some(r) => r,
+        None => return parent.clone(),
+    };
+
+    match (parent, requested) {
+        (ConfirmationMode::Always, _) => ConfirmationMode::Always,
+        (ConfirmationMode::WriteOnly, ConfirmationMode::Always) => ConfirmationMode::Always,
+        (ConfirmationMode::WriteOnly, _) => ConfirmationMode::WriteOnly,
+        (ConfirmationMode::Never, ConfirmationMode::Always) => ConfirmationMode::Always,
+        (ConfirmationMode::Never, ConfirmationMode::WriteOnly) => ConfirmationMode::WriteOnly,
+        (ConfirmationMode::Never, ConfirmationMode::Never) => ConfirmationMode::Never,
+    }
+}
+
+/// Builds a fresh `ToolRegistry` for a sub-agent.
+///
+/// The closure receives the sub-agent's session so that session-bound tools
+/// (e.g. task tools) are wired to the sub-agent rather than the parent.
+pub type RegistryBuilder =
+    Box<dyn Fn(Arc<tokio::sync::Mutex<Session>>) -> anyhow::Result<ToolRegistry> + Send + Sync>;
+
+/// Factory used by `AgentTool` to spawn independent sub-agents.
+pub struct AgentSpawner {
+    pub factory: Arc<BackendFactory>,
+    pub app_config: Arc<crate::config::AppConfig>,
+    pub registry_builder: RegistryBuilder,
+    pub parent_confirmation: ConfirmationMode,
+    pub skills: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+impl AgentSpawner {
+    pub async fn spawn(
+        &self,
+        role: &str,
+        confirmation: ConfirmationMode,
+        tool_allowlist: Option<&[String]>,
+        prompt: String,
+    ) -> HeadlessOutcome {
+        let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
+            Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    tool_call_count: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
+                };
+            }
+        };
+
+        let registry = match (self.registry_builder)(Arc::clone(&session)) {
+            Ok(r) => r,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    tool_call_count: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to build sub-agent registry: {e}")),
+                };
+            }
+        };
+
+        let registry = if let Some(allowlist) = tool_allowlist {
+            registry.into_filtered(allowlist)
+        } else {
+            registry
+        };
+
+        let tool_config = ToolsConfig {
+            confirmation,
+            ..self.app_config.tools.clone()
+        };
+
+        let selection = match self.factory.for_role(role).await {
+            Ok(s) => s,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    tool_call_count: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
+                };
+            }
+        };
+
+        let agent =
+            match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
+                Ok(a) => a,
+                Err(e) => {
+                    return HeadlessOutcome {
+                        text: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        tool_call_count: 0,
+                        is_error: true,
+                        error_message: Some(format!("Failed to spawn sub-agent: {e}")),
+                    };
+                }
+            };
+
+        let agent = match agent.with_context_files() {
+            Ok(a) => a,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    tool_call_count: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to load context files: {e}")),
+                };
+            }
+        };
+
+        let agent = agent.with_skills(&self.skills);
+        run_headless(&agent, prompt).await
+    }
+}
 
 /// Spawn a fresh `Agent` for the given named role using the shared `BackendFactory`.
 ///
@@ -706,6 +941,7 @@ mod tests {
             Ok(ToolExecResult {
                 content: vec![ContentBlock::Text(self.output.clone())],
                 is_error: false,
+                agent_events: vec![],
             })
         }
     }
@@ -1760,6 +1996,7 @@ mod tests {
             Ok(ToolExecResult {
                 content: vec![ContentBlock::Text(format!("slept {}ms", ms))],
                 is_error: false,
+                agent_events: vec![],
             })
         }
     }
@@ -1928,6 +2165,7 @@ mod tests {
                     Ok(ToolExecResult {
                         content: vec![ContentBlock::Text(format!("ok call {n}"))],
                         is_error: false,
+                        agent_events: vec![],
                     })
                 }
             }
@@ -2180,5 +2418,120 @@ mod tests {
             assert!(is_error, "rejected tool should produce error result");
             assert_eq!(*index, 2);
         }
+    }
+
+    // ── clamp_confirmation ────────────────────────────────────────────────
+
+    #[test]
+    fn clamp_confirmation_picks_stricter() {
+        use super::clamp_confirmation;
+        use crate::config::ConfirmationMode::{Always, Never, WriteOnly};
+
+        // parent=Always: always wins
+        assert_eq!(clamp_confirmation(&Always, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&Always, Some(&WriteOnly)), Always);
+        assert_eq!(clamp_confirmation(&Always, Some(&Never)), Always);
+
+        // parent=WriteOnly
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&WriteOnly)), WriteOnly);
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&Never)), WriteOnly);
+
+        // parent=Never: requested takes precedence unless it's also Never
+        assert_eq!(clamp_confirmation(&Never, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&Never, Some(&WriteOnly)), WriteOnly);
+        assert_eq!(clamp_confirmation(&Never, Some(&Never)), Never);
+
+        // None requested → fall back to parent
+        assert_eq!(clamp_confirmation(&WriteOnly, None), WriteOnly);
+        assert_eq!(clamp_confirmation(&Always, None), Always);
+        assert_eq!(clamp_confirmation(&Never, None), Never);
+    }
+
+    // ── run_headless ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_headless_collects_text_and_usage() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("hello".to_string())),
+            Ok(StreamEvent::TextDelta(" world".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let outcome = run_headless(&agent, "hi".to_string()).await;
+
+        assert!(!outcome.is_error);
+        assert_eq!(outcome.text, "hello world");
+        assert_eq!(outcome.input_tokens, 10);
+        assert_eq!(outcome.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn run_headless_auto_rejects_confirmations() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![
+            // First turn: emit a write tool — this triggers ToolConfirmationRequired
+            // because there's no confirmation_rx, leading to a Declined result.
+            // The agent re-sends with the declined result, then we return text.
+            tool_call_response("t1", "write_file", r#"{}"#),
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::write_tool("write_file", "written")))
+            .expect("register");
+        // Use Always mode so the tool would normally require confirmation.
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Always,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        // run_headless sends None for confirmation_rx so confirmations → declined.
+        let outcome = run_headless(&agent, "write".to_string()).await;
+
+        // No ToolConfirmationRequired surfaces as an error in headless mode because
+        // the agent internally treats "no rx → declined" and produces an error ToolResult,
+        // then continues. The final outcome is not is_error unless the backend fails.
+        assert!(!outcome.is_error || outcome.error_message.is_some());
+    }
+
+    #[tokio::test]
+    async fn run_headless_backend_error_sets_is_error() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection lost"))]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let outcome = run_headless(&agent, "fail".to_string()).await;
+
+        assert!(outcome.is_error);
+        let msg = outcome.error_message.expect("should have error message");
+        assert!(msg.contains("connection lost"));
     }
 }

@@ -76,6 +76,7 @@ impl Tool for ListTasksTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(output)],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

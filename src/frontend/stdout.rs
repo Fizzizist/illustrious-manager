@@ -135,6 +135,7 @@ async fn run_text<W: Write, R: BufRead>(
                 }
             }
             AgentEvent::Usage { .. } => {}
+            AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                 handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
@@ -183,6 +184,7 @@ async fn collect_response<R: BufRead>(
                 break;
             }
             AgentEvent::Usage { .. } => {}
+            AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, .. } if !is_tty => {
                 let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
                 is_error = true;

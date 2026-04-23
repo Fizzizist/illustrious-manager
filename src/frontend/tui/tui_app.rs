@@ -403,6 +403,7 @@ pub fn handle_agent_event(
                     let result = crate::tools::ToolResult {
                         content: vec![crate::types::ContentBlock::Text(content)],
                         is_error: false,
+                        agent_events: vec![],
                     };
                     tool.markdown_output(&result)
                 }
@@ -435,6 +436,13 @@ pub fn handle_agent_event(
             let new_input = input_tokens.saturating_sub(app.last_input_total);
             app.last_input_total = input_tokens;
             app.usage.add(new_input, output_tokens);
+        }
+        AgentEvent::SubAgentUsage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            app.usage.add(input_tokens, output_tokens);
         }
     }
     Ok(())
@@ -1000,6 +1008,36 @@ mod tests {
         );
         assert_eq!(app.usage.output_tokens, 330);
         assert_eq!(app.last_input_total, 850);
+    }
+
+    #[test]
+    fn subagent_usage_event_aggregates_into_app_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+
+        let event = AgentEvent::SubAgentUsage {
+            input_tokens: 200,
+            output_tokens: 80,
+            role: "default".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
+
+        assert_eq!(app.usage.input_tokens, 200);
+        assert_eq!(app.usage.output_tokens, 80);
+        // SubAgentUsage does not update last_input_total (no deduplication logic needed)
+        assert_eq!(app.last_input_total, 0);
+
+        // A subsequent SubAgentUsage should add on top.
+        let event2 = AgentEvent::SubAgentUsage {
+            input_tokens: 50,
+            output_tokens: 30,
+            role: "fast".to_string(),
+        };
+        handle_agent_event(&mut app, event2, None).expect("handle second SubAgentUsage");
+
+        assert_eq!(app.usage.input_tokens, 250);
+        assert_eq!(app.usage.output_tokens, 110);
     }
 
     #[test]
