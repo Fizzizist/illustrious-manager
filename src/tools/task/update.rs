@@ -106,6 +106,7 @@ impl Tool for UpdateTaskTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(format!("Updated task {}", id))],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

@@ -67,6 +67,7 @@ impl Tool for CreateTaskTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(format!("Created task with id {}", id))],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

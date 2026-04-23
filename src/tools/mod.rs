@@ -1,5 +1,6 @@
 // Tool trait and registry for extensible tool system
 
+pub mod agent;
 pub mod bash;
 pub mod edit_file;
 pub mod sandbox;
@@ -46,10 +47,13 @@ impl std::fmt::Display for ToolError {
 impl std::error::Error for ToolError {}
 
 /// Result of tool execution
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
+    /// Additional agent-level events to forward to the event stream (e.g. SubAgentUsage).
+    #[serde(skip)]
+    pub agent_events: Vec<crate::types::AgentEvent>,
 }
 
 pub use crate::types::ToolDefinition;
@@ -130,6 +134,15 @@ impl ToolRegistry {
             })
             .collect()
     }
+
+    /// Consume this registry and return a new one containing only the tools
+    /// whose names appear in `allowlist`. Unknown names are silently skipped.
+    pub fn into_filtered(mut self, allowlist: &[String]) -> Self {
+        let allowed: std::collections::HashSet<&str> =
+            allowlist.iter().map(String::as_str).collect();
+        self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        self
+    }
 }
 
 impl Default for ToolRegistry {
@@ -181,6 +194,7 @@ mod tests {
             Ok(ToolResult {
                 content: vec![ContentBlock::Text(format!("executed with: {}", input))],
                 is_error: false,
+                agent_events: vec![],
             })
         }
     }
@@ -345,6 +359,7 @@ mod tests {
         let result = ToolResult {
             content: vec![ContentBlock::Text("output".to_string())],
             is_error: false,
+            agent_events: vec![],
         };
 
         let json = serde_json::to_string(&result).expect("Should serialize");

@@ -19,6 +19,7 @@ use backend::BackendFactory;
 use logging::Logger;
 use session::Session;
 use tools::ToolRegistry;
+use tools::agent::AgentTool;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
@@ -138,7 +139,8 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let factory = BackendFactory::new(app_config.clone());
+    let factory = Arc::new(BackendFactory::new(app_config.clone()));
+    let app_config_arc = Arc::new(app_config.clone());
 
     let mut registry = ToolRegistry::new();
     registry.register(Box::new(BashTool::new(
@@ -167,6 +169,46 @@ async fn main() -> Result<()> {
     registry.register(Box::new(ListTasksTool::new(Arc::clone(&session_arc))))?;
     registry.register(Box::new(UpdateTaskTool::new(Arc::clone(&session_arc))))?;
     registry.register(Box::new(DeleteTaskTool::new(Arc::clone(&session_arc))))?;
+
+    {
+        let factory_clone = Arc::clone(&factory);
+        let app_config_clone = Arc::clone(&app_config_arc);
+        let skills_clone = skills.clone();
+        let sandbox_root = app_config.tools.sandbox_root.clone();
+        let bash_allowlist = app_config.tools.bash_allowlist.clone();
+        let bash_denylist = app_config.tools.bash_denylist.clone();
+        let parent_confirmation = app_config.tools.confirmation.clone();
+
+        let spawner = Arc::new(agent::AgentSpawner {
+            factory: factory_clone,
+            app_config: app_config_clone,
+            registry_builder: Box::new(move |sub_session| {
+                let sandbox_policy = SandboxPolicy::new(std::path::Path::new(&sandbox_root));
+                let mut reg = ToolRegistry::new();
+                reg.register(Box::new(BashTool::new(
+                    bash_allowlist.clone(),
+                    bash_denylist.clone(),
+                    std::path::PathBuf::from(&sandbox_root),
+                    parent_confirmation.clone(),
+                    Box::new(|_| true),
+                )))?;
+                reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
+                reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
+                reg.register(Box::new(SearchTool::new(std::path::PathBuf::from(
+                    &sandbox_root,
+                ))))?;
+                reg.register(Box::new(SkillTool::new(&skills_clone)))?;
+                reg.register(Box::new(CreateTaskTool::new(Arc::clone(&sub_session))))?;
+                reg.register(Box::new(ListTasksTool::new(Arc::clone(&sub_session))))?;
+                reg.register(Box::new(UpdateTaskTool::new(Arc::clone(&sub_session))))?;
+                reg.register(Box::new(DeleteTaskTool::new(Arc::clone(&sub_session))))?;
+                Ok(reg)
+            }),
+            parent_confirmation: app_config.tools.confirmation.clone(),
+            skills: skills.clone(),
+        });
+        registry.register(Box::new(AgentTool::new(spawner)))?;
+    }
 
     let agent = Arc::new(
         spawn_agent(

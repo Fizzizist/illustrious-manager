@@ -53,7 +53,9 @@ Four-layer decoupled design:
 
 2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Tool calls within a single assistant turn run concurrently via `join_all`; confirmations are gathered sequentially first, then approved calls execute in parallel. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
-3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name), `search` (semantic code search). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
+3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name), `search` (semantic code search), `agent` (spawns sub-agents). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
+
+The `agent` tool spawns an independent sub-agent with its own session, model, and tool set. The parent configures the backend role, confirmation mode (clamped so the sub-agent can never be more permissive than the parent), and an optional tool allowlist. Sub-agent token usage propagates to the TUI status line via `AgentEvent::SubAgentUsage`. Permission clamping is enforced by `clamp_confirmation` in `src/agent.rs` — strictness order: `Always` > `WriteOnly` > `Never`.
 
 4. **Frontend Layer** (`src/frontend/`) — Two frontends consuming the same AgentEvent stream:
    - `stdout.rs`: Single-shot mode, streams tokens to stdout, pipe-friendly
