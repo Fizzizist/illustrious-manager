@@ -14,7 +14,7 @@ argument-hint: "[issue-number | description]"
 2. **HTML markers** — Use `<!-- mach6-assessment -->`, `<!-- mach6-plan -->`, `<!-- mach6-review -->`, `<!-- mach6-progress -->` as the first line of comment bodies for reliable discovery.
 3. **No `#N` in comment bodies** — GitHub auto-links `#N` to issues/PRs. Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets (.env, credentials, tokens, keys).
-5. **Task tracking** — Use the `tasks_update` tool to show progress through multi-step commands.
+5. **Task tracking** — Use the `update_task` tool to show progress through multi-step commands.
 6. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning or implementing.
 7. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
@@ -30,14 +30,10 @@ If the input is a number, run **ASSESS** mode. Otherwise, run **CREATE** mode.
 
 ### Step 1: Set up task tracking
 
-```
-tasks_update([
-  { id: "read", title: "Read issue and comments", status: "in_progress" },
-  { id: "explore", title: "Explore relevant codebase", status: "pending" },
-  { id: "assess", title: "Analyze and assess", status: "pending" },
-  { id: "post", title: "Post assessment", status: "pending" }
-])
-```
+- title: "read", description: "read issue and comments" <-- start on this one
+- title: "explore", description: "Explore relevant codebase"
+- title: "assess", description: "Analyze and assess"
+- title: "post", description: "Post assessment"
 
 ### Step 2: Read the issue
 
@@ -52,10 +48,9 @@ Update task: read → completed, explore → in_progress.
 
 ### Step 3: Explore the codebase
 
-Launch 2-3 Explore subagents in parallel targeting different aspects. Agent definitions specify their own model with a provider fallback list — defaults work across providers and are fine for most cases. Override only with good reason (e.g. a particularly complex issue warrants a stronger tier).
+Launch 2 Explore subagents in parallel targeting different aspects. Use the `implement` role for these agents. If there isn't an implement role configured, then they can just use default.
 - **Relevant code**: Find existing code related to the issue, trace implementation patterns
 - **Architecture**: Map relevant architecture layers, abstractions, data flow
-- **Prior work**: Check for related branches, PRs, or commits
 
 Each agent should return 5-10 key files. After agents complete, read all identified files.
 

@@ -14,19 +14,15 @@ argument-hint: "[commit message]"
 2. **HTML markers** — Use `<!-- mach6-progress -->` as the first line of progress comment bodies.
 3. **No `#N` in comment bodies** — Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets (.env, credentials, tokens, keys).
-5. **Task tracking** — Use the `tasks_update` tool to show progress.
+5. **Task tracking** — Use the `update_task` tool to show progress.
 6. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Step 1: Set up task tracking
 
-```
-tasks_update([
-  { id: "stage", title: "Stage changes", status: "in_progress" },
-  { id: "commit", title: "Commit", status: "pending" },
-  { id: "push", title: "Push to remote", status: "pending" },
-  { id: "comment", title: "Post progress comment", status: "pending" }
-])
-```
+- title: "stage", description: "Stage changes"
+- title: "commit", description: "Commit"
+- title: "push", description: "Push to remote"
+- title: "comment", description: "Post progress comment"
 
 ## Step 2: Stage changes
 
