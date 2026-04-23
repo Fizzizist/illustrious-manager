@@ -10,25 +10,26 @@ pub mod types;
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use agent::Agent;
+use agent::spawn_agent;
+use backend::BackendFactory;
 use logging::Logger;
 use session::Session;
 use tools::ToolRegistry;
+use tools::agent::AgentTool;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
+use tools::task::{CreateTaskTool, DeleteTaskTool, ListTasksTool, UpdateTaskTool};
 use tools::write_file::WriteFileTool;
-use types::RequestConfig;
 
 const DEFAULT_MAX_SCHEMA_RETRIES: u32 = 3;
-
-const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 #[derive(Parser)]
 #[command(name = "illustrious-manager")]
@@ -139,45 +140,32 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
-    let selection = backend::from_config(&app_config).await?;
-
-    let mut registry = ToolRegistry::new();
-    registry.register(Box::new(BashTool::new(
-        app_config.tools.bash_allowlist.clone(),
-        app_config.tools.bash_denylist.clone(),
-        std::path::PathBuf::from(&app_config.tools.sandbox_root),
-        app_config.tools.confirmation.clone(),
-        Box::new(|_| true),
-    )))?;
-
-    let sandbox_policy = SandboxPolicy::new(std::path::Path::new(&app_config.tools.sandbox_root));
-    registry.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
-    registry.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
-
-    registry.register(Box::new(SearchTool::new(std::path::PathBuf::from(
-        &app_config.tools.sandbox_root,
-    ))))?;
+    let factory = Arc::new(BackendFactory::new(app_config.clone()));
+    let app_config_arc = Arc::new(app_config.clone());
 
     let skills = discover_skills_from_env();
-    registry.register(Box::new(SkillTool::new(&skills)))?;
-
-    let request_config = RequestConfig {
-        model: selection.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        tools: registry.definitions(),
-    };
 
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
+    let session_arc = Arc::new(tokio::sync::Mutex::new(session));
+
+    let mut registry =
+        build_tool_registry(Arc::clone(&session_arc), &app_config.tools, &skills, None)?;
+
+    build_agent_spawner_and_register(&mut registry, &factory, &app_config_arc, &skills)?;
 
     let agent = Arc::new(
-        Agent::new(selection.backend, request_config, session)
-            .await
-            .with_tools(registry)
-            .with_tool_config(&app_config.tools)
-            // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
-            // because initial history is set from the input session
-            .with_skills(&skills)
-            .with_context_files()?,
+        spawn_agent(
+            &factory,
+            "default",
+            &app_config.tools,
+            session_arc,
+            registry,
+        )
+        .await?
+        // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
+        // because initial history is set from the input session
+        .with_skills(&skills)
+        .with_context_files()?,
     );
 
     let mut logger = if cli.debug {
@@ -226,6 +214,84 @@ async fn main() -> Result<()> {
     }
 
     eprintln!("Session ID: {}", agent.session_id().await);
+    Ok(())
+}
+
+/// Build a `ToolRegistry` with the standard tool set.
+///
+/// `agent_tool` is `Some` for sub-agent registries (enabling recursive spawning)
+/// and `None` for the parent registry, where `build_agent_spawner_and_register`
+/// adds `AgentTool` after constructing the spawner.
+fn build_tool_registry(
+    session: Arc<tokio::sync::Mutex<Session>>,
+    tools_config: &config::ToolsConfig,
+    skills: &HashMap<String, PathBuf>,
+    agent_tool: Option<AgentTool>,
+) -> Result<ToolRegistry> {
+    let sandbox_policy = SandboxPolicy::new(Path::new(&tools_config.sandbox_root));
+    let mut reg = ToolRegistry::new();
+    reg.register(Box::new(BashTool::new(
+        tools_config.bash_allowlist.clone(),
+        tools_config.bash_denylist.clone(),
+        PathBuf::from(&tools_config.sandbox_root),
+        tools_config.confirmation.clone(),
+        Box::new(|_| true),
+    )))?;
+    reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
+    reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
+    reg.register(Box::new(SearchTool::new(PathBuf::from(
+        &tools_config.sandbox_root,
+    ))))?;
+    reg.register(Box::new(SkillTool::new(skills)))?;
+    reg.register(Box::new(CreateTaskTool::new(Arc::clone(&session))))?;
+    reg.register(Box::new(ListTasksTool::new(Arc::clone(&session))))?;
+    reg.register(Box::new(UpdateTaskTool::new(Arc::clone(&session))))?;
+    reg.register(Box::new(DeleteTaskTool::new(session)))?;
+    if let Some(tool) = agent_tool {
+        reg.register(Box::new(tool))?;
+    }
+    Ok(reg)
+}
+
+/// Construct the `AgentSpawner` and register `AgentTool` into `registry`.
+///
+/// Uses a `OnceLock` to break the circular reference between the spawner and
+/// the `registry_builder` closure that references it, enabling sub-agents to
+/// spawn further sub-agents.
+fn build_agent_spawner_and_register(
+    registry: &mut ToolRegistry,
+    factory: &Arc<BackendFactory>,
+    app_config: &Arc<config::AppConfig>,
+    skills: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    let factory_clone = Arc::clone(factory);
+    let app_config_clone = Arc::clone(app_config);
+    let skills_clone = skills.clone();
+    let tools_config = app_config.tools.clone();
+
+    let spawner_cell: Arc<std::sync::OnceLock<Arc<agent::AgentSpawner>>> =
+        Arc::new(std::sync::OnceLock::new());
+    let spawner_cell_clone = Arc::clone(&spawner_cell);
+
+    let spawner = Arc::new(agent::AgentSpawner {
+        factory: factory_clone,
+        app_config: app_config_clone,
+        registry_builder: Box::new(move |sub_session| {
+            let agent_tool = spawner_cell_clone
+                .get()
+                .map(|s| AgentTool::new(Arc::clone(s)));
+            build_tool_registry(sub_session, &tools_config, &skills_clone, agent_tool)
+        }),
+        parent_confirmation: app_config.tools.confirmation.clone(),
+        skills: skills.clone(),
+    });
+
+    spawner_cell
+        .set(Arc::clone(&spawner))
+        .ok()
+        .expect("spawner_cell set exactly once at startup");
+
+    registry.register(Box::new(AgentTool::new(spawner)))?;
     Ok(())
 }
 

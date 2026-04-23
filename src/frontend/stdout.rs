@@ -117,21 +117,25 @@ async fn run_text<W: Write, R: BufRead>(
                 eprintln!("\nError: {}", msg);
                 anyhow::bail!("LLM error: {}", msg);
             }
-            AgentEvent::ToolUseReceived { name, input, .. } => {
-                writeln!(writer, "\n[tool: {}] {}", name, input)?;
+            AgentEvent::ToolUseReceived {
+                name, input, index, ..
+            } => {
+                writeln!(writer, "\n[tool({index}): {}] {}", name, input)?;
             }
             AgentEvent::ToolResult {
                 name,
                 content,
                 is_error,
+                index,
             } => {
                 if is_error {
-                    writeln!(writer, "[error from {}]: {}", name, content)?;
+                    writeln!(writer, "[error({index}) from {}]: {}", name, content)?;
                 } else {
-                    writeln!(writer, "[result from {}]: {}", name, content)?;
+                    writeln!(writer, "[result({index}) from {}]: {}", name, content)?;
                 }
             }
             AgentEvent::Usage { .. } => {}
+            AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                 handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
@@ -142,6 +146,12 @@ async fn run_text<W: Write, R: BufRead>(
 
 // Collects a single LLM response from the stream, returning the final text and
 // whether an error occurred.
+//
+// Not the same as `agent::run_headless`: this function is interactive (prompts
+// the user for tool confirmations, streams tokens to a logger, works with a
+// confirm channel) and display-coupled (lives in the frontend layer). By
+// contrast, `run_headless` is fully non-interactive (auto-rejects confirmations,
+// accumulates usage totals, no logger) and lives in the agent layer.
 async fn collect_response<R: BufRead>(
     stream: &mut BoxStream<AgentEvent>,
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
@@ -180,6 +190,7 @@ async fn collect_response<R: BufRead>(
                 break;
             }
             AgentEvent::Usage { .. } => {}
+            AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, .. } if !is_tty => {
                 let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
                 is_error = true;
@@ -433,13 +444,17 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
         let (result, buf) = run_text_events(events, false).await;
         result.expect("should succeed");
         let output = String::from_utf8(buf).expect("valid UTF-8");
-        assert!(output.contains("[tool: bash]"), "should contain tool name");
+        assert!(
+            output.contains("[tool(1): bash]"),
+            "should contain indexed tool name"
+        );
         assert!(
             output.contains(r#""command""#),
             "should contain input JSON key"
@@ -453,13 +468,14 @@ mod tests {
                 name: "bash".to_string(),
                 content: "file1.txt".to_string(),
                 is_error: false,
+                index: 1,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
         let (result, buf) = run_text_events(events, false).await;
         result.expect("should succeed");
         let output = String::from_utf8(buf).expect("valid UTF-8");
-        assert!(output.contains("[result from bash]"));
+        assert!(output.contains("[result(1) from bash]"));
         assert!(output.contains("file1.txt"));
     }
 
@@ -470,13 +486,14 @@ mod tests {
                 name: "bash".to_string(),
                 content: "permission denied".to_string(),
                 is_error: true,
+                index: 1,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
         let (result, buf) = run_text_events(events, false).await;
         result.expect("should succeed");
         let output = String::from_utf8(buf).expect("valid UTF-8");
-        assert!(output.contains("[error from bash]"));
+        assert!(output.contains("[error(1) from bash]"));
         assert!(output.contains("permission denied"));
     }
 
@@ -486,6 +503,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "rm -rf /"}),
+            index: 1,
         }];
         let mut s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let mut buf = Vec::new();
@@ -504,6 +522,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
@@ -525,6 +544,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             },
             AgentEvent::ResponseComplete(String::new()),
         ];
@@ -568,11 +588,13 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             },
             AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
+                index: 1,
             },
             AgentEvent::TokenReceived("done".to_string()),
             AgentEvent::ResponseComplete("done".to_string()),
@@ -590,11 +612,13 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             },
             AgentEvent::ToolResult {
                 name: "bash".to_string(),
                 content: "file.txt".to_string(),
                 is_error: false,
+                index: 1,
             },
             AgentEvent::TokenReceived("The directory contains file.txt.".to_string()),
             AgentEvent::ResponseComplete("The directory contains file.txt.".to_string()),
@@ -617,6 +641,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "rm -rf /"}),
+            index: 1,
         }];
         let mut s: BoxStream<AgentEvent> = Box::pin(futures::stream::iter(events));
         let (tx, mut rx) = mpsc::unbounded::<ConfirmationResponse>();
@@ -724,7 +749,9 @@ mod tests {
                         AgentEvent::TokenReceived(t) => {
                             vec![Ok(StreamEvent::TextDelta(t)), Ok(StreamEvent::Done)]
                         }
-                        AgentEvent::ToolConfirmationRequired { name, input, id } => {
+                        AgentEvent::ToolConfirmationRequired {
+                            name, input, id, ..
+                        } => {
                             // Emit a tool use that will trigger confirmation in agent.
                             // For simplicity encode as a text delta so collect_response sees it.
                             // Actually: emit Done — the agent handles confirmation upstream.
@@ -744,7 +771,9 @@ mod tests {
             responses: Arc::new(tokio::sync::Mutex::new(responses)),
         };
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = Session::new(None, dir.keep()).await.expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Session::new(None, dir.keep()).await.expect("test session"),
+        ));
         let config = crate::types::RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,

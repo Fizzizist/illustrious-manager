@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::commands::{CommandContext, DispatchResult, default_registry};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
@@ -25,7 +26,6 @@ use super::status_line::{self, StatusLineInfo, TokenUsage};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
-use crate::session::list_sessions;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -36,6 +36,7 @@ pub enum AppState {
     ToolConfirmation {
         name: String,
         input: serde_json::Value,
+        index: usize,
     },
     SessionPicker,
 }
@@ -67,7 +68,7 @@ impl App {
         match &self.state {
             AppState::Input => self.input.set_mode(InputMode::Insert),
             AppState::Streaming => self.input.set_mode(InputMode::Streaming),
-            AppState::ToolConfirmation { name, input } => {
+            AppState::ToolConfirmation { name, input, .. } => {
                 self.input.set_mode(InputMode::ToolConfirmation {
                     name: name.clone(),
                     input: input.clone(),
@@ -115,24 +116,53 @@ impl App {
                 crate::types::Role::User => ConversationRole::User,
                 crate::types::Role::Assistant => ConversationRole::Assistant,
             };
+
+            // Re-derive per-turn 1-based indices for tool entries within each message.
+            let tool_count = message
+                .content
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        b,
+                        crate::types::ContentBlock::ToolUse { .. }
+                            | crate::types::ContentBlock::ToolResult { .. }
+                    )
+                })
+                .count();
+            let is_indexed = tool_count > 0;
+            let mut tool_index: usize = 0;
+
             for block in &message.content {
                 let entry = match block {
                     crate::types::ContentBlock::Text(text) => {
                         Some(ConversationEntry::new(role.clone(), text.clone()))
                     }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        Some(self.tool_use_entry(name, input, self.text_width as usize))
+                        tool_index += 1;
+                        let idx = if is_indexed { Some(tool_index) } else { None };
+                        Some(self.tool_use_entry_indexed(
+                            name,
+                            input,
+                            self.text_width as usize,
+                            idx,
+                        ))
                     }
                     crate::types::ContentBlock::ToolResult {
                         content, is_error, ..
-                    } => Some(ConversationEntry::new(
-                        if *is_error {
+                    } => {
+                        tool_index += 1;
+                        let entry_role = if *is_error {
                             ConversationRole::Error
                         } else {
                             ConversationRole::ToolResult
-                        },
-                        content.clone(),
-                    )),
+                        };
+                        let entry = if is_indexed && entry_role == ConversationRole::ToolResult {
+                            ConversationEntry::new_indexed(entry_role, content.clone(), tool_index)
+                        } else {
+                            ConversationEntry::new(entry_role, content.clone())
+                        };
+                        Some(entry)
+                    }
                 };
                 if let Some(e) = entry {
                     self.conversation.push(e);
@@ -188,36 +218,43 @@ impl App {
     ///
     /// `width` may be 0 if called before the first render (e.g. from
     /// `load_history`); 80 is used as a sensible default in that case.
-    fn tool_use_entry(
+    /// `index` is the per-turn 1-based tool call index, or `None` for unindexed entries.
+    fn tool_use_entry_indexed(
         &self,
         name: &str,
         input: &serde_json::Value,
         width: usize,
+        index: Option<usize>,
     ) -> ConversationEntry {
         let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
         match name {
             "edit_file" => {
                 if let Some(lines) = render_edit_file_diff(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        index,
                     );
                 }
             }
             "write_file" => {
                 if let Some(lines) = render_write_file(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        index,
                     );
                 }
             }
             _ => {}
         }
-        ConversationEntry::new(ConversationRole::ToolUse, content)
+        match index {
+            Some(i) => ConversationEntry::new_indexed(ConversationRole::ToolUse, content, i),
+            None => ConversationEntry::new(ConversationRole::ToolUse, content),
+        }
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -336,7 +373,9 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
         }
-        AgentEvent::ToolUseReceived { name, input, .. } => {
+        AgentEvent::ToolUseReceived {
+            name, input, index, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
@@ -344,7 +383,7 @@ pub fn handle_agent_event(
                 ));
             }
             let width = app.text_width as usize;
-            let entry = app.tool_use_entry(&name, &input, width);
+            let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
@@ -352,6 +391,7 @@ pub fn handle_agent_event(
             name,
             content,
             is_error,
+            index,
         } => {
             let role = if is_error {
                 ConversationRole::Error
@@ -363,22 +403,30 @@ pub fn handle_agent_event(
                     let result = crate::tools::ToolResult {
                         content: vec![crate::types::ContentBlock::Text(content)],
                         is_error: false,
+                        agent_events: vec![],
                     };
                     tool.markdown_output(&result)
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry::new(role, display));
+            let entry = if role == ConversationRole::ToolResult {
+                ConversationEntry::new_indexed(role, display, index)
+            } else {
+                ConversationEntry::new(role, display)
+            };
+            app.conversation.push(entry);
             app.scroll_offset = 0;
         }
-        AgentEvent::ToolConfirmationRequired { name, input, .. } => {
+        AgentEvent::ToolConfirmationRequired {
+            name, input, index, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
                 ));
             }
-            app.set_state(AppState::ToolConfirmation { name, input });
+            app.set_state(AppState::ToolConfirmation { name, input, index });
         }
         AgentEvent::Usage {
             input_tokens,
@@ -388,6 +436,13 @@ pub fn handle_agent_event(
             let new_input = input_tokens.saturating_sub(app.last_input_total);
             app.last_input_total = input_tokens;
             app.usage.add(new_input, output_tokens);
+        }
+        AgentEvent::SubAgentUsage {
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            app.usage.add(input_tokens, output_tokens);
         }
     }
     Ok(())
@@ -436,6 +491,7 @@ async fn run_app(
     app.set_intro_message(crate::config::generate_intro_message(config));
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
+    let cmd_registry = default_registry();
 
     if let Some(prompt) = initial_prompt {
         if let Some(ref mut log) = logger {
@@ -474,42 +530,22 @@ async fn run_app(
                                     ..
                                 } => {
                                     let text = app.input_text();
-                                    if text.trim() == "/sessions" {
-                                        app.input.clear();
-                                        match list_sessions(&config.sessions_dir).await {
-                                            Ok(sessions) => {
-                                                app.session_picker = Some(SessionPicker::new(sessions));
-                                                app.set_state(AppState::SessionPicker);
+                                    if !text.trim().is_empty() {
+                                        let mut ctx = CommandContext {
+                                            app: &mut app,
+                                            agent: agent.clone(),
+                                            config,
+                                        };
+                                        let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
+                                        if dispatch == DispatchResult::Passthrough {
+                                            if let Some(ref mut log) = logger {
+                                                log.log_user_input(&text)?;
                                             }
-                                            Err(e) => {
-                                                app.conversation.push(ConversationEntry::new(
-                                                    ConversationRole::Error,
-                                                    format!("Failed to list sessions: {e}"),
-                                                ));
-                                            }
+                                            stream_task = Some(
+                                                submit_message(&mut app, agent.clone(), &event_tx)
+                                                    .await?,
+                                            );
                                         }
-                                    } else if let Some(model) = text.trim().strip_prefix("/model ") {
-                                        let model = model.trim().to_string();
-                                        app.input.clear();
-                                        if model.is_empty() {
-                                            app.conversation.push(ConversationEntry::new(
-                                                ConversationRole::Error,
-                                                "Usage: /model <model-name>".to_string(),
-                                            ));
-                                        } else {
-                                            agent.set_model(model.clone());
-                                            app.model = model.clone();
-                                            app.conversation.push(ConversationEntry::new(
-                                                ConversationRole::Info,
-                                                format!("Model switched to `{model}`"),
-                                            ));
-                                        }
-                                    } else if !text.trim().is_empty() {
-                                        if let Some(ref mut log) = logger {
-                                            log.log_user_input(&text)?;
-                                        }
-                                        stream_task =
-                                            Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
                                     }
                                 }
                                 _ => {
@@ -550,7 +586,7 @@ async fn run_app(
                                         .await
                                         {
                                             Ok(session) => {
-                                                match session.load_history().await {
+                                                match session.conversation().load_history().await {
                                                     Ok(history) => {
                                                         app.conversation.clear();
                                                         app.current_response.clear();
@@ -598,12 +634,14 @@ async fn run_app(
                                 _ => None,
                             };
                             if let Some(response) = response {
-                                let (name, input) = match &app.state {
-                                    AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
+                                let (name, input, index) = match &app.state {
+                                    AppState::ToolConfirmation { name, input, index } => {
+                                        (name.clone(), input.clone(), *index)
+                                    }
                                     _ => unreachable!(),
                                 };
                                 let width = app.text_width as usize;
-                                let entry = app.tool_use_entry(&name, &input, width);
+                                let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
                                 app.conversation.push(entry);
                                 let sent = app
                                     .confirmation_tx
@@ -776,9 +814,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -818,6 +858,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
 
         handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
@@ -970,6 +1011,36 @@ mod tests {
     }
 
     #[test]
+    fn subagent_usage_event_aggregates_into_app_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.usage.input_tokens, 0);
+        assert_eq!(app.usage.output_tokens, 0);
+
+        let event = AgentEvent::SubAgentUsage {
+            input_tokens: 200,
+            output_tokens: 80,
+            role: "default".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
+
+        assert_eq!(app.usage.input_tokens, 200);
+        assert_eq!(app.usage.output_tokens, 80);
+        // SubAgentUsage does not update last_input_total (no deduplication logic needed)
+        assert_eq!(app.last_input_total, 0);
+
+        // A subsequent SubAgentUsage should add on top.
+        let event2 = AgentEvent::SubAgentUsage {
+            input_tokens: 50,
+            output_tokens: 30,
+            role: "fast".to_string(),
+        };
+        handle_agent_event(&mut app, event2, None).expect("handle second SubAgentUsage");
+
+        assert_eq!(app.usage.input_tokens, 250);
+        assert_eq!(app.usage.output_tokens, 110);
+    }
+
+    #[test]
     fn render_app_includes_status_line() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.model = "test-model".to_string();
@@ -1013,6 +1084,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1051,6 +1123,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1074,6 +1147,7 @@ mod tests {
             id: "t1".to_string(),
             name: "edit_file".to_string(),
             input: serde_json::json!({"path": "/tmp/test.txt"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1166,6 +1240,135 @@ mod tests {
         assert_eq!(app.conversation[3].content, "file.txt");
         assert_eq!(app.conversation[4].role, ConversationRole::Assistant);
         assert_eq!(app.conversation[4].content, "here is the file");
+    }
+
+    #[test]
+    fn load_history_with_multiple_tool_calls_in_one_turn_renders_indexed_labels() {
+        use crate::types::{ContentBlock, Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "pwd"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t3".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "whoami"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t1".to_string(),
+                        content: "file.txt".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t2".to_string(),
+                        content: "/home/user".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t3".to_string(),
+                        content: "alice".to_string(),
+                        is_error: false,
+                    },
+                ],
+            },
+        ];
+
+        app.load_history(&messages);
+
+        let tool_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::ToolUse)
+            .collect();
+        assert_eq!(tool_entries.len(), 3, "expected 3 tool use entries");
+        assert_eq!(
+            tool_entries[0].tool_index,
+            Some(1),
+            "first tool use should have index 1"
+        );
+        assert_eq!(
+            tool_entries[1].tool_index,
+            Some(2),
+            "second tool use should have index 2"
+        );
+        assert_eq!(
+            tool_entries[2].tool_index,
+            Some(3),
+            "third tool use should have index 3"
+        );
+
+        let result_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::ToolResult)
+            .collect();
+        assert_eq!(result_entries.len(), 3, "expected 3 tool result entries");
+        assert_eq!(
+            result_entries[0].tool_index,
+            Some(1),
+            "first result should have index 1"
+        );
+        assert_eq!(
+            result_entries[1].tool_index,
+            Some(2),
+            "second result should have index 2"
+        );
+        assert_eq!(
+            result_entries[2].tool_index,
+            Some(3),
+            "third result should have index 3"
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_required_index_is_threaded_to_entry_on_approval() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        // Simulate receiving a ToolConfirmationRequired for tool index 3.
+        let event = AgentEvent::ToolConfirmationRequired {
+            id: "t3".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            index: 3,
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        // The app is now in ToolConfirmation state with index=3.
+        assert!(matches!(
+            &app.state,
+            AppState::ToolConfirmation { index: 3, .. }
+        ));
+
+        // Simulate approval: build the entry as the confirmation handler would.
+        let (name, input, index) = match &app.state {
+            AppState::ToolConfirmation { name, input, index } => {
+                (name.clone(), input.clone(), *index)
+            }
+            _ => panic!("expected ToolConfirmation state"),
+        };
+        let entry = app.tool_use_entry_indexed(&name, &input, 80, Some(index));
+        assert_eq!(
+            entry.tool_index,
+            Some(3),
+            "approved tool entry must carry index 3"
+        );
     }
 
     #[test]
@@ -1318,10 +1521,16 @@ mod tests {
             .await
             .expect("session");
         session
+            .conversation()
             .insert_message(&Message::text(Role::User, "loaded message".to_string()))
             .await
             .expect("insert");
 
+        let initial_session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir_path.clone())
+                .await
+                .expect("initial session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1330,9 +1539,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                 },
-                crate::session::Session::new(None, dir_path.clone())
-                    .await
-                    .expect("initial session"),
+                initial_session,
             )
             .await,
         );
@@ -1346,7 +1553,11 @@ mod tests {
         app.scroll_offset = 10;
 
         // simulate selecting the session
-        let history = session.load_history().await.expect("load history");
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
         app.conversation.clear();
         app.current_response.clear();
         app.scroll_offset = 0;
@@ -1423,6 +1634,7 @@ mod tests {
             ollama: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
+            models: std::collections::BTreeMap::new(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -1485,7 +1697,7 @@ mod tests {
             "old_string": "let x = 1;",
             "new_string": "let x = 42;"
         });
-        let entry = app.tool_use_entry("edit_file", &input, 80);
+        let entry = app.tool_use_entry_indexed("edit_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The diff renderer produces spans with colour styles; verify that
         // at least one span has a coloured foreground (indicating diff styling)
@@ -1508,7 +1720,7 @@ mod tests {
             "path": "hello.txt",
             "content": "Hello, world!\n"
         });
-        let entry = app.tool_use_entry("write_file", &input, 80);
+        let entry = app.tool_use_entry_indexed("write_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // write_file renders as a syntax-highlighted code block (green + markers)
         let has_plus_marker = entry
@@ -1525,7 +1737,7 @@ mod tests {
     fn regression_non_diff_tool_use_still_renders_via_markdown() {
         let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let input = serde_json::json!({"command": "ls -la"});
-        let entry = app.tool_use_entry("bash", &input, 80);
+        let entry = app.tool_use_entry_indexed("bash", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The content (markdown string) should mention the tool name.
         assert!(
@@ -1547,6 +1759,7 @@ mod tests {
                 "old_string": "fn old() {}",
                 "new_string": "fn new() {}"
             }),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1586,9 +1799,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),
@@ -1628,9 +1843,11 @@ mod tests {
         }
 
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let session = crate::session::Session::new(None, dir.keep())
-            .await
-            .expect("test session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir.keep())
+                .await
+                .expect("test session"),
+        ));
         let agent = Arc::new(
             Agent::new(
                 Box::new(StubBackend),

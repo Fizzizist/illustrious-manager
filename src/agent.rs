@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::backend::LlmBackend;
+use crate::backend::{BackendFactory, LlmBackend};
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -13,6 +13,7 @@ use crate::types::{
 use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
+use futures::future::join_all;
 
 struct PendingToolCall {
     id: String,
@@ -44,9 +45,15 @@ impl Agent {
     pub async fn new(
         backend: Box<dyn LlmBackend>,
         config: RequestConfig,
-        session: Session,
+        session: Arc<TokioMutex<Session>>,
     ) -> Self {
-        let history: Vec<Message> = session.load_history().await.unwrap_or_default();
+        let history: Vec<Message> = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .unwrap_or_default();
 
         Self {
             backend: Arc::from(backend),
@@ -56,7 +63,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
-            session: Arc::new(TokioMutex::new(session)),
+            session,
         }
     }
 
@@ -122,6 +129,16 @@ impl Agent {
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
+    #[cfg(test)]
+    pub fn max_tool_iterations_for_test(&self) -> u32 {
+        self.max_tool_iterations
+    }
+
+    #[cfg(test)]
+    pub fn confirmation_mode_for_test(&self) -> &ConfirmationMode {
+        &self.confirmation_mode
+    }
+
     pub fn history(&self) -> Vec<Message> {
         lock(&self.history).clone()
     }
@@ -131,13 +148,18 @@ impl Agent {
     }
 
     pub async fn session_history(&self) -> Result<Vec<Message>, anyhow::Error> {
-        self.session.lock().await.load_history().await
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
     }
 
     /// If the current session has no messages, delete its DB file from disk.
     pub async fn cleanup_empty_session(&self) -> Result<()> {
         let session = self.session.lock().await;
-        if session.is_empty().await? {
+        if session.conversation().is_empty().await? {
             session.delete_db()?;
         }
         Ok(())
@@ -147,7 +169,11 @@ impl Agent {
     /// Non-persisted context messages (context files, skill definitions) are preserved
     /// at the front of history; only the persisted portion is replaced.
     pub async fn load_session(&self, session: Session) {
-        let new_history = session.load_history().await.unwrap_or_default();
+        let new_history = session
+            .conversation()
+            .load_history()
+            .await
+            .unwrap_or_default();
         {
             let prefix_len = *self
                 .context_prefix_len
@@ -206,7 +232,12 @@ impl Agent {
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
 
-        self.session.lock().await.insert_message(&user_msg).await?;
+        self.session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&user_msg)
+            .await?;
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
@@ -276,7 +307,12 @@ impl Agent {
                                     content: vec![ContentBlock::Text(text_accumulated.clone())],
                                 };
                                 lock(&history_arc).push(partial_msg.clone());
-                                let _ = session.lock().await.insert_message(&partial_msg).await;
+                                let _ = session
+                                    .lock()
+                                    .await
+                                    .conversation()
+                                    .insert_message(&partial_msg)
+                                    .await;
                             }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
@@ -294,7 +330,12 @@ impl Agent {
                         content,
                     };
                     lock(&history_arc).push(assistant_msg.clone());
-                    let _ = session.lock().await.insert_message(&assistant_msg).await;
+                    let _ = session
+                        .lock()
+                        .await
+                        .conversation()
+                        .insert_message(&assistant_msg)
+                        .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
                     break;
                 }
@@ -314,14 +355,24 @@ impl Agent {
                     content: assistant_content,
                 };
                 lock(&history_arc).push(assistant_msg.clone());
-                let _ = session.lock().await.insert_message(&assistant_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&assistant_msg)
+                    .await;
 
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
-                let _ = session.lock().await.insert_message(&tool_result_msg).await;
+                let _ = session
+                    .lock()
+                    .await
+                    .conversation()
+                    .insert_message(&tool_result_msg)
+                    .await;
             }
         });
 
@@ -337,7 +388,12 @@ async fn record_error(
 ) {
     let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
     lock(history).push(error_user_msg.clone());
-    let _ = session.lock().await.insert_message(&error_user_msg).await;
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&error_user_msg)
+        .await;
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
@@ -354,17 +410,34 @@ async fn execute_tool_calls(
         assistant_content.push(ContentBlock::Text(text_prefix));
     }
 
-    // TODO: tool calls within a single response are independent and could be executed concurrently.
-    let mut tool_result_blocks: Vec<ContentBlock> = vec![];
+    enum ToolDecision {
+        ParseError(String),
+        Declined,
+        Approved,
+    }
 
-    for call in tool_calls {
-        let (input, parse_error) = match serde_json::from_str::<serde_json::Value>(&call.input_json)
-        {
-            Ok(v) => (v, None),
-            Err(e) => (
-                serde_json::Value::Null,
-                Some(format!("Invalid tool input JSON: {e}")),
-            ),
+    struct Resolved {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+        decision: ToolDecision,
+        index: usize,
+    }
+
+    // Parse inputs, emit ToolUseReceived, then gather confirmations sequentially.
+    let mut resolved: Vec<Resolved> = Vec::with_capacity(tool_calls.len());
+    for (i, call) in tool_calls.into_iter().enumerate() {
+        let index = i + 1;
+        let (input, parse_error) = if call.input_json.trim().is_empty() {
+            (serde_json::Value::Object(serde_json::Map::new()), None)
+        } else {
+            match serde_json::from_str::<serde_json::Value>(&call.input_json) {
+                Ok(v) => (v, None),
+                Err(e) => (
+                    serde_json::Value::Null,
+                    Some(format!("Invalid tool input JSON: {e}")),
+                ),
+            }
         };
 
         assistant_content.push(ContentBlock::ToolUse {
@@ -376,85 +449,379 @@ async fn execute_tool_calls(
             id: call.id.clone(),
             name: call.name.clone(),
             input: input.clone(),
+            index,
         });
 
-        if let Some(err_msg) = parse_error {
-            let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
-                name: call.name.clone(),
-                content: err_msg.clone(),
-                is_error: true,
-            });
-            tool_result_blocks.push(ContentBlock::ToolResult {
-                tool_use_id: call.id,
-                content: err_msg,
-                is_error: true,
-            });
-            continue;
-        }
-
-        let needs_confirmation = match confirmation_mode {
-            ConfirmationMode::Always => true,
-            ConfirmationMode::Never => false,
-            ConfirmationMode::WriteOnly => {
-                tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool())
-            }
-        };
-
-        let approved = if needs_confirmation {
-            let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                id: call.id.clone(),
-                name: call.name.clone(),
-                input: input.clone(),
-            });
-            if let Some(rx) = confirmation_rx.as_mut() {
-                matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+        let decision = if let Some(err) = parse_error {
+            ToolDecision::ParseError(err)
+        } else {
+            let needs_confirmation = match confirmation_mode {
+                ConfirmationMode::Always => true,
+                ConfirmationMode::Never => false,
+                ConfirmationMode::WriteOnly => {
+                    tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool())
+                }
+            };
+            if needs_confirmation {
+                let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    input: input.clone(),
+                    index,
+                });
+                let approved = if let Some(rx) = confirmation_rx.as_mut() {
+                    matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+                } else {
+                    false
+                };
+                if approved {
+                    ToolDecision::Approved
+                } else {
+                    ToolDecision::Declined
+                }
             } else {
-                false
+                ToolDecision::Approved
             }
-        } else {
-            true
         };
 
-        let (result_content, is_error) = if approved {
-            match tools.lookup(&call.name) {
-                Ok(tool) => match tool.execute(input) {
-                    Ok(result) => {
-                        let content = result
-                            .content
-                            .iter()
-                            .filter_map(|b| {
-                                if let ContentBlock::Text(s) = b {
-                                    Some(s.clone())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        (content, result.is_error)
-                    }
-                    Err(e) => (e.to_string(), true),
-                },
-                Err(e) => (e.to_string(), true),
-            }
-        } else {
-            ("User declined to execute this tool.".to_string(), true)
-        };
-
-        let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
-            name: call.name.clone(),
-            content: result_content.clone(),
-            is_error,
+        resolved.push(Resolved {
+            id: call.id,
+            name: call.name,
+            input,
+            decision,
+            index,
         });
+    }
 
+    // Execute approved tools concurrently; produce results in input order.
+    let futures: Vec<_> = resolved
+        .iter()
+        .map(|r| async move {
+            match &r.decision {
+                ToolDecision::ParseError(err) => (
+                    r.index,
+                    r.id.clone(),
+                    r.name.clone(),
+                    err.clone(),
+                    true,
+                    vec![],
+                ),
+                ToolDecision::Declined => (
+                    r.index,
+                    r.id.clone(),
+                    r.name.clone(),
+                    "User declined to execute this tool.".to_string(),
+                    true,
+                    vec![],
+                ),
+                ToolDecision::Approved => match tools.lookup(&r.name) {
+                    Ok(tool) => match tool.execute(r.input.clone()).await {
+                        Ok(result) => {
+                            let content = result
+                                .content
+                                .iter()
+                                .filter_map(|b| {
+                                    if let ContentBlock::Text(s) = b {
+                                        Some(s.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            (
+                                r.index,
+                                r.id.clone(),
+                                r.name.clone(),
+                                content,
+                                result.is_error,
+                                result.agent_events,
+                            )
+                        }
+                        Err(e) => (
+                            r.index,
+                            r.id.clone(),
+                            r.name.clone(),
+                            e.to_string(),
+                            true,
+                            vec![],
+                        ),
+                    },
+                    Err(e) => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        e.to_string(),
+                        true,
+                        vec![],
+                    ),
+                },
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+
+    let mut tool_result_blocks: Vec<ContentBlock> = Vec::with_capacity(results.len());
+    for (index, id, name, content, is_error, agent_events) in results {
+        for extra_event in agent_events {
+            let _ = event_tx.unbounded_send(extra_event);
+        }
+        let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
+            name: name.clone(),
+            content: content.clone(),
+            is_error,
+            index,
+        });
         tool_result_blocks.push(ContentBlock::ToolResult {
-            tool_use_id: call.id,
-            content: result_content,
+            tool_use_id: id,
+            content,
             is_error,
         });
     }
 
     (assistant_content, tool_result_blocks)
+}
+
+pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
+
+/// Outcome of a headless sub-agent run.
+pub struct HeadlessOutcome {
+    pub text: String,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub is_error: bool,
+    pub error_message: Option<String>,
+}
+
+/// Drive an `Agent` to completion without a human in the loop.
+///
+/// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
+/// must be configured with a confirmation mode that does not require human input.
+pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
+    let stream = match agent.send(prompt, None).await {
+        Ok(s) => s,
+        Err(e) => {
+            return HeadlessOutcome {
+                text: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                is_error: true,
+                error_message: Some(e.to_string()),
+            };
+        }
+    };
+
+    let mut stream = stream;
+    let mut text = String::new();
+    let mut input_tokens: u32 = 0;
+    let mut output_tokens: u32 = 0;
+    let mut is_error = false;
+    let mut error_message: Option<String> = None;
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TokenReceived(t) => text.push_str(&t),
+            AgentEvent::ResponseComplete(_) => {}
+            AgentEvent::ToolUseReceived { .. } => {}
+            AgentEvent::ToolResult { .. } => {}
+            AgentEvent::ToolConfirmationRequired { name, .. } => {
+                is_error = true;
+                error_message = Some(format!(
+                    "Sub-agent required confirmation for tool '{name}' but no human is present. \
+                     Set a less restrictive confirmation mode for the sub-agent."
+                ));
+                break;
+            }
+            AgentEvent::Error(msg) => {
+                is_error = true;
+                error_message = Some(msg);
+                break;
+            }
+            AgentEvent::Usage {
+                input_tokens: it,
+                output_tokens: ot,
+                ..
+            } => {
+                input_tokens = input_tokens.saturating_add(it);
+                output_tokens = output_tokens.saturating_add(ot);
+            }
+            AgentEvent::SubAgentUsage { .. } => {}
+        }
+    }
+
+    HeadlessOutcome {
+        text,
+        input_tokens,
+        output_tokens,
+        is_error,
+        error_message,
+    }
+}
+
+/// Returns the stricter of two confirmation modes.
+///
+/// Strictness ordering: `Always` > `WriteOnly` > `Never`.
+/// The sub-agent can never be more permissive than the parent.
+pub fn clamp_confirmation(
+    parent: &ConfirmationMode,
+    requested: Option<&ConfirmationMode>,
+) -> ConfirmationMode {
+    let requested = match requested {
+        Some(r) => r,
+        None => return parent.clone(),
+    };
+
+    match (parent, requested) {
+        (ConfirmationMode::Always, _) => ConfirmationMode::Always,
+        (ConfirmationMode::WriteOnly, ConfirmationMode::Always) => ConfirmationMode::Always,
+        (ConfirmationMode::WriteOnly, _) => ConfirmationMode::WriteOnly,
+        (ConfirmationMode::Never, ConfirmationMode::Always) => ConfirmationMode::Always,
+        (ConfirmationMode::Never, ConfirmationMode::WriteOnly) => ConfirmationMode::WriteOnly,
+        (ConfirmationMode::Never, ConfirmationMode::Never) => ConfirmationMode::Never,
+    }
+}
+
+/// Builds a fresh `ToolRegistry` for a sub-agent.
+///
+/// The closure receives the sub-agent's session so that session-bound tools
+/// (e.g. task tools) are wired to the sub-agent rather than the parent.
+pub type RegistryBuilder =
+    Box<dyn Fn(Arc<tokio::sync::Mutex<Session>>) -> anyhow::Result<ToolRegistry> + Send + Sync>;
+
+/// Factory used by `AgentTool` to spawn independent sub-agents.
+pub struct AgentSpawner {
+    pub factory: Arc<BackendFactory>,
+    pub app_config: Arc<crate::config::AppConfig>,
+    pub registry_builder: RegistryBuilder,
+    pub parent_confirmation: ConfirmationMode,
+    pub skills: std::collections::HashMap<String, std::path::PathBuf>,
+}
+
+impl AgentSpawner {
+    pub async fn spawn(
+        &self,
+        role: &str,
+        confirmation: ConfirmationMode,
+        tool_allowlist: Option<&[String]>,
+        prompt: String,
+    ) -> HeadlessOutcome {
+        let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
+            Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
+                };
+            }
+        };
+
+        let registry = match (self.registry_builder)(Arc::clone(&session)) {
+            Ok(r) => r,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to build sub-agent registry: {e}")),
+                };
+            }
+        };
+
+        let registry = if let Some(allowlist) = tool_allowlist {
+            registry.into_filtered(allowlist)
+        } else {
+            registry
+        };
+
+        let tool_config = ToolsConfig {
+            confirmation,
+            ..self.app_config.tools.clone()
+        };
+
+        let selection = match self.factory.for_role(role).await {
+            Ok(s) => s,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
+                };
+            }
+        };
+
+        let agent =
+            match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
+                Ok(a) => a,
+                Err(e) => {
+                    return HeadlessOutcome {
+                        text: String::new(),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        is_error: true,
+                        error_message: Some(format!("Failed to spawn sub-agent: {e}")),
+                    };
+                }
+            };
+
+        let agent = match agent.with_context_files() {
+            Ok(a) => a,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to load context files: {e}")),
+                };
+            }
+        };
+
+        let agent = agent.with_skills(&self.skills);
+        run_headless(&agent, prompt).await
+    }
+}
+
+/// Spawn a fresh `Agent` for the given named role using the shared `BackendFactory`.
+///
+/// The caller supplies a pre-built `ToolRegistry` and a `Session`. The agent's
+/// model is taken from the role definition; `tool_config` controls iteration
+/// limits and confirmation behaviour.
+pub async fn spawn_agent(
+    factory: &BackendFactory,
+    role: &str,
+    tool_config: &ToolsConfig,
+    session: Arc<TokioMutex<Session>>,
+    tools: ToolRegistry,
+) -> anyhow::Result<Agent> {
+    let selection = factory.for_role(role).await?;
+    spawn_agent_with_selection(selection, tool_config, session, tools).await
+}
+
+/// Core of `spawn_agent` — constructs an `Agent` from an already-resolved
+/// `BackendSelection`. Separated out so tests can inject a fake backend without
+/// going through real auth.
+pub async fn spawn_agent_with_selection(
+    selection: crate::backend::BackendSelection,
+    tool_config: &ToolsConfig,
+    session: Arc<TokioMutex<Session>>,
+    tools: ToolRegistry,
+) -> anyhow::Result<Agent> {
+    let request_config = RequestConfig {
+        model: selection.model,
+        max_tokens: DEFAULT_MAX_TOKENS,
+        tools: tools.definitions(),
+    };
+    Ok(Agent::new(selection.backend, request_config, session)
+        .await
+        .with_tools(tools)
+        .with_tool_config(tool_config))
 }
 
 #[cfg(test)]
@@ -469,6 +836,10 @@ mod tests {
     async fn test_session() -> Session {
         let dir = tempfile::TempDir::new().expect("temp dir");
         Session::new(None, dir.keep()).await.expect("test session")
+    }
+
+    async fn test_session_arc() -> Arc<TokioMutex<Session>> {
+        Arc::new(TokioMutex::new(test_session().await))
     }
 
     struct SequencedBackend {
@@ -544,6 +915,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Tool for EchoTool {
         fn name(&self) -> &str {
             &self.name
@@ -557,10 +929,11 @@ mod tests {
         fn is_write_tool(&self) -> bool {
             self.is_write
         }
-        fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+        async fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
             Ok(ToolExecResult {
                 content: vec![ContentBlock::Text(self.output.clone())],
                 is_error: false,
+                agent_events: vec![],
             })
         }
     }
@@ -583,7 +956,7 @@ mod tests {
             confirmation: mode,
             ..Default::default()
         };
-        Agent::new(Box::new(backend), config, test_session().await)
+        Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config)
@@ -657,7 +1030,7 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AgentEvent::ToolResult { name, content, is_error }
+                AgentEvent::ToolResult { name, content, is_error, .. }
                     if name == "bash" && content == "ls output" && !is_error
             )),
             "expected ToolResult with ls output"
@@ -694,7 +1067,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -738,7 +1111,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -783,7 +1156,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Rejected)
             .expect("send rejection");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -829,7 +1202,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -884,7 +1257,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -944,6 +1317,44 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "loop should continue and complete after malformed input"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tool_input_json_is_treated_as_empty_object() {
+        // Regression: LLM sends no input for a no-arg tool (e.g. list_tasks).
+        // The SSE stream delivers no ToolUseDelta events, leaving input_json = "".
+        // This must not produce an error — it should be treated as {}.
+        let empty_input_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            // No ToolUseDelta — input_json stays empty
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![empty_input_response, text_response("ok")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "echo output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("list".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { content, is_error, .. }
+                    if content == "echo output" && !is_error
+            )),
+            "empty input_json should execute successfully with empty object input"
         );
     }
 
@@ -1148,7 +1559,7 @@ mod tests {
             ..Default::default()
         };
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1222,7 +1633,7 @@ mod tests {
             .unbounded_send(ConfirmationResponse::Approved)
             .expect("send approval");
 
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_tools(registry)
             .with_tool_config(&tool_config);
@@ -1266,7 +1677,7 @@ mod tests {
             "another-skill".to_string(),
             std::path::PathBuf::from("/fake/path2"),
         );
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&skills);
 
@@ -1293,7 +1704,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(backend), config, test_session().await)
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
             .with_skills(&std::collections::HashMap::new());
 
@@ -1312,6 +1723,7 @@ mod tests {
             .await
             .expect("session a");
         session_a
+            .conversation()
             .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
@@ -1320,6 +1732,7 @@ mod tests {
             .await
             .expect("session b");
         session_b
+            .conversation()
             .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
@@ -1329,7 +1742,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.history().len(), 1);
         assert!(
@@ -1353,6 +1771,7 @@ mod tests {
             .await
             .expect("session a");
         session_a
+            .conversation()
             .insert_message(&Message::text(Role::User, "session a message".to_string()))
             .await
             .expect("insert");
@@ -1361,6 +1780,7 @@ mod tests {
             .await
             .expect("session b");
         session_b
+            .conversation()
             .insert_message(&Message::text(Role::User, "session b message".to_string()))
             .await
             .expect("insert");
@@ -1377,9 +1797,13 @@ mod tests {
         std::fs::write(&skill_path, "---\ndescription: A test skill\n---\nContent").expect("write");
         skills.insert("test-skill".to_string(), skill_path);
 
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a)
-            .await
-            .with_skills(&skills);
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await
+        .with_skills(&skills);
 
         // history should be: [skill_prefix, session_a_message]
         assert_eq!(agent.history().len(), 2);
@@ -1419,7 +1843,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session_a).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
 
         assert_eq!(agent.session_id().await, id_a);
         agent.load_session(session_b).await;
@@ -1440,7 +1869,12 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(!db_path.exists());
@@ -1453,6 +1887,7 @@ mod tests {
 
         let session = Session::new(None, dir_path.clone()).await.expect("session");
         session
+            .conversation()
             .insert_message(&Message::text(Role::User, "hello".to_string()))
             .await
             .expect("insert");
@@ -1463,9 +1898,642 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
         };
-        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_produces_agent_with_role_model_and_tools_config() {
+        use crate::backend::BackendSelection;
+        use crate::config::ToolsConfig;
+        use crate::tools::ToolRegistry;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = Arc::new(TokioMutex::new(
+            Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("session"),
+        ));
+
+        let selection = BackendSelection {
+            backend: Box::new(SequencedBackend::new(vec![])),
+            model: "claude-test-model".to_string(),
+        };
+
+        let tool_config = ToolsConfig {
+            max_tool_iterations: 7,
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+
+        let registry = ToolRegistry::new();
+
+        let agent = super::spawn_agent_with_selection(selection, &tool_config, session, registry)
+            .await
+            .expect("spawn_agent_with_selection should succeed");
+
+        assert_eq!(
+            agent.model(),
+            "claude-test-model",
+            "agent model must match the role's model"
+        );
+        assert_eq!(
+            agent.max_tool_iterations_for_test(),
+            7,
+            "agent max_tool_iterations must reflect tool_config"
+        );
+        assert_eq!(
+            agent.confirmation_mode_for_test(),
+            &ConfirmationMode::Never,
+            "agent confirmation_mode must reflect tool_config"
+        );
+    }
+
+    struct SleepTool {
+        duration_ms: u64,
+    }
+
+    #[async_trait]
+    impl Tool for SleepTool {
+        fn name(&self) -> &str {
+            "sleep"
+        }
+        fn description(&self) -> &str {
+            "Sleep for duration_ms milliseconds"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            SCHEMA.get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "duration_ms": {"type": "number"}
+                    }
+                })
+            })
+        }
+        fn is_write_tool(&self) -> bool {
+            false
+        }
+        async fn execute(&self, input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+            let ms = input["duration_ms"].as_u64().unwrap_or(self.duration_ms);
+            tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+            Ok(ToolExecResult {
+                content: vec![ContentBlock::Text(format!("slept {}ms", ms))],
+                is_error: false,
+                agent_events: vec![],
+            })
+        }
+    }
+
+    fn multi_sleep_response() -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "s1".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":300}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "s2".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":100}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "s3".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":200}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ]
+    }
+
+    async fn agent_with_sleep_tool() -> Agent {
+        let backend = SequencedBackend::new(vec![multi_sleep_response(), text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(SleepTool { duration_ms: 300 }))
+            .expect("register sleep");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config)
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_complete_faster_than_sequential_bound() {
+        let agent = agent_with_sleep_tool().await;
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("sleep".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete"
+        );
+        assert!(
+            elapsed.as_millis() < 600,
+            "three concurrent sleeps (300+100+200ms) should finish well under 600ms sequential bound; took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_preserve_input_order_in_results() {
+        let agent = agent_with_sleep_tool().await;
+        let stream = agent
+            .send("sleep".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let result_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(result_events.len(), 3, "expected 3 ToolResult events");
+
+        // Results must be in input order (s1=300ms, s2=100ms, s3=200ms)
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[0] {
+            assert_eq!(*index, 1, "first result should have index 1");
+            assert!(content.contains("300"), "first result should be s1 (300ms)");
+        }
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[1] {
+            assert_eq!(*index, 2, "second result should have index 2");
+            assert!(
+                content.contains("100"),
+                "second result should be s2 (100ms)"
+            );
+        }
+        if let AgentEvent::ToolResult { content, index, .. } = &result_events[2] {
+            assert_eq!(*index, 3, "third result should have index 3");
+            assert!(content.contains("200"), "third result should be s3 (200ms)");
+        }
+
+        // The history tool_result_blocks must also be in input order.
+        let history = agent.history();
+        let result_blocks: Vec<_> = history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            .collect();
+        assert_eq!(result_blocks.len(), 3);
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[0] {
+            assert_eq!(tool_use_id, "s1", "first block must correspond to s1");
+        }
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[1] {
+            assert_eq!(tool_use_id, "s2", "second block must correspond to s2");
+        }
+        if let ContentBlock::ToolResult { tool_use_id, .. } = result_blocks[2] {
+            assert_eq!(tool_use_id, "s3", "third block must correspond to s3");
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_failure_isolation_all_results_emitted() {
+        struct FailOnSecond {
+            call_count: Arc<tokio::sync::Mutex<u32>>,
+        }
+
+        #[async_trait]
+        impl Tool for FailOnSecond {
+            fn name(&self) -> &str {
+                "maybe_fail"
+            }
+            fn description(&self) -> &str {
+                "Fails on second call"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+                SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+            }
+            fn is_write_tool(&self) -> bool {
+                false
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+            ) -> Result<ToolExecResult, ToolError> {
+                let mut count = self.call_count.lock().await;
+                *count += 1;
+                let n = *count;
+                drop(count);
+                if n == 2 {
+                    Err(ToolError::Execution {
+                        tool_name: "maybe_fail".to_string(),
+                        message: "intentional failure".to_string(),
+                    })
+                } else {
+                    Ok(ToolExecResult {
+                        content: vec![ContentBlock::Text(format!("ok call {n}"))],
+                        is_error: false,
+                        agent_events: vec![],
+                    })
+                }
+            }
+        }
+
+        let multi_call_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t3".to_string(),
+                name: "maybe_fail".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_call_response, text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(FailOnSecond {
+                call_count: Arc::new(tokio::sync::Mutex::new(0)),
+            }))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let results: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(
+            results.len(),
+            3,
+            "all three ToolResult events must be emitted even when one fails"
+        );
+
+        let error_results: Vec<_> = results
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { is_error, .. } if *is_error))
+            .collect();
+        assert_eq!(error_results.len(), 1, "exactly one error result expected");
+
+        let ok_results: Vec<_> = results
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { is_error, .. } if !is_error))
+            .collect();
+        assert_eq!(ok_results.len(), 2, "two successful results expected");
+    }
+
+    #[tokio::test]
+    async fn index_propagation_tool_use_received_and_result_carry_matching_indices() {
+        let multi_tool_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t3".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_tool_response, text_response("done")]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("run".to_string(), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let use_indices: Vec<usize> = events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::ToolUseReceived { index, .. } = e {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            use_indices,
+            vec![1, 2, 3],
+            "ToolUseReceived indices must be 1,2,3"
+        );
+
+        let result_indices: Vec<usize> = events
+            .iter()
+            .filter_map(|e| {
+                if let AgentEvent::ToolResult { index, .. } = e {
+                    Some(*index)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            result_indices,
+            vec![1, 2, 3],
+            "ToolResult indices must be 1,2,3"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmation_then_parallel_all_confirmations_before_execution() {
+        // With ConfirmationMode::Always, all N confirmations are sent before any
+        // tool starts executing. A denied tool produces the "declined" result without
+        // blocking the others.
+        let multi_tool_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t2".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ];
+
+        let backend = SequencedBackend::new(vec![multi_tool_response, text_response("done")]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "echo output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Always,
+            ..Default::default()
+        };
+
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        // Approve first, reject second
+        confirm_tx
+            .unbounded_send(ConfirmationResponse::Approved)
+            .expect("send approval");
+        confirm_tx
+            .unbounded_send(ConfirmationResponse::Rejected)
+            .expect("send rejection");
+
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Both ToolConfirmationRequired events must appear before any ToolResult.
+        let mut saw_confirmation = false;
+        let mut all_confirmations_before_first_result = true;
+        let mut first_result_seen = false;
+        for event in &events {
+            match event {
+                AgentEvent::ToolConfirmationRequired { .. } => {
+                    saw_confirmation = true;
+                    if first_result_seen {
+                        all_confirmations_before_first_result = false;
+                    }
+                }
+                AgentEvent::ToolResult { .. } => {
+                    first_result_seen = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_confirmation,
+            "expected at least one ToolConfirmationRequired"
+        );
+        assert!(
+            all_confirmations_before_first_result,
+            "all confirmations must occur before the first ToolResult"
+        );
+
+        let results: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(results.len(), 2, "two ToolResult events expected");
+
+        // First approved → success, second rejected → error
+        if let AgentEvent::ToolResult {
+            is_error, index, ..
+        } = results[0]
+        {
+            assert!(!is_error, "approved tool should succeed");
+            assert_eq!(*index, 1);
+        }
+        if let AgentEvent::ToolResult {
+            is_error, index, ..
+        } = results[1]
+        {
+            assert!(is_error, "rejected tool should produce error result");
+            assert_eq!(*index, 2);
+        }
+    }
+
+    // ── clamp_confirmation ────────────────────────────────────────────────
+
+    #[test]
+    fn clamp_confirmation_picks_stricter() {
+        use super::clamp_confirmation;
+        use crate::config::ConfirmationMode::{Always, Never, WriteOnly};
+
+        // parent=Always: always wins
+        assert_eq!(clamp_confirmation(&Always, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&Always, Some(&WriteOnly)), Always);
+        assert_eq!(clamp_confirmation(&Always, Some(&Never)), Always);
+
+        // parent=WriteOnly
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&WriteOnly)), WriteOnly);
+        assert_eq!(clamp_confirmation(&WriteOnly, Some(&Never)), WriteOnly);
+
+        // parent=Never: requested takes precedence unless it's also Never
+        assert_eq!(clamp_confirmation(&Never, Some(&Always)), Always);
+        assert_eq!(clamp_confirmation(&Never, Some(&WriteOnly)), WriteOnly);
+        assert_eq!(clamp_confirmation(&Never, Some(&Never)), Never);
+
+        // None requested → fall back to parent
+        assert_eq!(clamp_confirmation(&WriteOnly, None), WriteOnly);
+        assert_eq!(clamp_confirmation(&Always, None), Always);
+        assert_eq!(clamp_confirmation(&Never, None), Never);
+    }
+
+    // ── run_headless ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_headless_collects_text_and_usage() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("hello".to_string())),
+            Ok(StreamEvent::TextDelta(" world".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let outcome = run_headless(&agent, "hi".to_string()).await;
+
+        assert!(!outcome.is_error);
+        assert_eq!(outcome.text, "hello world");
+        assert_eq!(outcome.input_tokens, 10);
+        assert_eq!(outcome.output_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn run_headless_auto_rejects_confirmations() {
+        use super::run_headless;
+
+        // In Always mode the agent emits ToolConfirmationRequired before checking
+        // the rx. run_headless has no rx and no user, so it treats the event as a
+        // hard error: is_error = true with a descriptive error_message, and stops.
+        let backend = SequencedBackend::new(vec![
+            tool_call_response("t1", "write_file", r#"{}"#),
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::write_tool("write_file", "written")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Always,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let outcome = run_headless(&agent, "write".to_string()).await;
+
+        // ToolConfirmationRequired received with no human present → hard error.
+        assert!(
+            outcome.is_error,
+            "confirmation required with no human present must set is_error"
+        );
+        let msg = outcome
+            .error_message
+            .expect("error_message must be set when is_error is true");
+        assert!(
+            msg.contains("write_file"),
+            "error message should name the offending tool; got: {msg}"
+        );
+        assert!(
+            msg.contains("confirmation"),
+            "error message should mention confirmation; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_headless_backend_error_sets_is_error() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection lost"))]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let outcome = run_headless(&agent, "fail".to_string()).await;
+
+        assert!(outcome.is_error);
+        let msg = outcome.error_message.expect("should have error message");
+        assert!(msg.contains("connection lost"));
     }
 }
