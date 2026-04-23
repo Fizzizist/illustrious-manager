@@ -67,7 +67,7 @@ pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionS
         });
     }
 
-    summaries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    summaries.sort_by_key(|b| std::cmp::Reverse(b.modified));
 
     Ok(summaries)
 }
