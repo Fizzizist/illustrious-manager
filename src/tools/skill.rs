@@ -66,6 +66,7 @@ impl Tool for SkillTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(content)],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

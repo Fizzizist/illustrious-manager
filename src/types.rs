@@ -254,6 +254,11 @@ pub enum AgentEvent {
         output_tokens: u32,
         stop_reason: String,
     },
+    SubAgentUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+        role: String,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

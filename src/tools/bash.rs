@@ -122,6 +122,7 @@ impl Tool for BashTool {
                         token
                     ))],
                     is_error: true,
+                    agent_events: vec![],
                 });
             }
         }
@@ -140,6 +141,7 @@ impl Tool for BashTool {
                         "Command rejected: user denied confirmation".to_string(),
                     )],
                     is_error: true,
+                    agent_events: vec![],
                 });
             }
         }
@@ -168,6 +170,7 @@ impl Tool for BashTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(content)],
             is_error,
+            agent_events: vec![],
         })
     }
 }
