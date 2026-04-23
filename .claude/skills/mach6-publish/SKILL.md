@@ -13,8 +13,18 @@ argument-hint: "<pr-number>"
 1. **GitHub as shared memory** — All context lives on the PR.
 2. **No `#N` in comment bodies** — Use "finding 3", "item 3" etc. instead.
 3. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
+4. **Task tracking** — Use the `update_task` tool to show progress.
+5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
-## Step 1: Pre-merge checks
+## Step 1: Set up task tracking
+
+- title: "checks", description: "Pre-merge checks"
+- title: "version", description: "Version bump (on feature branch)"
+- title: "docs", description: "Update documentation"
+- title: "merge", description: "Merge PR"
+- title: "release", description: "Tag and release"
+
+## Step 2: Pre-merge checks
 
 ```bash
 gh pr checkout <pr-number>
@@ -22,6 +32,8 @@ git pull
 gh pr view <pr-number> --json mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,comments,body
 gh pr checks <pr-number>
 ```
+
+**Note:** `gh pr checks` returns exit code 8 while checks are still pending — this is expected, not a failure. Wait and re-run if needed.
 
 Read ALL PR comments to understand the full history — plans, reviews, assessments, progress updates, and discussion.
 
@@ -49,7 +61,9 @@ Then check if these need attention:
 
 Present the checklist to the user. If items need attention, address them before proceeding.
 
-## Step 2: Version bump (on the feature branch — BEFORE merge)
+Update task: checks → completed, version → in_progress.
+
+## Step 3: Version bump (on the feature branch — BEFORE merge)
 
 **This step is mandatory for projects with versioning.** The version bump MUST happen on the feature branch and be pushed as part of the PR, because the default branch requires PRs for all changes — you cannot push commits directly to it.
 
@@ -76,7 +90,9 @@ Present the checklist to the user. If items need attention, address them before 
 
 If the project doesn't use versioning, skip this step.
 
-## Step 3: Update documentation
+Update task: version → completed, docs → in_progress.
+
+## Step 4: Update documentation
 
 Proactively review and update ALL documentation affected by the PR's changes. This is not limited to mach6 docs — check everything in the repo.
 
@@ -111,7 +127,9 @@ Proactively review and update ALL documentation affected by the PR's changes. Th
 
 If no documentation changes are needed (rare), skip this step.
 
-## Step 4: Merge
+Update task: docs → completed, merge → in_progress.
+
+## Step 5: Merge
 
 ```bash
 gh pr merge <pr-number> --squash --delete-branch
@@ -130,7 +148,9 @@ Clean up local feature branch if it still exists:
 git branch -d <branch-name> 2>/dev/null
 ```
 
-## Step 5: Tag and release
+Update task: merge → completed, release → in_progress.
+
+## Step 6: Tag and release
 
 Ask the user if they want to create a GitHub release:
 - **Yes**: Proceed with tagging and release
@@ -138,7 +158,7 @@ Ask the user if they want to create a GitHub release:
 
 ### Always create the git tag
 
-The tag is created on the default branch after merge, using the version from Step 2:
+The tag is created on the default branch after merge, using the version from Step 3:
 
 ```bash
 git tag v<version>
@@ -157,9 +177,14 @@ git push --tags
 
 3. Present draft to user for approval, then create:
    ```bash
-   gh release create v<version> --title "v<version>" --notes "<release-notes>"
+   cat > /tmp/gh-release-notes.md << 'MACH6_EOF'
+   <release-notes>
+   MACH6_EOF
+   gh release create v<version> --title "v<version>" --notes-file /tmp/gh-release-notes.md
    ```
 
-## Step 6: Report
+Update task: release → completed.
+
+## Step 7: Report
 
 Report: what was merged, tagged, released. Link to the PR and release.
