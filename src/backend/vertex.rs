@@ -334,6 +334,10 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
     if !config.tools.is_empty() {
         body["tools"] =
             serde_json::to_value(&config.tools).context("Failed to serialize tool definitions")?;
+        body["tool_choice"] = serde_json::json!({
+            "type": "auto",
+            "disable_parallel_tool_use": false
+        });
     }
 
     Ok(body)
@@ -395,6 +399,22 @@ mod tests {
     }
 
     #[test]
+    fn build_request_body_includes_tool_choice_with_parallel_enabled_when_tools_present() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![ToolDefinition {
+                name: "bash".to_string(),
+                description: "Run a bash command".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["tool_choice"]["type"], "auto");
+        assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], false);
+    }
+
+    #[test]
     fn build_request_body_omits_tools_key_when_empty() {
         let config = RequestConfig {
             model: "claude-test".to_string(),
@@ -405,6 +425,10 @@ mod tests {
         assert!(
             body.get("tools").is_none() || body["tools"].is_null(),
             "tools must not be in the request body when empty"
+        );
+        assert!(
+            body.get("tool_choice").is_none() || body["tool_choice"].is_null(),
+            "tool_choice must not be present when there are no tools"
         );
     }
 
