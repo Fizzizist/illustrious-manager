@@ -1,0 +1,24 @@
+---
+source: src/frontend/tui/conversation_area.rs
+expression: terminal.backend()
+---
+"┌Conversation──────────────────────────────────────────────┐"
+"│[Tool(1)]:                                                │"
+"│  bash {"command": "ls"}                                  │"
+"│                                                          │"
+"│[Result(1)]:                                              │"
+"│  file1.txt file2.txt                                     │"
+"│                                                          │"
+"│[Tool(2)]:                                                │"
+"│  bash {"command": "pwd"}                                 │"
+"│                                                          │"
+"│[Result(2)]:                                              │"
+"│  /home/user                                              │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

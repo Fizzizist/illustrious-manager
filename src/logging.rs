@@ -109,6 +109,7 @@ impl Logger {
                 name,
                 content,
                 is_error,
+                ..
             } => {
                 self.log_tool_result(name, content, *is_error)?;
             }
@@ -243,6 +244,7 @@ mod tests {
                 id: "tool-1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                index: 1,
             };
             logger.log_event(&event).expect("Failed to log event");
         }
@@ -263,6 +265,7 @@ mod tests {
                 name: "bash".to_string(),
                 content: "output".to_string(),
                 is_error: false,
+                index: 1,
             };
             logger.log_event(&event).expect("Failed to log event");
         }

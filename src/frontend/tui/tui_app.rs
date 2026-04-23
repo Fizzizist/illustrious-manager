@@ -36,6 +36,7 @@ pub enum AppState {
     ToolConfirmation {
         name: String,
         input: serde_json::Value,
+        index: usize,
     },
     SessionPicker,
 }
@@ -67,7 +68,7 @@ impl App {
         match &self.state {
             AppState::Input => self.input.set_mode(InputMode::Insert),
             AppState::Streaming => self.input.set_mode(InputMode::Streaming),
-            AppState::ToolConfirmation { name, input } => {
+            AppState::ToolConfirmation { name, input, .. } => {
                 self.input.set_mode(InputMode::ToolConfirmation {
                     name: name.clone(),
                     input: input.clone(),
@@ -115,24 +116,53 @@ impl App {
                 crate::types::Role::User => ConversationRole::User,
                 crate::types::Role::Assistant => ConversationRole::Assistant,
             };
+
+            // Re-derive per-turn 1-based indices for tool entries within each message.
+            let tool_count = message
+                .content
+                .iter()
+                .filter(|b| {
+                    matches!(
+                        b,
+                        crate::types::ContentBlock::ToolUse { .. }
+                            | crate::types::ContentBlock::ToolResult { .. }
+                    )
+                })
+                .count();
+            let is_indexed = tool_count > 0;
+            let mut tool_index: usize = 0;
+
             for block in &message.content {
                 let entry = match block {
                     crate::types::ContentBlock::Text(text) => {
                         Some(ConversationEntry::new(role.clone(), text.clone()))
                     }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        Some(self.tool_use_entry(name, input, self.text_width as usize))
+                        tool_index += 1;
+                        let idx = if is_indexed { Some(tool_index) } else { None };
+                        Some(self.tool_use_entry_indexed(
+                            name,
+                            input,
+                            self.text_width as usize,
+                            idx,
+                        ))
                     }
                     crate::types::ContentBlock::ToolResult {
                         content, is_error, ..
-                    } => Some(ConversationEntry::new(
-                        if *is_error {
+                    } => {
+                        tool_index += 1;
+                        let entry_role = if *is_error {
                             ConversationRole::Error
                         } else {
                             ConversationRole::ToolResult
-                        },
-                        content.clone(),
-                    )),
+                        };
+                        let entry = if is_indexed && entry_role == ConversationRole::ToolResult {
+                            ConversationEntry::new_indexed(entry_role, content.clone(), tool_index)
+                        } else {
+                            ConversationEntry::new(entry_role, content.clone())
+                        };
+                        Some(entry)
+                    }
                 };
                 if let Some(e) = entry {
                     self.conversation.push(e);
@@ -188,36 +218,43 @@ impl App {
     ///
     /// `width` may be 0 if called before the first render (e.g. from
     /// `load_history`); 80 is used as a sensible default in that case.
-    fn tool_use_entry(
+    /// `index` is the per-turn 1-based tool call index, or `None` for unindexed entries.
+    fn tool_use_entry_indexed(
         &self,
         name: &str,
         input: &serde_json::Value,
         width: usize,
+        index: Option<usize>,
     ) -> ConversationEntry {
         let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
         match name {
             "edit_file" => {
                 if let Some(lines) = render_edit_file_diff(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        index,
                     );
                 }
             }
             "write_file" => {
                 if let Some(lines) = render_write_file(input, effective_width) {
-                    return ConversationEntry::new_with_lines(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
+                        index,
                     );
                 }
             }
             _ => {}
         }
-        ConversationEntry::new(ConversationRole::ToolUse, content)
+        match index {
+            Some(i) => ConversationEntry::new_indexed(ConversationRole::ToolUse, content, i),
+            None => ConversationEntry::new(ConversationRole::ToolUse, content),
+        }
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
@@ -336,7 +373,9 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
         }
-        AgentEvent::ToolUseReceived { name, input, .. } => {
+        AgentEvent::ToolUseReceived {
+            name, input, index, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
@@ -344,7 +383,7 @@ pub fn handle_agent_event(
                 ));
             }
             let width = app.text_width as usize;
-            let entry = app.tool_use_entry(&name, &input, width);
+            let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
@@ -352,6 +391,7 @@ pub fn handle_agent_event(
             name,
             content,
             is_error,
+            index,
         } => {
             let role = if is_error {
                 ConversationRole::Error
@@ -368,17 +408,24 @@ pub fn handle_agent_event(
                 }
                 Err(_) => content,
             };
-            app.conversation.push(ConversationEntry::new(role, display));
+            let entry = if role == ConversationRole::ToolResult {
+                ConversationEntry::new_indexed(role, display, index)
+            } else {
+                ConversationEntry::new(role, display)
+            };
+            app.conversation.push(entry);
             app.scroll_offset = 0;
         }
-        AgentEvent::ToolConfirmationRequired { name, input, .. } => {
+        AgentEvent::ToolConfirmationRequired {
+            name, input, index, ..
+        } => {
             if !app.current_response.is_empty() {
                 app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
                 ));
             }
-            app.set_state(AppState::ToolConfirmation { name, input });
+            app.set_state(AppState::ToolConfirmation { name, input, index });
         }
         AgentEvent::Usage {
             input_tokens,
@@ -579,12 +626,14 @@ async fn run_app(
                                 _ => None,
                             };
                             if let Some(response) = response {
-                                let (name, input) = match &app.state {
-                                    AppState::ToolConfirmation { name, input } => (name.clone(), input.clone()),
+                                let (name, input, index) = match &app.state {
+                                    AppState::ToolConfirmation { name, input, index } => {
+                                        (name.clone(), input.clone(), *index)
+                                    }
                                     _ => unreachable!(),
                                 };
                                 let width = app.text_width as usize;
-                                let entry = app.tool_use_entry(&name, &input, width);
+                                let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
                                 app.conversation.push(entry);
                                 let sent = app
                                     .confirmation_tx
@@ -801,6 +850,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
 
         handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
@@ -996,6 +1046,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1034,6 +1085,7 @@ mod tests {
             id: "t1".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1057,6 +1109,7 @@ mod tests {
             id: "t1".to_string(),
             name: "edit_file".to_string(),
             input: serde_json::json!({"path": "/tmp/test.txt"}),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 
@@ -1149,6 +1202,135 @@ mod tests {
         assert_eq!(app.conversation[3].content, "file.txt");
         assert_eq!(app.conversation[4].role, ConversationRole::Assistant);
         assert_eq!(app.conversation[4].content, "here is the file");
+    }
+
+    #[test]
+    fn load_history_with_multiple_tool_calls_in_one_turn_renders_indexed_labels() {
+        use crate::types::{ContentBlock, Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t2".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "pwd"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t3".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "whoami"}),
+                    },
+                ],
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t1".to_string(),
+                        content: "file.txt".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t2".to_string(),
+                        content: "/home/user".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t3".to_string(),
+                        content: "alice".to_string(),
+                        is_error: false,
+                    },
+                ],
+            },
+        ];
+
+        app.load_history(&messages);
+
+        let tool_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::ToolUse)
+            .collect();
+        assert_eq!(tool_entries.len(), 3, "expected 3 tool use entries");
+        assert_eq!(
+            tool_entries[0].tool_index,
+            Some(1),
+            "first tool use should have index 1"
+        );
+        assert_eq!(
+            tool_entries[1].tool_index,
+            Some(2),
+            "second tool use should have index 2"
+        );
+        assert_eq!(
+            tool_entries[2].tool_index,
+            Some(3),
+            "third tool use should have index 3"
+        );
+
+        let result_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::ToolResult)
+            .collect();
+        assert_eq!(result_entries.len(), 3, "expected 3 tool result entries");
+        assert_eq!(
+            result_entries[0].tool_index,
+            Some(1),
+            "first result should have index 1"
+        );
+        assert_eq!(
+            result_entries[1].tool_index,
+            Some(2),
+            "second result should have index 2"
+        );
+        assert_eq!(
+            result_entries[2].tool_index,
+            Some(3),
+            "third result should have index 3"
+        );
+    }
+
+    #[test]
+    fn tool_confirmation_required_index_is_threaded_to_entry_on_approval() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        // Simulate receiving a ToolConfirmationRequired for tool index 3.
+        let event = AgentEvent::ToolConfirmationRequired {
+            id: "t3".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            index: 3,
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        // The app is now in ToolConfirmation state with index=3.
+        assert!(matches!(
+            &app.state,
+            AppState::ToolConfirmation { index: 3, .. }
+        ));
+
+        // Simulate approval: build the entry as the confirmation handler would.
+        let (name, input, index) = match &app.state {
+            AppState::ToolConfirmation { name, input, index } => {
+                (name.clone(), input.clone(), *index)
+            }
+            _ => panic!("expected ToolConfirmation state"),
+        };
+        let entry = app.tool_use_entry_indexed(&name, &input, 80, Some(index));
+        assert_eq!(
+            entry.tool_index,
+            Some(3),
+            "approved tool entry must carry index 3"
+        );
     }
 
     #[test]
@@ -1477,7 +1659,7 @@ mod tests {
             "old_string": "let x = 1;",
             "new_string": "let x = 42;"
         });
-        let entry = app.tool_use_entry("edit_file", &input, 80);
+        let entry = app.tool_use_entry_indexed("edit_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The diff renderer produces spans with colour styles; verify that
         // at least one span has a coloured foreground (indicating diff styling)
@@ -1500,7 +1682,7 @@ mod tests {
             "path": "hello.txt",
             "content": "Hello, world!\n"
         });
-        let entry = app.tool_use_entry("write_file", &input, 80);
+        let entry = app.tool_use_entry_indexed("write_file", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // write_file renders as a syntax-highlighted code block (green + markers)
         let has_plus_marker = entry
@@ -1517,7 +1699,7 @@ mod tests {
     fn regression_non_diff_tool_use_still_renders_via_markdown() {
         let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let input = serde_json::json!({"command": "ls -la"});
-        let entry = app.tool_use_entry("bash", &input, 80);
+        let entry = app.tool_use_entry_indexed("bash", &input, 80, None);
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The content (markdown string) should mention the tool name.
         assert!(
@@ -1539,6 +1721,7 @@ mod tests {
                 "old_string": "fn old() {}",
                 "new_string": "fn new() {}"
             }),
+            index: 1,
         };
         handle_agent_event(&mut app, event, None).expect("handle event");
 

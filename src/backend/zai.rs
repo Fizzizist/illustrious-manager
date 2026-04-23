@@ -267,6 +267,7 @@ impl ZaiBackend {
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools_json);
+            body["parallel_tool_calls"] = serde_json::json!(true);
         }
 
         body
@@ -541,11 +542,36 @@ mod tests {
 
         let body = backend.build_request_body(&messages, &config);
 
-        // Tools field should either not exist or be null/empty when no tools provided
         assert!(
             body.get("tools").is_none()
-                || body["tools"].as_array().map_or(true, |arr| arr.is_empty()),
+                || body["tools"].as_array().is_none_or(|arr| arr.is_empty()),
             "body should not include tools field or it should be empty when no tools provided"
+        );
+        assert!(
+            body.get("parallel_tool_calls").is_none() || body["parallel_tool_calls"].is_null(),
+            "parallel_tool_calls must not be present when there are no tools"
+        );
+    }
+
+    #[test]
+    fn build_request_body_includes_parallel_tool_calls_when_tools_present() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: "Run bash".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+        };
+        let messages = vec![];
+
+        let body = backend.build_request_body(&messages, &config);
+
+        assert_eq!(
+            body["parallel_tool_calls"], true,
+            "parallel_tool_calls must be true when tools are present"
         );
     }
 
