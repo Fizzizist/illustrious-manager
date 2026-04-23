@@ -590,7 +590,6 @@ pub struct HeadlessOutcome {
     pub text: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
-    pub tool_call_count: u32,
     pub is_error: bool,
     pub error_message: Option<String>,
 }
@@ -607,7 +606,6 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 text: String::new(),
                 input_tokens: 0,
                 output_tokens: 0,
-                tool_call_count: 0,
                 is_error: true,
                 error_message: Some(e.to_string()),
             };
@@ -618,7 +616,6 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
     let mut text = String::new();
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
-    let mut tool_call_count: u32 = 0;
     let mut is_error = false;
     let mut error_message: Option<String> = None;
 
@@ -626,7 +623,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
         match event {
             AgentEvent::TokenReceived(t) => text.push_str(&t),
             AgentEvent::ResponseComplete(_) => {}
-            AgentEvent::ToolUseReceived { .. } => tool_call_count += 1,
+            AgentEvent::ToolUseReceived { .. } => {}
             AgentEvent::ToolResult { .. } => {}
             AgentEvent::ToolConfirmationRequired { name, .. } => {
                 is_error = true;
@@ -639,6 +636,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::Error(msg) => {
                 is_error = true;
                 error_message = Some(msg);
+                break;
             }
             AgentEvent::Usage {
                 input_tokens: it,
@@ -656,7 +654,6 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
         text,
         input_tokens,
         output_tokens,
-        tool_call_count,
         is_error,
         error_message,
     }
@@ -716,7 +713,6 @@ impl AgentSpawner {
                     text: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    tool_call_count: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to create sub-agent session: {e}")),
                 };
@@ -730,7 +726,6 @@ impl AgentSpawner {
                     text: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    tool_call_count: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to build sub-agent registry: {e}")),
                 };
@@ -755,7 +750,6 @@ impl AgentSpawner {
                     text: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    tool_call_count: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to resolve role '{role}': {e}")),
                 };
@@ -770,7 +764,6 @@ impl AgentSpawner {
                         text: String::new(),
                         input_tokens: 0,
                         output_tokens: 0,
-                        tool_call_count: 0,
                         is_error: true,
                         error_message: Some(format!("Failed to spawn sub-agent: {e}")),
                     };
@@ -784,7 +777,6 @@ impl AgentSpawner {
                     text: String::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    tool_call_count: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to load context files: {e}")),
                 };
@@ -2482,10 +2474,10 @@ mod tests {
     async fn run_headless_auto_rejects_confirmations() {
         use super::run_headless;
 
+        // In Always mode the agent emits ToolConfirmationRequired before checking
+        // the rx. run_headless has no rx and no user, so it treats the event as a
+        // hard error: is_error = true with a descriptive error_message, and stops.
         let backend = SequencedBackend::new(vec![
-            // First turn: emit a write tool — this triggers ToolConfirmationRequired
-            // because there's no confirmation_rx, leading to a Declined result.
-            // The agent re-sends with the declined result, then we return text.
             tool_call_response("t1", "write_file", r#"{}"#),
             text_response("done"),
         ]);
@@ -2498,7 +2490,6 @@ mod tests {
         registry
             .register(Box::new(EchoTool::write_tool("write_file", "written")))
             .expect("register");
-        // Use Always mode so the tool would normally require confirmation.
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Always,
             ..Default::default()
@@ -2508,13 +2499,24 @@ mod tests {
             .with_tools(registry)
             .with_tool_config(&tool_config);
 
-        // run_headless sends None for confirmation_rx so confirmations → declined.
         let outcome = run_headless(&agent, "write".to_string()).await;
 
-        // No ToolConfirmationRequired surfaces as an error in headless mode because
-        // the agent internally treats "no rx → declined" and produces an error ToolResult,
-        // then continues. The final outcome is not is_error unless the backend fails.
-        assert!(!outcome.is_error || outcome.error_message.is_some());
+        // ToolConfirmationRequired received with no human present → hard error.
+        assert!(
+            outcome.is_error,
+            "confirmation required with no human present must set is_error"
+        );
+        let msg = outcome
+            .error_message
+            .expect("error_message must be set when is_error is true");
+        assert!(
+            msg.contains("write_file"),
+            "error message should name the offending tool; got: {msg}"
+        );
+        assert!(
+            msg.contains("confirmation"),
+            "error message should mention confirmation; got: {msg}"
+        );
     }
 
     #[tokio::test]

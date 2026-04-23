@@ -179,6 +179,12 @@ async fn main() -> Result<()> {
         let bash_denylist = app_config.tools.bash_denylist.clone();
         let parent_confirmation = app_config.tools.confirmation.clone();
 
+        // OnceLock lets the registry_builder closure reference the spawner it will
+        // be part of, enabling sub-agents to spawn further sub-agents.
+        let spawner_cell: Arc<std::sync::OnceLock<Arc<agent::AgentSpawner>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let spawner_cell_clone = Arc::clone(&spawner_cell);
+
         let spawner = Arc::new(agent::AgentSpawner {
             factory: factory_clone,
             app_config: app_config_clone,
@@ -202,11 +208,23 @@ async fn main() -> Result<()> {
                 reg.register(Box::new(ListTasksTool::new(Arc::clone(&sub_session))))?;
                 reg.register(Box::new(UpdateTaskTool::new(Arc::clone(&sub_session))))?;
                 reg.register(Box::new(DeleteTaskTool::new(Arc::clone(&sub_session))))?;
+                // Include the agent tool so sub-agents can spawn further sub-agents.
+                if let Some(spawner) = spawner_cell_clone.get() {
+                    reg.register(Box::new(AgentTool::new(Arc::clone(spawner))))?;
+                }
                 Ok(reg)
             }),
             parent_confirmation: app_config.tools.confirmation.clone(),
             skills: skills.clone(),
         });
+
+        // Populate the cell so the closure can reference the spawner.
+        // set() only fails if called twice; this is the only call site.
+        spawner_cell
+            .set(Arc::clone(&spawner))
+            .ok()
+            .expect("spawner_cell set exactly once at startup");
+
         registry.register(Box::new(AgentTool::new(spawner)))?;
     }
 

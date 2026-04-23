@@ -136,11 +136,19 @@ impl ToolRegistry {
     }
 
     /// Consume this registry and return a new one containing only the tools
-    /// whose names appear in `allowlist`. Unknown names are silently skipped.
+    /// whose names appear in `allowlist`. Names not found in the registry are
+    /// silently skipped; a warning is printed if the result is empty.
     pub fn into_filtered(mut self, allowlist: &[String]) -> Self {
         let allowed: std::collections::HashSet<&str> =
             allowlist.iter().map(String::as_str).collect();
         self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        if self.tools.is_empty() && !allowlist.is_empty() {
+            eprintln!(
+                "WARNING: agent tool allowlist [{list}] matched no registered tools; \
+                 sub-agent will run with an empty tool set",
+                list = allowlist.join(", ")
+            );
+        }
         self
     }
 }
