@@ -63,8 +63,10 @@ impl Tool for SkillTool {
             message: format!("Failed to read skill file: {}", e),
         })?;
 
+        let output = format!("Skill path: {}\n\n{}", path.display(), content);
+
         Ok(ToolResult {
-            content: vec![ContentBlock::Text(content)],
+            content: vec![ContentBlock::Text(output)],
             is_error: false,
             agent_events: vec![],
         })
@@ -252,13 +254,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skill_tool_execute_returns_file_content() {
+    async fn skill_tool_execute_returns_file_content_with_skill_path() {
         let dir = TempDir::new().unwrap();
         let skill_file = dir.path().join("my-skill.md");
         fs::write(&skill_file, "# Skill Content\nThis is the skill prompt").unwrap();
 
         let mut skills = HashMap::new();
-        skills.insert("my-skill".to_string(), skill_file);
+        skills.insert("my-skill".to_string(), skill_file.clone());
         let tool = SkillTool::new(&skills);
 
         let result = tool
@@ -269,7 +271,43 @@ mod tests {
         assert!(!result.is_error);
         match &result.content[0] {
             ContentBlock::Text(text) => {
-                assert_eq!(text, "# Skill Content\nThis is the skill prompt")
+                assert!(
+                    text.contains(&*skill_file.to_string_lossy()),
+                    "output should contain the SKILL.md path, got: {}",
+                    text
+                );
+                assert!(
+                    text.contains("# Skill Content"),
+                    "output should still contain the file content"
+                );
+            }
+            _ => panic!("expected Text content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_tool_execute_returns_file_content_without_path() {
+        let dir = TempDir::new().unwrap();
+        let skill_file = dir.path().join("my-skill.md");
+        fs::write(&skill_file, "# Skill Content\nThis is the skill prompt").unwrap();
+
+        let mut skills = HashMap::new();
+        skills.insert("my-skill".to_string(), skill_file.clone());
+        let tool = SkillTool::new(&skills);
+
+        let result = tool
+            .execute(serde_json::json!({"name": "my-skill"}))
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error);
+        let expected = format!(
+            "Skill path: {}\n\n# Skill Content\nThis is the skill prompt",
+            skill_file.display()
+        );
+        match &result.content[0] {
+            ContentBlock::Text(text) => {
+                assert_eq!(text, &expected);
             }
             _ => panic!("expected Text content"),
         }
