@@ -24,48 +24,111 @@ pub struct BackendSelection {
     pub model: String,
 }
 
-pub async fn from_config(config: &AppConfig) -> Result<BackendSelection> {
-    match config.backend.as_str() {
-        "vertex" => {
-            let backend = vertex::VertexBackend::new(
-                config.vertex.project.clone(),
-                config.vertex.region.clone(),
-            )
-            .await?;
-            Ok(BackendSelection {
-                backend: Box::new(backend),
-                model: config.vertex.model.clone(),
-            })
+/// Factory that constructs backends on demand, sharing expensive auth state
+/// across roles that target the same Vertex AI `(project, region)` pair.
+///
+/// Note: per-role `project`/`region` overrides are not yet wired into
+/// `ModelRole`; all Vertex roles currently share the same
+/// `config.vertex.{project,region}` values, so the cache will hold at most
+/// one entry until per-role overrides land in a future PR.
+pub struct BackendFactory {
+    config: AppConfig,
+    vertex_auth_cache: vertex::VertexAuthCache,
+}
+
+impl BackendFactory {
+    pub fn new(config: AppConfig) -> Self {
+        Self {
+            config,
+            vertex_auth_cache: vertex::VertexAuthCache::new(),
         }
-        "zai" => {
-            let zai_config = config.zai.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "zai backend configuration is missing. Add a [zai] section to your config file."
-                )
-            })?;
-            let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
-            Ok(BackendSelection {
-                backend: Box::new(backend),
-                model: zai_config.model.clone(),
-            })
+    }
+
+    /// Construct a `BackendSelection` for the named role.
+    pub async fn for_role(&self, role: &str) -> Result<BackendSelection> {
+        let resolved = self.config.resolve_role(role)?;
+        match resolved.backend_name.as_str() {
+            "vertex" => {
+                // TODO: per-role project/region overrides — when `ModelRole` gains
+                // those fields, pass them here instead of reading from `self.config.vertex`.
+                let project = self.config.vertex.project.clone();
+                let region = self.config.vertex.region.clone();
+                let auth = self
+                    .vertex_auth_cache
+                    .get_or_init(project.clone(), region.clone())
+                    .await?;
+                let backend = vertex::VertexBackend::with_auth(project, region, auth);
+                Ok(BackendSelection {
+                    backend: Box::new(backend),
+                    model: resolved.model,
+                })
+            }
+            "zai" => {
+                let zai_config = self.config.zai.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses zai backend but no [zai] section is configured."
+                    )
+                })?;
+                let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
+                Ok(BackendSelection {
+                    backend: Box::new(backend),
+                    model: resolved.model,
+                })
+            }
+            "ollama" => {
+                let ollama_config = self.config.ollama.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses ollama backend but no [ollama] section is configured."
+                    )
+                })?;
+                let backend = ollama::OllamaBackend::new(ollama_config)?;
+                Ok(BackendSelection {
+                    backend: Box::new(backend),
+                    model: resolved.model,
+                })
+            }
+            other => anyhow::bail!("Unknown backend '{other}' for role '{role}'"),
         }
-        "ollama" => {
-            let ollama_config = config.ollama.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ollama backend configuration is missing. Add a [ollama] section to your config file."
-                )
-            })?;
-            let backend = ollama::OllamaBackend::new(ollama_config)?;
-            Ok(BackendSelection {
-                backend: Box::new(backend),
-                model: ollama_config.model.clone(),
-            })
-        }
-        _ => {
-            anyhow::bail!(
-                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama",
-                config.backend
-            );
+    }
+
+    /// Inject a pre-built `BackendSelection` for testing without real auth.
+    ///
+    /// Seeds the Vertex auth cache with a fake provider so that `for_role`
+    /// returns a backend built from the supplied `selection` when the role
+    /// is `"vertex"`.  Only intended for use in tests.
+    #[cfg(test)]
+    pub async fn with_injected_selection(
+        config: AppConfig,
+        selection: BackendSelection,
+    ) -> (Self, BackendSelection) {
+        (Self::new(config), selection)
+    }
+
+    /// Build a `BackendSelection` directly from a boxed backend and model string,
+    /// bypassing role resolution and auth. For use in tests only.
+    #[cfg(test)]
+    pub fn make_selection(backend: Box<dyn LlmBackend>, model: String) -> BackendSelection {
+        BackendSelection { backend, model }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use futures::stream;
+
+    /// A minimal `LlmBackend` implementation that returns an empty stream.
+    /// Shared across test modules to avoid duplication.
+    pub struct MockBackend;
+
+    #[async_trait]
+    impl LlmBackend for MockBackend {
+        async fn send_message(
+            &self,
+            _messages: &[Message],
+            _config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Ok(Box::pin(stream::empty()))
         }
     }
 }
@@ -75,14 +138,15 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
+    use std::sync::Arc;
 
     use super::LlmBackend;
     use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-    struct MockBackend;
+    struct EchoBackend;
 
     #[async_trait]
-    impl LlmBackend for MockBackend {
+    impl LlmBackend for EchoBackend {
         async fn send_message(
             &self,
             _messages: &[Message],
@@ -98,7 +162,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_backend_streams_text_delta_then_done() {
-        let backend = MockBackend;
+        let backend = EchoBackend;
         let messages: Vec<Message> = vec![];
         let config = RequestConfig {
             model: "test-model".to_string(),
@@ -135,5 +199,114 @@ mod tests {
             stream.next().await.is_none(),
             "stream should be exhausted after Done"
         );
+    }
+
+    #[tokio::test]
+    async fn backend_factory_errors_for_unknown_role() {
+        use crate::config::{AppConfig, ToolsConfig, VertexConfig};
+        use std::collections::BTreeMap;
+
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+        };
+        let factory = super::BackendFactory::new(config);
+
+        let err = factory
+            .for_role("nonexistent")
+            .await
+            .err()
+            .expect("should be an error");
+        assert!(
+            err.to_string().contains("nonexistent"),
+            "error should mention the unknown role name"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_factory_caches_vertex_auth_provider_per_project_region() {
+        use crate::config::{AppConfig, ModelRole, ToolsConfig, VertexConfig};
+        use std::collections::BTreeMap;
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "role-a".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+        );
+        models.insert(
+            "role-b".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "shared-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+        };
+        let factory = super::BackendFactory::new(config);
+
+        // Pre-seed the cache with a fake provider so we don't call real gcp_auth.
+        let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+        let cell = factory
+            .vertex_auth_cache
+            .seed("shared-project", "us-east5", fake_provider);
+
+        // Two calls to get_or_init must return the same Arc.
+        let first = factory
+            .vertex_auth_cache
+            .get_or_init("shared-project".to_string(), "us-east5".to_string())
+            .await
+            .expect("first call");
+        let second = factory
+            .vertex_auth_cache
+            .get_or_init("shared-project".to_string(), "us-east5".to_string())
+            .await
+            .expect("second call");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "both calls must return the same Arc — provider is shared"
+        );
+        assert!(
+            Arc::ptr_eq(&first, cell.get().expect("cell initialised")),
+            "returned provider must be the one we seeded"
+        );
+    }
+
+    struct FakeTokenProvider;
+
+    #[async_trait::async_trait]
+    impl gcp_auth::TokenProvider for FakeTokenProvider {
+        async fn token(
+            &self,
+            _scopes: &[&str],
+        ) -> Result<std::sync::Arc<gcp_auth::Token>, gcp_auth::Error> {
+            unimplemented!("fake provider")
+        }
+        async fn project_id(&self) -> Result<std::sync::Arc<str>, gcp_auth::Error> {
+            unimplemented!("fake provider")
+        }
     }
 }

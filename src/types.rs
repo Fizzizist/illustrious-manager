@@ -230,16 +230,22 @@ pub enum AgentEvent {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// 1-based index within the current assistant turn; resets each turn.
+        index: usize,
     },
     ToolResult {
         name: String,
         content: String,
         is_error: bool,
+        /// 1-based index matching the corresponding `ToolUseReceived`.
+        index: usize,
     },
     ToolConfirmationRequired {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// 1-based index within the current assistant turn.
+        index: usize,
     },
     ResponseComplete(String),
     Error(String),
@@ -247,6 +253,11 @@ pub enum AgentEvent {
         input_tokens: u32,
         output_tokens: u32,
         stop_reason: String,
+    },
+    SubAgentUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+        role: String,
     },
 }
 
@@ -493,17 +504,20 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: input.clone(),
+            index: 1,
         };
         assert!(matches!(event, AgentEvent::ToolUseReceived { .. }));
         if let AgentEvent::ToolUseReceived {
             id,
             name,
             input: event_input,
+            index,
         } = event
         {
             assert_eq!(id, "tool-123");
             assert_eq!(name, "bash");
             assert_eq!(event_input, input);
+            assert_eq!(index, 1);
         }
     }
 
@@ -513,17 +527,20 @@ mod tests {
             name: "bash".to_string(),
             content: "file1.txt".to_string(),
             is_error: false,
+            index: 1,
         };
         assert!(matches!(event, AgentEvent::ToolResult { .. }));
         if let AgentEvent::ToolResult {
             name,
             content,
             is_error,
+            index,
         } = event
         {
             assert_eq!(name, "bash");
             assert_eq!(content, "file1.txt");
             assert!(!is_error);
+            assert_eq!(index, 1);
         }
     }
 
@@ -534,17 +551,20 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: input.clone(),
+            index: 1,
         };
         assert!(matches!(event, AgentEvent::ToolConfirmationRequired { .. }));
         if let AgentEvent::ToolConfirmationRequired {
             id,
             name,
             input: event_input,
+            index,
         } = event
         {
             assert_eq!(id, "tool-123");
             assert_eq!(name, "bash");
             assert_eq!(event_input, input);
+            assert_eq!(index, 1);
         }
     }
 }

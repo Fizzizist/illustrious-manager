@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
@@ -9,9 +11,11 @@ use illustrious_manager::context_files::ContextFile;
 use illustrious_manager::session::Session;
 use illustrious_manager::types::*;
 
-async fn test_session() -> Session {
+async fn test_session_arc() -> Arc<TokioMutex<Session>> {
     let dir = tempfile::TempDir::new().expect("temp dir");
-    Session::new(None, dir.keep()).await.expect("test session")
+    Arc::new(TokioMutex::new(
+        Session::new(None, dir.keep()).await.expect("test session"),
+    ))
 }
 
 struct NullBackend;
@@ -42,7 +46,7 @@ async fn load_context_files_adds_messages_to_history() {
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config, test_session().await).await;
+    let agent = Agent::new(backend, config, test_session_arc().await).await;
 
     let context_files = vec![
         ContextFile {
@@ -94,7 +98,7 @@ async fn load_context_files_with_empty_vec_does_not_modify_history() {
         max_tokens: 100,
         tools: vec![],
     };
-    let agent = Agent::new(backend, config, test_session().await).await;
+    let agent = Agent::new(backend, config, test_session_arc().await).await;
 
     agent.load_context_files(vec![]);
 

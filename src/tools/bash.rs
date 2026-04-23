@@ -1,5 +1,6 @@
 use crate::config::ConfirmationMode;
 use crate::types::ContentBlock;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -68,6 +69,7 @@ impl BashTool {
     }
 }
 
+#[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
         "bash"
@@ -102,7 +104,7 @@ impl Tool for BashTool {
         format!("```\n{}\n```", text)
     }
 
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let command = input
             .get("command")
             .and_then(|v| v.as_str())
@@ -120,6 +122,7 @@ impl Tool for BashTool {
                         token
                     ))],
                     is_error: true,
+                    agent_events: vec![],
                 });
             }
         }
@@ -138,6 +141,7 @@ impl Tool for BashTool {
                         "Command rejected: user denied confirmation".to_string(),
                     )],
                     is_error: true,
+                    agent_events: vec![],
                 });
             }
         }
@@ -166,6 +170,7 @@ impl Tool for BashTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(content)],
             is_error,
+            agent_events: vec![],
         })
     }
 }
@@ -192,8 +197,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn allowlisted_command_executes_without_confirmation() {
+    #[tokio::test]
+    async fn allowlisted_command_executes_without_confirmation() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Always,
@@ -202,6 +207,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
         match &result.content[0] {
@@ -210,8 +216,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn denylisted_command_is_rejected() {
+    #[tokio::test]
+    async fn denylisted_command_is_rejected() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -220,6 +226,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "rm -rf /"}))
+            .await
             .expect("execute must not err");
         assert!(result.is_error);
         match &result.content[0] {
@@ -228,8 +235,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unlisted_command_with_never_policy_executes() {
+    #[tokio::test]
+    async fn unlisted_command_with_never_policy_executes() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -238,12 +245,13 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
     }
 
-    #[test]
-    fn unlisted_command_with_always_policy_and_approved_executes() {
+    #[tokio::test]
+    async fn unlisted_command_with_always_policy_and_approved_executes() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Always,
@@ -252,12 +260,13 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
     }
 
-    #[test]
-    fn unlisted_command_with_always_policy_and_denied_returns_error() {
+    #[tokio::test]
+    async fn unlisted_command_with_always_policy_and_denied_returns_error() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Always,
@@ -266,12 +275,13 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
+            .await
             .expect("execute must not err");
         assert!(result.is_error);
     }
 
-    #[test]
-    fn unlisted_command_with_write_only_policy_and_denied_returns_error() {
+    #[tokio::test]
+    async fn unlisted_command_with_write_only_policy_and_denied_returns_error() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::WriteOnly,
@@ -280,12 +290,13 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
+            .await
             .expect("execute must not err");
         assert!(result.is_error);
     }
 
-    #[test]
-    fn piped_command_with_denylisted_segment_is_rejected() {
+    #[tokio::test]
+    async fn piped_command_with_denylisted_segment_is_rejected() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -294,6 +305,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "cat file.txt | rm -rf /"}))
+            .await
             .expect("execute must not err");
         assert!(result.is_error);
         match &result.content[0] {
@@ -302,8 +314,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn piped_command_with_all_allowlisted_segments_executes_without_confirmation() {
+    #[tokio::test]
+    async fn piped_command_with_all_allowlisted_segments_executes_without_confirmation() {
         let temp_dir = TempDir::new().expect("temp dir");
         // confirm_fn panics to prove it is not called
         let tool = make_tool(
@@ -313,17 +325,19 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello | cat"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
     }
 
-    #[test]
-    fn command_runs_with_sandbox_root_as_cwd() {
+    #[tokio::test]
+    async fn command_runs_with_sandbox_root_as_cwd() {
         let temp_dir = TempDir::new().expect("temp dir");
         let sandbox = temp_dir.path().canonicalize().expect("canonicalize");
         let tool = make_tool(ConfirmationMode::Never, sandbox.clone(), Box::new(|_| true));
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
         match &result.content[0] {
@@ -338,8 +352,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn command_failure_returns_is_error_true_with_stderr() {
+    #[tokio::test]
+    async fn command_failure_returns_is_error_true_with_stderr() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -348,6 +362,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo 'err msg' >&2; exit 1"}))
+            .await
             .expect("execute must not err");
         assert!(result.is_error);
         match &result.content[0] {
@@ -356,20 +371,22 @@ mod tests {
         }
     }
 
-    #[test]
-    fn missing_command_field_returns_invalid_input_error() {
+    #[tokio::test]
+    async fn missing_command_field_returns_invalid_input_error() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
         );
-        let result = tool.execute(serde_json::json!({"not_command": "echo hello"}));
+        let result = tool
+            .execute(serde_json::json!({"not_command": "echo hello"}))
+            .await;
         assert!(matches!(result, Err(ToolError::InvalidInput { .. })));
     }
 
-    #[test]
-    fn and_operator_denylist_bypass_is_blocked() {
+    #[tokio::test]
+    async fn and_operator_denylist_bypass_is_blocked() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -378,6 +395,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello && rm -rf /"}))
+            .await
             .expect("execute must not err");
         assert!(
             result.is_error,
@@ -385,8 +403,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn semicolon_denylist_bypass_is_blocked() {
+    #[tokio::test]
+    async fn semicolon_denylist_bypass_is_blocked() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -395,6 +413,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello; rm -rf /"}))
+            .await
             .expect("execute must not err");
         assert!(
             result.is_error,
@@ -402,8 +421,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn newline_denylist_bypass_is_blocked() {
+    #[tokio::test]
+    async fn newline_denylist_bypass_is_blocked() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -412,6 +431,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello\nrm -rf /"}))
+            .await
             .expect("execute must not err");
         assert!(
             result.is_error,
@@ -419,8 +439,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn subshell_denylist_bypass_is_blocked() {
+    #[tokio::test]
+    async fn subshell_denylist_bypass_is_blocked() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -429,6 +449,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo $(rm -rf /)"}))
+            .await
             .expect("execute must not err");
         assert!(
             result.is_error,
@@ -436,8 +457,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn backtick_denylist_bypass_is_blocked() {
+    #[tokio::test]
+    async fn backtick_denylist_bypass_is_blocked() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -446,6 +467,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo `rm -rf /`"}))
+            .await
             .expect("execute must not err");
         assert!(
             result.is_error,
@@ -453,8 +475,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn silent_command_produces_no_output_sentinel() {
+    #[tokio::test]
+    async fn silent_command_produces_no_output_sentinel() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -463,6 +485,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "true"}))
+            .await
             .expect("should succeed");
         assert!(!result.is_error);
         match &result.content[0] {
@@ -474,8 +497,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn markdown_input_wraps_command_in_sh_code_block() {
+    #[tokio::test]
+    async fn markdown_input_wraps_command_in_sh_code_block() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -487,8 +510,8 @@ mod tests {
         assert!(md.contains("ls -la"), "should include command");
     }
 
-    #[test]
-    fn markdown_output_wraps_result_in_code_block() {
+    #[tokio::test]
+    async fn markdown_output_wraps_result_in_code_block() {
         let temp_dir = TempDir::new().expect("temp dir");
         let tool = make_tool(
             ConfirmationMode::Never,
@@ -497,6 +520,7 @@ mod tests {
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}))
+            .await
             .expect("should succeed");
         let md = tool.markdown_output(&result);
         assert!(md.contains("```"), "should wrap in code block");

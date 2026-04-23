@@ -1,13 +1,16 @@
 // Tool trait and registry for extensible tool system
 
+pub mod agent;
 pub mod bash;
 pub mod edit_file;
 pub mod sandbox;
 pub mod search;
 pub mod skill;
+pub mod task;
 pub mod write_file;
 
 use crate::types::ContentBlock;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -44,20 +47,24 @@ impl std::fmt::Display for ToolError {
 impl std::error::Error for ToolError {}
 
 /// Result of tool execution
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
+    /// Additional agent-level events to forward to the event stream (e.g. SubAgentUsage).
+    #[serde(skip)]
+    pub agent_events: Vec<crate::types::AgentEvent>,
 }
 
 pub use crate::types::ToolDefinition;
 
 /// Trait that all tools must implement
+#[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> &Value;
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError>;
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError>;
     fn is_write_tool(&self) -> bool {
         false
     }
@@ -127,6 +134,23 @@ impl ToolRegistry {
             })
             .collect()
     }
+
+    /// Consume this registry and return a new one containing only the tools
+    /// whose names appear in `allowlist`. Names not found in the registry are
+    /// silently skipped; a warning is printed if the result is empty.
+    pub fn into_filtered(mut self, allowlist: &[String]) -> Self {
+        let allowed: std::collections::HashSet<&str> =
+            allowlist.iter().map(String::as_str).collect();
+        self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        if self.tools.is_empty() && !allowlist.is_empty() {
+            eprintln!(
+                "WARNING: agent tool allowlist [{list}] matched no registered tools; \
+                 sub-agent will run with an empty tool set",
+                list = allowlist.join(", ")
+            );
+        }
+        self
+    }
 }
 
 impl Default for ToolRegistry {
@@ -160,6 +184,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Tool for MockTool {
         fn name(&self) -> &str {
             &self.name
@@ -173,10 +198,11 @@ mod tests {
             &self.schema
         }
 
-        fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+        async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
             Ok(ToolResult {
                 content: vec![ContentBlock::Text(format!("executed with: {}", input))],
                 is_error: false,
+                agent_events: vec![],
             })
         }
     }
@@ -195,6 +221,7 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Tool for FailingTool {
         fn name(&self) -> &str {
             &self.name
@@ -208,7 +235,7 @@ mod tests {
             &self.schema
         }
 
-        fn execute(&self, _input: Value) -> Result<ToolResult, ToolError> {
+        async fn execute(&self, _input: Value) -> Result<ToolResult, ToolError> {
             Err(ToolError::Execution {
                 tool_name: self.name.clone(),
                 message: "Tool execution failed".to_string(),
@@ -216,8 +243,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn register_tool_then_lookup_by_name() {
+    #[tokio::test]
+    async fn register_tool_then_lookup_by_name() {
         let mut registry = ToolRegistry::new();
         let tool = MockTool::new("test_tool", "A test tool");
 
@@ -232,8 +259,8 @@ mod tests {
         assert_eq!(retrieved_tool.description(), "A test tool");
     }
 
-    #[test]
-    fn definitions_returns_vec_of_tool_definitions() {
+    #[tokio::test]
+    async fn definitions_returns_vec_of_tool_definitions() {
         let mut registry = ToolRegistry::new();
         let tool1 = MockTool::new("tool1", "First tool");
         let tool2 = MockTool::new("tool2", "Second tool");
@@ -264,8 +291,8 @@ mod tests {
         assert_eq!(def2.description, "Second tool");
     }
 
-    #[test]
-    fn lookup_unregistered_tool_returns_error() {
+    #[tokio::test]
+    async fn lookup_unregistered_tool_returns_error() {
         let registry = ToolRegistry::new();
         let result = registry.lookup("nonexistent");
 
@@ -278,8 +305,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn register_duplicate_tool_returns_error() {
+    #[tokio::test]
+    async fn register_duplicate_tool_returns_error() {
         let mut registry = ToolRegistry::new();
         let tool1 = MockTool::new("duplicate", "First");
         let tool2 = MockTool::new("duplicate", "Second");
@@ -298,12 +325,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_execute_returns_success_result() {
+    #[tokio::test]
+    async fn tool_execute_returns_success_result() {
         let tool = MockTool::new("executor", "Executes things");
         let input = serde_json::json!({"arg1": "test"});
 
-        let result = tool.execute(input).expect("Execution should succeed");
+        let result = tool.execute(input).await.expect("Execution should succeed");
 
         assert!(!result.is_error);
         assert_eq!(result.content.len(), 1);
@@ -318,12 +345,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_execute_can_return_error_result() {
+    #[tokio::test]
+    async fn tool_execute_can_return_error_result() {
         let tool = FailingTool::new("failing_tool");
         let input = serde_json::json!({});
 
-        let result = tool.execute(input);
+        let result = tool.execute(input).await;
 
         match result {
             Err(ToolError::Execution { tool_name, message }) => {
@@ -335,11 +362,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tool_result_serializes_correctly() {
+    #[tokio::test]
+    async fn tool_result_serializes_correctly() {
         let result = ToolResult {
             content: vec![ContentBlock::Text("output".to_string())],
             is_error: false,
+            agent_events: vec![],
         };
 
         let json = serde_json::to_string(&result).expect("Should serialize");
@@ -349,8 +377,8 @@ mod tests {
         assert!(parsed["content"].is_array());
     }
 
-    #[test]
-    fn tool_definition_serializes_correctly() {
+    #[tokio::test]
+    async fn tool_definition_serializes_correctly() {
         let def = ToolDefinition {
             name: "test_tool".to_string(),
             description: "A test tool".to_string(),
@@ -365,8 +393,8 @@ mod tests {
         assert_eq!(parsed["input_schema"]["type"], "object");
     }
 
-    #[test]
-    fn tool_error_not_found_display_formatting() {
+    #[tokio::test]
+    async fn tool_error_not_found_display_formatting() {
         let err = ToolError::NotFound {
             tool_name: "my_tool".to_string(),
         };
@@ -374,16 +402,16 @@ mod tests {
         assert_eq!(err.to_string(), "Tool 'my_tool' not found");
     }
 
-    #[test]
-    fn tool_error_already_registered_display_formatting() {
+    #[tokio::test]
+    async fn tool_error_already_registered_display_formatting() {
         let err = ToolError::AlreadyRegistered {
             tool_name: "my_tool".to_string(),
         };
         assert_eq!(format!("{}", err), "Tool 'my_tool' already registered");
     }
 
-    #[test]
-    fn default_markdown_input_formats_as_json_code_block() {
+    #[tokio::test]
+    async fn default_markdown_input_formats_as_json_code_block() {
         let tool = MockTool::new("test", "A test tool");
         let input = serde_json::json!({"arg1": "value"});
         let md = tool.markdown_input(&input);
@@ -391,11 +419,12 @@ mod tests {
         assert!(md.contains("arg1"), "should contain the field name");
     }
 
-    #[test]
-    fn default_markdown_output_returns_text_content() {
+    #[tokio::test]
+    async fn default_markdown_output_returns_text_content() {
         let tool = MockTool::new("test", "A test tool");
         let result = tool
             .execute(serde_json::json!({"arg1": "hello"}))
+            .await
             .expect("should succeed");
         let md = tool.markdown_output(&result);
         assert!(

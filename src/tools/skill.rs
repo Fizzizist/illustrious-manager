@@ -1,5 +1,6 @@
 use crate::tools::{Tool, ToolError, ToolResult};
 use crate::types::ContentBlock;
+use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ impl SkillTool {
     }
 }
 
+#[async_trait]
 impl Tool for SkillTool {
     fn name(&self) -> &str {
         "skill"
@@ -42,7 +44,7 @@ impl Tool for SkillTool {
         &SCHEMA
     }
 
-    fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+    async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let name =
             input
                 .get("name")
@@ -64,6 +66,7 @@ impl Tool for SkillTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(content)],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }
@@ -146,8 +149,8 @@ mod tests {
         f.write_all(content.as_bytes()).expect("write SKILL.md");
     }
 
-    #[test]
-    fn discover_skills_finds_skills_in_home() {
+    #[tokio::test]
+    async fn discover_skills_finds_skills_in_home() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         make_skill(home.path(), "my-skill", "# My Skill\nContent here");
@@ -157,8 +160,8 @@ mod tests {
         assert!(skills.contains_key("my-skill"), "should find home skill");
     }
 
-    #[test]
-    fn discover_skills_finds_skills_in_pwd() {
+    #[tokio::test]
+    async fn discover_skills_finds_skills_in_pwd() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         make_skill(pwd.path(), "local-skill", "# Local Skill");
@@ -168,8 +171,8 @@ mod tests {
         assert!(skills.contains_key("local-skill"), "should find pwd skill");
     }
 
-    #[test]
-    fn discover_skills_finds_skills_from_both_locations() {
+    #[tokio::test]
+    async fn discover_skills_finds_skills_from_both_locations() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         make_skill(home.path(), "home-skill", "# Home Skill");
@@ -181,8 +184,8 @@ mod tests {
         assert!(skills.contains_key("pwd-skill"));
     }
 
-    #[test]
-    fn discover_skills_ignores_dirs_without_skill_md() {
+    #[tokio::test]
+    async fn discover_skills_ignores_dirs_without_skill_md() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         let empty_dir = home.path().join(".claude/skills/empty-skill");
@@ -196,8 +199,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discover_skills_returns_empty_when_no_skill_dirs_exist() {
+    #[tokio::test]
+    async fn discover_skills_returns_empty_when_no_skill_dirs_exist() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
 
@@ -206,8 +209,8 @@ mod tests {
         assert!(skills.is_empty());
     }
 
-    #[test]
-    fn pwd_skill_overrides_home_skill_with_same_name() {
+    #[tokio::test]
+    async fn pwd_skill_overrides_home_skill_with_same_name() {
         let pwd = TempDir::new().unwrap();
         let home = TempDir::new().unwrap();
         make_skill(home.path(), "shared-skill", "# Home version");
@@ -248,8 +251,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn skill_tool_execute_returns_file_content() {
+    #[tokio::test]
+    async fn skill_tool_execute_returns_file_content() {
         let dir = TempDir::new().unwrap();
         let skill_file = dir.path().join("my-skill.md");
         fs::write(&skill_file, "# Skill Content\nThis is the skill prompt").unwrap();
@@ -260,6 +263,7 @@ mod tests {
 
         let result = tool
             .execute(serde_json::json!({"name": "my-skill"}))
+            .await
             .expect("should succeed");
 
         assert!(!result.is_error);
@@ -271,11 +275,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn skill_tool_execute_unknown_name_returns_error() {
+    #[tokio::test]
+    async fn skill_tool_execute_unknown_name_returns_error() {
         let tool = SkillTool::new(&HashMap::new());
 
-        let result = tool.execute(serde_json::json!({"name": "nonexistent"}));
+        let result = tool
+            .execute(serde_json::json!({"name": "nonexistent"}))
+            .await;
 
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -289,23 +295,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn skill_tool_execute_missing_name_field_returns_invalid_input() {
+    #[tokio::test]
+    async fn skill_tool_execute_missing_name_field_returns_invalid_input() {
         let tool = SkillTool::new(&HashMap::new());
 
-        let result = tool.execute(serde_json::json!({}));
+        let result = tool.execute(serde_json::json!({})).await;
 
         assert!(matches!(result, Err(ToolError::InvalidInput { .. })));
     }
 
-    #[test]
-    fn skill_tool_is_not_a_write_tool() {
+    #[tokio::test]
+    async fn skill_tool_is_not_a_write_tool() {
         let tool = SkillTool::new(&HashMap::new());
         assert!(!tool.is_write_tool());
     }
 
-    #[test]
-    fn skill_description_extracts_description_from_frontmatter() {
+    #[tokio::test]
+    async fn skill_description_extracts_description_from_frontmatter() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
         fs::write(
@@ -317,8 +323,8 @@ mod tests {
         assert_eq!(skill_description(&path).unwrap(), "does the thing");
     }
 
-    #[test]
-    fn skill_description_returns_none_when_no_frontmatter() {
+    #[tokio::test]
+    async fn skill_description_returns_none_when_no_frontmatter() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
         fs::write(&path, "# My Skill\nNo frontmatter here").unwrap();
@@ -326,8 +332,8 @@ mod tests {
         assert!(skill_description(&path).is_none());
     }
 
-    #[test]
-    fn skill_description_returns_none_when_description_field_missing() {
+    #[tokio::test]
+    async fn skill_description_returns_none_when_description_field_missing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("skill.md");
         fs::write(&path, "---\nname: my-skill\n---\n\n# Body").unwrap();
@@ -335,8 +341,8 @@ mod tests {
         assert!(skill_description(&path).is_none());
     }
 
-    #[test]
-    fn skill_description_returns_none_for_missing_file() {
+    #[tokio::test]
+    async fn skill_description_returns_none_for_missing_file() {
         assert!(skill_description(Path::new("/nonexistent/path.md")).is_none());
     }
 }
