@@ -16,9 +16,19 @@ This command is strictly for **planning**. Do NOT implement any code changes —
 2. **HTML markers** — Use `<!-- mach6-plan -->` as the first line of plan comment bodies for reliable discovery.
 3. **No `#N` in comment bodies** — GitHub auto-links `#N` to issues/PRs. Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
-5. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning.
+5. **Task tracking** — Use the `update_task` tool to show progress through multi-step commands.
+6. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning.
+7. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
-## Step 1: Read the issue
+## Step 1: Set up task tracking
+
+- title: "read", description: "Read issue and context" <-- start here
+- title: "explore", description: "Explore codebase"
+- title: "plan", description: "Draft implementation plan"
+- title: "branch", description: "Create branch and draft PR"
+- title: "post", description: "Post plan to PR"
+
+## Step 2: Read the issue
 
 ```bash
 gh issue view <number>
@@ -27,7 +37,9 @@ gh issue view <number> --comments
 
 Parse everything: problem statement, constraints, requirements, acceptance criteria, prior discussion, any existing assessment comments (look for `<!-- mach6-assessment -->`).
 
-## Step 2: Read project conventions
+Update task: read → completed, explore → in_progress.
+
+## Step 3: Read project conventions
 
 Check for and read (first found):
 - CONTRIBUTING.md, DEVELOPMENT.md, .github/CONTRIBUTING.md
@@ -35,16 +47,18 @@ Check for and read (first found):
 
 Extract planning-relevant guidance: project layers, testing expectations, coding conventions.
 
-## Step 3: Explore the codebase
+## Step 4: Explore the codebase
 
-Explore the codebase directly using the available tools (search, grep, find, read, ls) to understand:
+Launch 2-3 Explore subagents in parallel. Use `implement` role or `default` if not defined.
 - **Similar features**: Find existing code that solves related problems, trace implementation patterns
 - **Architecture**: Map relevant architecture layers, abstractions, data flow
 - **Integration points**: Identify where new code connects to existing systems
 
-Include project conventions in your exploration. Identify 5-10 key files and read them thoroughly.
+Include project conventions in each agent's context. Each agent returns 5-10 key files. Read all identified files.
 
-## Step 4: Draft the plan
+Update task: explore → completed, plan → in_progress.
+
+## Step 5: Draft the plan
 
 Create an implementation plan with:
 - Clear analysis of the problem
@@ -65,7 +79,9 @@ The plan should be **high-level on implementation details** (avoid cascading spe
 
 Present the plan to the user. Discuss and revise if they have feedback.
 
-## Step 5: Create branch and draft PR
+Update task: plan → completed, branch → in_progress.
+
+## Step 6: Create branch and draft PR
 
 ```bash
 # Derive branch name from issue
@@ -78,23 +94,33 @@ git commit --allow-empty -m "chore: open PR for issue <N>"
 git push -u origin feature/issue-<N>-<slug>
 
 # Open draft PR
-gh pr create --draft --title "<title>" --body "Closes #<N>
+cat > /tmp/gh-body.md << 'MACH6_EOF'
+Closes #<N>
 
 <brief description>
 
-Implementation plan posted as a comment below."
+Implementation plan posted as a comment below.
+MACH6_EOF
+gh pr create --draft --title "<title>" --body-file /tmp/gh-body.md
 ```
 
-## Step 6: Post plan to PR
+Update task: branch → completed, post → in_progress.
+
+## Step 7: Post plan to PR
 
 ```bash
-gh pr comment <pr-number> --body "<!-- mach6-plan -->
+cat > /tmp/gh-comment.md << 'MACH6_EOF'
+<!-- mach6-plan -->
 ## Implementation Plan
 
 <full plan content>
 
 ---
-*Plan created by mach6*"
+*Plan created by mach6*
+MACH6_EOF
+gh pr comment <pr-number> --body-file /tmp/gh-comment.md
 ```
+
+Update task: post → completed.
 
 Suggest next step: implement the plan, then `/skill:mach6-push` when ready.

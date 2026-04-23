@@ -14,8 +14,17 @@ argument-hint: "[commit message]"
 2. **HTML markers** — Use `<!-- mach6-progress -->` as the first line of progress comment bodies.
 3. **No `#N` in comment bodies** — Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets (.env, credentials, tokens, keys).
+5. **Task tracking** — Use the `update_task` tool to show progress.
+6. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
-## Step 1: Stage changes
+## Step 1: Set up task tracking
+
+- title: "stage", description: "Stage changes"
+- title: "commit", description: "Commit"
+- title: "push", description: "Push to remote"
+- title: "comment", description: "Post progress comment"
+
+## Step 2: Stage changes
 
 Run `git status` and `git diff` to understand the current state.
 
@@ -25,7 +34,9 @@ Run `git status` and `git diff` to understand the current state.
 - **Never** use `git add -A` or `git add .`
 - **Never** stage secrets (.env, credentials, tokens, keys)
 
-## Step 2: Commit
+Update task: stage → completed, commit → in_progress.
+
+## Step 3: Commit
 
 Check recent commit style:
 ```bash
@@ -41,7 +52,9 @@ Generate a commit message that:
 git commit -m "<message>"
 ```
 
-## Step 3: Push
+Update task: commit → completed, push → in_progress.
+
+## Step 4: Push
 
 ```bash
 git push
@@ -49,7 +62,9 @@ git push
 
 If no upstream is set, use `git push -u origin <branch>`.
 
-## Step 4: Post progress comment
+Update task: push → completed, comment → in_progress.
+
+## Step 5: Post progress comment
 
 Detect the associated PR or issue:
 
@@ -62,7 +77,8 @@ If session context points to an issue but a PR also exists on the current branch
 
 Post a progress comment:
 ```bash
-gh pr comment <number> --body "<!-- mach6-progress -->
+cat > /tmp/gh-comment.md << 'MACH6_EOF'
+<!-- mach6-progress -->
 ## Progress Update
 
 <summary of changes in this batch>
@@ -70,8 +86,12 @@ gh pr comment <number> --body "<!-- mach6-progress -->
 **Commit:** \`<hash>\`
 
 ---
-*Progress tracked by mach6*"
+*Progress tracked by mach6*
+MACH6_EOF
+gh pr comment <number> --body-file /tmp/gh-comment.md
 ```
+
+Update task: comment → completed.
 
 Report: what was committed, where pushed, where the comment was posted (with link).
 
