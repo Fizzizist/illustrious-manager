@@ -13,20 +13,16 @@ argument-hint: "<pr-number>"
 1. **GitHub as shared memory** — All context lives on the PR.
 2. **No `#N` in comment bodies** — Use "finding 3", "item 3" etc. instead.
 3. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
-4. **Task tracking** — Use the `tasks_update` tool to show progress.
+4. **Task tracking** — Use the `update_task` tool to show progress.
 5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Step 1: Set up task tracking
 
-```
-tasks_update([
-  { id: "checks", title: "Pre-merge checks", status: "in_progress" },
-  { id: "version", title: "Version bump (on feature branch)", status: "pending" },
-  { id: "docs", title: "Update documentation", status: "pending" },
-  { id: "merge", title: "Merge PR", status: "pending" },
-  { id: "release", title: "Tag and release", status: "pending" }
-])
-```
+- title: "checks", description: "Pre-merge checks"
+- title: "version", description: "Version bump (on feature branch)"
+- title: "docs", description: "Update documentation"
+- title: "merge", description: "Merge PR"
+- title: "release", description: "Tag and release"
 
 ## Step 2: Pre-merge checks
 

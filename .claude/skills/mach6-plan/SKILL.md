@@ -16,21 +16,17 @@ This command is strictly for **planning**. Do NOT implement any code changes —
 2. **HTML markers** — Use `<!-- mach6-plan -->` as the first line of plan comment bodies for reliable discovery.
 3. **No `#N` in comment bodies** — GitHub auto-links `#N` to issues/PRs. Use "finding 3", "item 3", "stage 2" etc. instead.
 4. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
-5. **Task tracking** — Use the `tasks_update` tool to show progress through multi-step commands.
+5. **Task tracking** — Use the `update_task` tool to show progress through multi-step commands.
 6. **Project conventions** — Check for CLAUDE.md, AGENTS.md, .dreb/CONTEXT.md, and CONTRIBUTING.md before planning.
 7. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Step 1: Set up task tracking
 
-```
-tasks_update([
-  { id: "read", title: "Read issue and context", status: "in_progress" },
-  { id: "explore", title: "Explore codebase", status: "pending" },
-  { id: "plan", title: "Draft implementation plan", status: "pending" },
-  { id: "branch", title: "Create branch and draft PR", status: "pending" },
-  { id: "post", title: "Post plan to PR", status: "pending" }
-])
-```
+- title: "read", description: "Read issue and context" <-- start here
+- title: "explore", description: "Explore codebase"
+- title: "plan", description: "Draft implementation plan"
+- title: "branch", description: "Create branch and draft PR"
+- title: "post", description: "Post plan to PR"
 
 ## Step 2: Read the issue
 
@@ -53,7 +49,7 @@ Extract planning-relevant guidance: project layers, testing expectations, coding
 
 ## Step 4: Explore the codebase
 
-Launch 2-3 Explore subagents in parallel. Agent definitions specify their own model with a provider fallback list — defaults work across providers and are fine for most cases. Override only with good reason (e.g. a particularly large or complex codebase warrants a stronger tier).
+Launch 2-3 Explore subagents in parallel. Use `implement` role or `default` if not defined.
 - **Similar features**: Find existing code that solves related problems, trace implementation patterns
 - **Architecture**: Map relevant architecture layers, abstractions, data flow
 - **Integration points**: Identify where new code connects to existing systems

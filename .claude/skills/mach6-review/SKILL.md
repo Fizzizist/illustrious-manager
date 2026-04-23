@@ -13,7 +13,7 @@ argument-hint: "<pr-number> [code|errors|tests|completeness|simplify]"
 1. **GitHub as shared memory** — Reviews and assessments are posted as PR comments so any future session can pick up context.
 2. **HTML markers** — Use `<!-- mach6-review -->` and `<!-- mach6-assessment -->` as the first line of comment bodies.
 3. **No `#N` in comment bodies** — Use "finding 3", "item 3", "stage 2" etc. instead.
-4. **Task tracking** — Use the `tasks_update` tool to show progress.
+4. **Task tracking** — Use the `update_task` tool to show progress.
 5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 **Important: Do NOT fix any issues in this session. Fixes happen via `/skill:mach6-implement`.**
@@ -24,16 +24,12 @@ You are now a hard-ass code reviewer like Linus Torvalds. You don't care at all 
 
 ## Step 1: Set up task tracking
 
-```
-tasks_update([
-  { id: "prepare", title: "Prepare — checkout and gather context", status: "in_progress" },
-  { id: "review", title: "Run review agents", status: "pending" },
-  { id: "post-review", title: "Post review findings", status: "pending" },
-  { id: "assess", title: "Independent assessment", status: "pending" },
-  { id: "post-assess", title: "Post assessment", status: "pending" },
-  { id: "summary", title: "Present CLI summary", status: "pending" }
-])
-```
+- title: "prepare", description: "Prepare — checkout and gather context" <-- start here
+- title: "review", description: "Run review agents"
+- title: "post-review", description: "Post review findings"
+- title: "assess", description: "Independent assessment"
+- title: "post-assess", description: "Post assessment"
+- title: "summary", description: "Present CLI summary"
 
 ## Step 2: Parse input
 
@@ -67,7 +63,7 @@ Update task: prepare → completed, review → in_progress.
 
 **Available review agents:**
 
-These agents are **pre-existing agent definitions** shipped with dreb — do not redefine them inline. Reference them by name via the `agent` parameter in `subagent`. Each agent definition already specifies a model with a provider fallback list — the defaults work across providers and are fine for most reviews. Override the model only when there's a good reason (e.g. a particularly complex or security-sensitive review warrants a stronger tier); note that a single-string override discards the fallback list, so prefer provider-prefixed IDs (e.g. `anthropic/claude-opus-4-6`) when overriding.
+The MD files for these agents can be found alongside the SKILL.md file for this skill. Provide the filepath to the agent to read, _do not read the file yourself_. E.g. `code-reviewer` agent should read `code-reviewer.md`. 
 
 | Agent | Question | When to run |
 |---|---|---|
@@ -84,7 +80,7 @@ These agents are **pre-existing agent definitions** shipped with dreb — do not
 - `completeness` → completeness-checker
 - `simplify` → simplifier
 
-**For each agent**, launch via the `subagent` tool. Run `code-reviewer`, `error-auditor`, `test-reviewer`, and `completeness-checker` in parallel. Run `simplifier` after the others complete.
+**For each agent**, launch via the `agent` tool. Run `code-reviewer`, `error-auditor`, `test-reviewer`, and `completeness-checker` in parallel. Run `simplifier` after the others complete.
 
 Provide each agent with:
 - The list of changed files with paths
@@ -134,9 +130,7 @@ Update task: post-review → completed, assess → in_progress.
 
 ## Step 6: Independent assessment
 
-Launch a subagent with `agent: "independent-assessor"`. This is a **pre-existing agent definition** shipped with dreb — it has full codebase read access and uses the strongest available model via its own fallback list. The default is fine for most cases.
-
-**Do NOT use the Sandbox agent for this step** — the Sandbox agent has no codebase access and cannot verify findings against actual code.
+Launch the `independent-assessor` subagent (MD file available in .claude/skills/mach6-review/). Give the agent the path, _don't read the MD file yourself_.
 
 Provide the assessor with:
 - The full review text

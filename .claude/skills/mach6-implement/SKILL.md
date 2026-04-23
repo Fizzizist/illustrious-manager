@@ -17,7 +17,7 @@ This skill has two modes:
 1. **GitHub as shared memory** — Plans, reviews, and assessments are on the PR as comments with HTML markers.
 2. **No `#N` in comment bodies** — Use "finding 3", "item 3" etc. instead.
 3. **Safe git** — Never use `git add -A` or `git add .`. Stage files by name. Never stage secrets.
-4. **Task tracking** — Use the `tasks_update` tool to show progress.
+4. **Task tracking** — Use the `update_task` tool to show progress.
 5. **Non-interactive `gh`** — Set `GH_PAGER=cat` and `GH_EDITOR=cat` before all `gh` commands to prevent interactive prompts from hanging the agent. Use `--body-file` instead of inline `--body` for all `gh pr comment`, `gh pr create`, and `gh issue create` calls to avoid shell interpretation of backticks.
 
 ## Step 1: Parse input
@@ -55,15 +55,11 @@ Also read any progress updates, prior review findings, assessments, and discussi
 ### Step 4i: Set up task tracking
 
 Create tasks based on the plan's deliverables/features. Example:
-```
-tasks_update([
-  { id: "read", title: "Read plan and codebase", status: "in_progress" },
-  { id: "feature-1", title: "Implement feature 1", status: "pending" },
-  { id: "feature-2", title: "Implement feature 2", status: "pending" },
-  { id: "test", title: "Add/update tests", status: "pending" },
-  { id: "verify", title: "Build and verify", status: "pending" }
-])
-```
+- title: "read", description: "Read plan and codebase" <-- start here
+- title: "feature-1", description: "Implement feature 1"
+- title: "feature-2", description: "Implement feature 2"
+- title: "test", description: "Add/update tests"
+- title: "verify", description: "Build and verify"
 
 ### Step 5i: Read the codebase
 
@@ -71,9 +67,9 @@ Read all files mentioned in the plan. Understand the existing code before making
 
 ### Step 6i: Implement
 
-Use the `feature-dev` subagent to implement each deliverable. `feature-dev` is a **pre-existing agent definition** shipped with dreb — it has full tool access (read, write, edit, grep, find, ls, bash, search) and uses a strong-tier model with a provider fallback list. Do not override its model unless there's a specific reason.
+Use the `implement` role subagent to implement each deliverable. Use `default` model role if `implement` is not defined.
 
-**For each deliverable in the plan**, launch a `feature-dev` subagent via the `subagent` tool. Provide each agent with:
+**For each deliverable in the plan**, launch a `implement` subagent via the `Agent` tool. Provide each agent with:
 - The specific deliverable to implement (files to modify, what to change, expected behavior)
 - The full plan context and any relevant PR discussion
 - The list of files to read for understanding existing patterns
@@ -82,7 +78,7 @@ Use the `feature-dev` subagent to implement each deliverable. `feature-dev` is a
 
 **Test coverage is part of the deliverable, not an afterthought.** If the plan specifies tests for a deliverable, the feature-dev agent must implement them. If the target package lacks test infrastructure, add it.
 
-**Parallelism:** If deliverables are independent (don't modify the same files), run their `feature-dev` agents in parallel. If they have dependencies, use chain mode or run them sequentially — later features may depend on earlier ones.
+**Parallelism:** If deliverables are independent (don't modify the same files), run their `implement` agents in parallel.
 
 **Small plans (1-2 simple deliverables):** You may implement directly instead of delegating, if the changes are straightforward enough that subagent overhead isn't justified.
 
@@ -90,7 +86,7 @@ Update task tracking as each deliverable completes.
 
 ### Step 7i: Verify
 
-After all `feature-dev` agents complete:
+After all `implement` agents complete:
 - Run the project's test suite
 - Run any linting/formatting tools
 - Build the project if applicable
@@ -105,13 +101,9 @@ Suggest next step: `/skill:mach6-push` then `/skill:mach6-review <pr-number>` fo
 
 ### Step 3f: Set up task tracking
 
-```
-tasks_update([
-  { id: "gather", title: "Gather findings to fix", status: "in_progress" },
-  { id: "fix", title: "Implement fixes", status: "pending" },
-  { id: "verify", title: "Verify fixes", status: "pending" }
-])
-```
+- title: "gather", description: "Gather findings to fix" <-- start here
+- title: "fix", description: "Implement fixes"
+- title: "verify", description: "Verify fixes"
 
 ### Step 4f: Gather context
 
@@ -149,15 +141,15 @@ If more than batch size, fix first batch and tell user to re-run.
 
 ### Step 6f: Implement fixes
 
-Use the `feature-dev` subagent to implement fixes. `feature-dev` is a **pre-existing agent definition** shipped with dreb — it has full tool access and uses a strong-tier model with a provider fallback list. Do not override its model unless there's a specific reason.
+Use the `implement` subagent to implement fixes. `implement` is a model role. If it isn't specified, then just use `default`.
 
-**For each finding** (or batch of related findings), launch a `feature-dev` subagent with:
+**For each finding** (or batch of related findings), launch a `implement` subagent with:
 - The finding description and the assessment's classification/reasoning
 - The specific files and code locations involved
 - Instructions on what to fix and how
 - Instructions to run tests after fixing
 
-**Parallelism:** If findings touch different files, run their `feature-dev` agents in parallel. If findings overlap (same file/function), batch them into a single agent.
+**Parallelism:** If findings touch different files, run their `implement` agents in parallel. If findings overlap (same file/function), batch them into a single agent.
 
 **Simple fixes** (typos, naming, one-line changes): You may fix these directly instead of delegating.
 
@@ -165,7 +157,7 @@ Defer out-of-scope items to new issues. Update task tracking per finding.
 
 ### Step 7f: Verify
 
-After all `feature-dev` agents complete:
+After all `implement` agents complete:
 - Run tests and linting
 - Verify each fix addresses its finding
 - If any agent reported issues, address the gaps
