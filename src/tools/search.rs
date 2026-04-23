@@ -87,6 +87,7 @@ impl Tool for SearchTool {
             Ok(output) => Ok(ToolResult {
                 content: vec![ContentBlock::Text(output)],
                 is_error: false,
+                agent_events: vec![],
             }),
             Err(e) => Err(ToolError::Execution {
                 tool_name: "search".to_string(),

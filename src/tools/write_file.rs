@@ -124,6 +124,7 @@ impl Tool for WriteFileTool {
                 bytes, validated
             ))],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }

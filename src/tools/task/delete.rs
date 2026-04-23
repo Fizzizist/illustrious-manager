@@ -71,6 +71,7 @@ impl Tool for DeleteTaskTool {
         Ok(ToolResult {
             content: vec![ContentBlock::Text(format!("Deleted task {}", id))],
             is_error: false,
+            agent_events: vec![],
         })
     }
 }
