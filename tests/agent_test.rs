@@ -161,3 +161,58 @@ async fn test_agent_backend_error_emits_error_event() {
         other => panic!("Expected Error, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn cleanup_empty_session_integration_deletes_db_on_exit_with_no_messages() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir_path = dir.keep();
+
+    let session = Session::new(None, dir_path.clone()).await.expect("session");
+    let db_path = dir_path.join(format!("{}.db", session.id));
+    assert!(db_path.exists());
+
+    let config = RequestConfig {
+        model: "test".to_string(),
+        max_tokens: 100,
+        tools: vec![],
+    };
+    let agent = Agent::new(
+        Box::new(MockBackend::new(vec![])),
+        config,
+        Arc::new(TokioMutex::new(session)),
+    )
+    .await;
+
+    agent.cleanup_empty_session().await.expect("cleanup");
+    assert!(!db_path.exists());
+}
+
+#[tokio::test]
+async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir_path = dir.keep();
+
+    let session = Session::new(None, dir_path.clone()).await.expect("session");
+    session
+        .conversation()
+        .insert_message(&Message::text(Role::User, "hello".to_string()))
+        .await
+        .expect("insert");
+    let db_path = dir_path.join(format!("{}.db", session.id));
+    assert!(db_path.exists());
+
+    let config = RequestConfig {
+        model: "test".to_string(),
+        max_tokens: 100,
+        tools: vec![],
+    };
+    let agent = Agent::new(
+        Box::new(MockBackend::new(vec![])),
+        config,
+        Arc::new(TokioMutex::new(session)),
+    )
+    .await;
+
+    agent.cleanup_empty_session().await.expect("cleanup");
+    assert!(db_path.exists());
+}
