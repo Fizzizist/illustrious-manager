@@ -180,7 +180,7 @@ async fn main() -> Result<()> {
         log.flush()?;
     }
 
-    match mode {
+    let frontend_result = match mode {
         Mode::SingleShot {
             prompt,
             json_schema,
@@ -206,15 +206,21 @@ async fn main() -> Result<()> {
                 max_schema_retries,
                 logger.as_mut(),
             )
-            .await?;
+            .await
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await?;
+            frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await
         }
+    };
+
+    if let Err(e) = agent.cleanup_empty_session().await
+        && cli.debug
+    {
+        eprintln!("cleanup_empty_session failed: {e}");
     }
 
     eprintln!("Session ID: {}", agent.session_id().await);
-    Ok(())
+    frontend_result
 }
 
 /// Build a `ToolRegistry` with the standard tool set.
