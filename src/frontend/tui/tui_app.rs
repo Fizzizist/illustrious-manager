@@ -52,6 +52,7 @@ pub struct App {
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
     pub usage: TokenUsage,
+    pub subagent_usage: TokenUsage,
     /// The input_tokens value reported by the last Usage event. The API always
     /// reports the full context size, so we subtract the previous value to
     /// count only the newly added (non-cached) input tokens per turn.
@@ -90,6 +91,7 @@ impl App {
             text_width: 0,
             session_picker: None,
             usage: TokenUsage::default(),
+            subagent_usage: TokenUsage::default(),
             last_input_total: 0,
             model: String::new(),
             git_branch: None,
@@ -333,6 +335,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         git_branch: app.git_branch.as_deref(),
         working_dir: &app.working_dir,
         usage: &app.usage,
+        subagent_usage: Some(&app.subagent_usage),
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -442,7 +445,7 @@ pub fn handle_agent_event(
             output_tokens,
             ..
         } => {
-            app.usage.add(input_tokens, output_tokens);
+            app.subagent_usage.add(input_tokens, output_tokens);
         }
     }
     Ok(())
@@ -571,6 +574,8 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Checkpoint current session before switching
+                                        let _ = agent.checkpoint_session().await;
                                         // Clean up current session if empty
                                         if let Err(e) = agent.cleanup_empty_session().await {
                                             app.conversation.push(ConversationEntry::new(
@@ -592,6 +597,7 @@ async fn run_app(
                                                         app.current_response.clear();
                                                         app.scroll_offset = 0;
                                                         app.usage = TokenUsage::default();
+                                                        app.subagent_usage = TokenUsage::default();
                                                         app.last_input_total = 0;
                                                         app.load_history(&history);
                                                         agent.load_session(session).await;
@@ -1013,8 +1019,8 @@ mod tests {
     #[test]
     fn subagent_usage_event_aggregates_into_app_usage() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        assert_eq!(app.usage.input_tokens, 0);
-        assert_eq!(app.usage.output_tokens, 0);
+        assert_eq!(app.subagent_usage.input_tokens, 0);
+        assert_eq!(app.subagent_usage.output_tokens, 0);
 
         let event = AgentEvent::SubAgentUsage {
             input_tokens: 200,
@@ -1023,9 +1029,10 @@ mod tests {
         };
         handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
 
-        assert_eq!(app.usage.input_tokens, 200);
-        assert_eq!(app.usage.output_tokens, 80);
-        // SubAgentUsage does not update last_input_total (no deduplication logic needed)
+        assert_eq!(app.subagent_usage.input_tokens, 200);
+        assert_eq!(app.subagent_usage.output_tokens, 80);
+        // SubAgentUsage does not update usage or last_input_total
+        assert_eq!(app.usage.input_tokens, 0);
         assert_eq!(app.last_input_total, 0);
 
         // A subsequent SubAgentUsage should add on top.
@@ -1036,8 +1043,8 @@ mod tests {
         };
         handle_agent_event(&mut app, event2, None).expect("handle second SubAgentUsage");
 
-        assert_eq!(app.usage.input_tokens, 250);
-        assert_eq!(app.usage.output_tokens, 110);
+        assert_eq!(app.subagent_usage.input_tokens, 250);
+        assert_eq!(app.subagent_usage.output_tokens, 110);
     }
 
     #[test]
@@ -1871,5 +1878,65 @@ mod tests {
             "claude-original",
             "model should be unchanged for blank input"
         );
+    }
+
+    #[test]
+    fn subagent_usage_event_only_increments_subagent_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let event = AgentEvent::SubAgentUsage {
+            input_tokens: 300,
+            output_tokens: 120,
+            role: "default".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
+
+        assert_eq!(app.subagent_usage.input_tokens, 300);
+        assert_eq!(app.subagent_usage.output_tokens, 120);
+        assert_eq!(
+            app.usage.input_tokens, 0,
+            "parent usage must not be touched"
+        );
+        assert_eq!(
+            app.usage.output_tokens, 0,
+            "parent usage must not be touched"
+        );
+    }
+
+    #[test]
+    fn usage_event_does_not_increment_subagent_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let event = AgentEvent::Usage {
+            input_tokens: 200,
+            output_tokens: 80,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle Usage");
+
+        assert_eq!(
+            app.subagent_usage.input_tokens, 0,
+            "subagent_usage must stay zero after regular Usage"
+        );
+        assert_eq!(app.subagent_usage.output_tokens, 0);
+        assert_eq!(app.usage.input_tokens, 200);
+    }
+
+    #[test]
+    fn session_switch_resets_subagent_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.subagent_usage.add(500, 200);
+        assert_eq!(app.subagent_usage.input_tokens, 500);
+
+        // Simulate what the session-switch code path does
+        app.usage = TokenUsage::default();
+        app.subagent_usage = TokenUsage::default();
+        app.last_input_total = 0;
+
+        assert_eq!(
+            app.subagent_usage.input_tokens, 0,
+            "subagent_usage should reset to zero on session switch"
+        );
+        assert_eq!(app.subagent_usage.output_tokens, 0);
     }
 }

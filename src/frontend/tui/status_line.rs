@@ -27,6 +27,7 @@ pub struct StatusLineInfo<'a> {
     pub git_branch: Option<&'a str>,
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
+    pub subagent_usage: Option<&'a TokenUsage>,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -102,7 +103,18 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     let branch_str = info.git_branch.unwrap_or("no git");
     let dir_str = compact_path(info.working_dir);
 
-    let left_spans = vec![
+    let subagent_span: Option<Span<'static>> = info.subagent_usage.and_then(|su| {
+        if su.input_tokens == 0 && su.output_tokens == 0 {
+            return None;
+        }
+        let su_str = format!("↗{}", format_token_usage(su));
+        Some(Span::styled(
+            format!(" {su_str} "),
+            Style::default().fg(Color::Green).bg(STATUS_BG),
+        ))
+    });
+
+    let mut left_spans = vec![
         Span::styled(
             format!(" {usage_str} "),
             Style::default().fg(Color::White).bg(STATUS_BG),
@@ -124,9 +136,19 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         ),
     ];
 
-    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
+    let base_left_width: usize = left_spans.iter().map(|s| s.width()).sum();
     let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
     let total_width = width as usize;
+
+    // Include subagent block only when there is room for it.
+    if let Some(ref su_span) = subagent_span {
+        let su_width = su_span.width();
+        if base_left_width + su_width + right_width <= total_width {
+            left_spans.push(su_span.clone());
+        }
+    }
+
+    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
     let gap = total_width.saturating_sub(left_width + right_width);
 
     let mut spans = left_spans;
@@ -183,6 +205,23 @@ mod tests {
             git_branch,
             working_dir,
             usage,
+            subagent_usage: None,
+        }
+    }
+
+    fn make_info_with_subagent<'a>(
+        model: &'a str,
+        git_branch: Option<&'a str>,
+        working_dir: &'a std::path::Path,
+        usage: &'a TokenUsage,
+        subagent_usage: Option<&'a TokenUsage>,
+    ) -> StatusLineInfo<'a> {
+        StatusLineInfo {
+            model,
+            git_branch,
+            working_dir,
+            usage,
+            subagent_usage,
         }
     }
 
@@ -471,5 +510,119 @@ mod tests {
         let (input, output) = estimate_usage_from_messages(&messages);
         assert_eq!(input, 10, "40 chars / 4 = 10 input tokens");
         assert_eq!(output, 0);
+    }
+
+    #[test]
+    fn build_status_line_with_subagent_usage() {
+        let (model, branch, dir, mut usage) = test_info();
+        usage.add(5000, 1000);
+        let mut subagent_usage = TokenUsage::default();
+        subagent_usage.add(2000, 500);
+        let info = make_info_with_subagent(
+            &model,
+            branch.as_deref(),
+            &dir,
+            &usage,
+            Some(&subagent_usage),
+        );
+        let line = build_status_line(&info, 160);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains('↗'), "should contain subagent prefix");
+        assert!(
+            text.contains("↑2.0k"),
+            "should contain subagent input count"
+        );
+        assert!(
+            text.contains("↓500"),
+            "should contain subagent output count"
+        );
+        let green_span = line.spans.iter().find(|s| s.style.fg == Some(Color::Green));
+        assert!(
+            green_span.is_some(),
+            "subagent block should be Color::Green"
+        );
+    }
+
+    #[test]
+    fn build_status_line_without_subagent_usage() {
+        let (model, branch, dir, mut usage) = test_info();
+        usage.add(5000, 1000);
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!text.contains('↗'), "no subagent block when None");
+    }
+
+    #[test]
+    fn build_status_line_subagent_usage_with_zero_tokens() {
+        let (model, branch, dir, usage) = test_info();
+        let zero_subagent = TokenUsage::default();
+        let info = make_info_with_subagent(
+            &model,
+            branch.as_deref(),
+            &dir,
+            &usage,
+            Some(&zero_subagent),
+        );
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains('↗'),
+            "zero subagent tokens should not render a block"
+        );
+    }
+
+    #[test]
+    fn render_status_line_with_subagent_usage_snapshot() {
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let mut usage = TokenUsage::default();
+        usage.add(5000, 1000);
+        let mut subagent_usage = TokenUsage::default();
+        subagent_usage.add(2000, 500);
+        let info = make_info_with_subagent(
+            &model,
+            branch.as_deref(),
+            &dir,
+            &usage,
+            Some(&subagent_usage),
+        );
+
+        let backend = ratatui::backend::TestBackend::new(80, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
+    }
+
+    #[test]
+    fn build_status_line_narrow_omits_subagent_first() {
+        let (model, branch, dir, mut usage) = test_info();
+        usage.add(5000, 1000);
+        let mut subagent_usage = TokenUsage::default();
+        subagent_usage.add(2000, 500);
+        let info = make_info_with_subagent(
+            &model,
+            branch.as_deref(),
+            &dir,
+            &usage,
+            Some(&subagent_usage),
+        );
+        let line = build_status_line(&info, 40);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains('↗'),
+            "at narrow width, subagent block should be omitted first"
+        );
+        assert!(
+            text.contains('↑'),
+            "parent token block should still be present"
+        );
     }
 }
