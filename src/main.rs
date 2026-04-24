@@ -213,10 +213,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    if let Err(e) = agent.cleanup_empty_session().await {
-        if cli.debug {
-            eprintln!("cleanup_empty_session failed: {e}");
-        }
+    if let Err(e) = agent.cleanup_empty_session().await
+        && cli.debug
+    {
+        eprintln!("cleanup_empty_session failed: {e}");
     }
 
     eprintln!("Session ID: {}", agent.session_id().await);
