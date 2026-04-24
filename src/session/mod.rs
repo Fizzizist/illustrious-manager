@@ -142,6 +142,14 @@ impl Session {
         TaskRepo::new(self)
     }
 
+    pub async fn checkpoint(&self) -> Result<()> {
+        self.conn
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .context("Failed to checkpoint WAL")?;
+        Ok(())
+    }
+
     pub fn delete_db(&self) -> Result<()> {
         for suffix in ["", "-wal", "-shm"] {
             let path = if suffix.is_empty() {
@@ -601,6 +609,100 @@ mod tests {
             .await
             .expect("create");
         session.delete_db().expect("delete_db");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_is_noop_on_empty_session() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        session
+            .checkpoint()
+            .await
+            .expect("checkpoint should not error on empty session");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_flushes_wal_making_db_self_contained() {
+        let dir = TempDir::new().expect("temp dir");
+        let dir_path = dir.path().to_path_buf();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("create");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello checkpoint".to_string()))
+            .await
+            .expect("insert");
+
+        session.checkpoint().await.expect("checkpoint");
+
+        // Open the .db with a fresh connection and verify rows are readable.
+        // This is the core requirement: data persisted by checkpoint must be
+        // accessible to any new reader of the .db file.
+        let db2 = turso::Builder::new_local(db_path.to_string_lossy().as_ref())
+            .build()
+            .await
+            .expect("open fresh db");
+        let conn2 = db2.connect().expect("connect fresh");
+        let session2 = Session {
+            id: session.id.clone(),
+            conn: conn2,
+            db_path: db_path.clone(),
+        };
+        let history = session2
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history from fresh connection");
+        assert_eq!(
+            history.len(),
+            1,
+            "data must be visible from fresh connection after checkpoint"
+        );
+        match &history[0].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t, "hello checkpoint"),
+            _ => panic!("expected text content"),
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_does_not_corrupt_data() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "first".to_string()))
+            .await
+            .expect("insert 1");
+        session.checkpoint().await.expect("checkpoint 1");
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "second".to_string()))
+            .await
+            .expect("insert 2");
+        session.checkpoint().await.expect("checkpoint 2");
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(
+            history.len(),
+            2,
+            "both messages must survive two checkpoints"
+        );
+        match &history[0].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t, "first"),
+            _ => panic!("expected text"),
+        }
+        match &history[1].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t, "second"),
+            _ => panic!("expected text"),
+        }
     }
 
     #[tokio::test]

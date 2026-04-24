@@ -1,0 +1,5 @@
+---
+source: src/frontend/tui/status_line.rs
+expression: terminal.backend()
+---
+" ↑5.0k ↓1.0k   main  ↗↑2.0k ↓500   claude-sonnet-4-20250514  /home/user/project "

@@ -156,6 +156,10 @@ impl Agent {
             .await
     }
 
+    pub async fn checkpoint_session(&self) -> Result<()> {
+        self.session.lock().await.checkpoint().await
+    }
+
     /// If the current session has no messages, delete its DB file from disk.
     pub async fn cleanup_empty_session(&self) -> Result<()> {
         let session = self.session.lock().await;
@@ -185,7 +189,9 @@ impl Agent {
             *history = prefix;
             history.extend(new_history);
         }
-        *self.session.lock().await = session;
+        let mut session_guard = self.session.lock().await;
+        let _ = session_guard.checkpoint().await;
+        *session_guard = session;
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -784,7 +790,9 @@ impl AgentSpawner {
         };
 
         let agent = agent.with_skills(&self.skills);
-        run_headless(&agent, prompt).await
+        let outcome = run_headless(&agent, prompt).await;
+        let _ = agent.checkpoint_session().await;
+        outcome
     }
 }
 
@@ -1878,6 +1886,35 @@ mod tests {
 
         agent.cleanup_empty_session().await.expect("cleanup");
         assert!(!db_path.exists());
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_session_still_works_after_checkpoint() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        let db_path = dir_path.join(format!("{}.db", session.id));
+        assert!(db_path.exists());
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await;
+
+        agent.checkpoint_session().await.expect("checkpoint");
+        agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(
+            !db_path.exists(),
+            "empty session must be deleted even after checkpoint"
+        );
     }
 
     #[tokio::test]
