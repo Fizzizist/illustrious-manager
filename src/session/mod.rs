@@ -142,6 +142,20 @@ impl Session {
         TaskRepo::new(self)
     }
 
+    /// Checkpoint the WAL into the main database file and truncate the sidecar.
+    ///
+    /// Must be called before the connection is dropped to guarantee the `.db` file is
+    /// self-contained. Rows returned by the pragma are drained so the side effect applies.
+    pub async fn checkpoint(&self) -> Result<()> {
+        let mut rows = self
+            .conn
+            .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+            .await
+            .context("Failed to execute wal_checkpoint pragma")?;
+        while rows.next().await?.is_some() {}
+        Ok(())
+    }
+
     pub fn delete_db(&self) -> Result<()> {
         for suffix in ["", "-wal", "-shm"] {
             let path = if suffix.is_empty() {
@@ -562,6 +576,74 @@ mod tests {
             .await
             .expect("insert");
         assert!(!session.conversation().is_empty().await.expect("is_empty"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_succeeds_on_empty_session() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        session.checkpoint().await.expect("checkpoint");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_leaves_wal_file_zero_length_or_absent() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert");
+
+        session.checkpoint().await.expect("checkpoint");
+
+        let wal_path = dir.path().join(format!("{}.db-wal", session.id));
+        if wal_path.exists() {
+            assert_eq!(
+                std::fs::metadata(&wal_path).expect("metadata").len(),
+                0,
+                "-wal file should be zero-length after checkpoint"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_consolidates_wal_into_main_db_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let session_id = uuid::Uuid::now_v7().to_string();
+
+        {
+            let session = Session::new(Some(session_id.clone()), dir.path().to_path_buf())
+                .await
+                .expect("create");
+            session
+                .conversation()
+                .insert_message(&Message::text(Role::User, "first".to_string()))
+                .await
+                .expect("insert 1");
+            session
+                .conversation()
+                .insert_message(&Message::text(Role::Assistant, "second".to_string()))
+                .await
+                .expect("insert 2");
+            session.checkpoint().await.expect("checkpoint");
+        }
+
+        // Remove WAL/SHM sidecars to prove rows are in the main .db file.
+        let wal_path = dir.path().join(format!("{session_id}.db-wal"));
+        let shm_path = dir.path().join(format!("{session_id}.db-shm"));
+        let _ = std::fs::remove_file(&wal_path);
+        let _ = std::fs::remove_file(&shm_path);
+
+        let session = Session::new(Some(session_id), dir.path().to_path_buf())
+            .await
+            .expect("reopen");
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 2);
     }
 
     #[tokio::test]

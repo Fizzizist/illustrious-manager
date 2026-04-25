@@ -216,3 +216,48 @@ async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
     agent.cleanup_empty_session().await.expect("cleanup");
     assert!(db_path.exists());
 }
+
+#[tokio::test]
+async fn agent_checkpoint_session_persists_messages_to_main_db() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir_path = dir.keep();
+
+    let session = Session::new(None, dir_path.clone()).await.expect("session");
+    let session_id = session.id.clone();
+    session
+        .conversation()
+        .insert_message(&Message::text(Role::User, "checkpoint test".to_string()))
+        .await
+        .expect("insert");
+
+    let config = RequestConfig {
+        model: "test".to_string(),
+        max_tokens: 100,
+        tools: vec![],
+    };
+    let agent = Agent::new(
+        Box::new(MockBackend::new(vec![])),
+        config,
+        Arc::new(TokioMutex::new(session)),
+    )
+    .await;
+
+    agent.checkpoint_session().await.expect("checkpoint");
+    drop(agent);
+
+    // Remove WAL/SHM sidecars to prove messages are in the main .db file.
+    let _ = std::fs::remove_file(dir_path.join(format!("{session_id}.db-wal")));
+    let _ = std::fs::remove_file(dir_path.join(format!("{session_id}.db-shm")));
+
+    let session = Session::new(Some(session_id), dir_path.clone())
+        .await
+        .expect("reopen");
+    let history = session.conversation().load_history().await.expect("load");
+    assert_eq!(history.len(), 1);
+    match &history[0].content[0] {
+        illustrious_manager::types::ContentBlock::Text(t) => {
+            assert_eq!(t, "checkpoint test")
+        }
+        _ => panic!("expected text block"),
+    }
+}

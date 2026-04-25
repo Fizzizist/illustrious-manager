@@ -157,6 +157,10 @@ impl Agent {
     }
 
     /// If the current session has no messages, delete its DB file from disk.
+    pub async fn checkpoint_session(&self) -> Result<()> {
+        self.session.lock().await.checkpoint().await
+    }
+
     pub async fn cleanup_empty_session(&self) -> Result<()> {
         let session = self.session.lock().await;
         if session.conversation().is_empty().await? {
