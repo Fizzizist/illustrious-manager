@@ -216,3 +216,54 @@ async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
     agent.cleanup_empty_session().await.expect("cleanup");
     assert!(db_path.exists());
 }
+
+#[tokio::test]
+async fn agent_checkpoint_session_persists_messages_to_main_db() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let dir_path = dir.keep();
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let session = Session::new(Some(id.clone()), dir_path.clone())
+        .await
+        .expect("session");
+    session
+        .conversation()
+        .insert_message(&Message::text(Role::User, "regression message".to_string()))
+        .await
+        .expect("insert");
+
+    let db_path = dir_path.join(format!("{id}.db"));
+    let config = RequestConfig {
+        model: "test".to_string(),
+        max_tokens: 100,
+        tools: vec![],
+    };
+    let agent = Agent::new(
+        Box::new(MockBackend::new(vec![])),
+        config,
+        Arc::new(TokioMutex::new(session)),
+    )
+    .await;
+
+    agent.checkpoint_session().await.expect("checkpoint");
+
+    // Drop agent (and therefore the connection) before removing sidecars.
+    drop(agent);
+
+    let wal = dir_path.join(format!("{id}.db-wal"));
+    let shm = dir_path.join(format!("{id}.db-shm"));
+    if wal.exists() {
+        std::fs::remove_file(&wal).expect("remove wal");
+    }
+    if shm.exists() {
+        std::fs::remove_file(&shm).expect("remove shm");
+    }
+
+    // Reopen DB with no WAL — messages must be in the main file.
+    let session2 = Session::new(Some(id), dir_path.clone())
+        .await
+        .expect("reopen");
+    let history = session2.conversation().load_history().await.expect("load");
+    assert_eq!(history.len(), 1);
+    assert!(db_path.exists());
+}

@@ -571,6 +571,13 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Checkpoint current session WAL before switching
+                                        if let Err(e) = agent.checkpoint_session().await {
+                                            app.conversation.push(ConversationEntry::new(
+                                                ConversationRole::Error,
+                                                format!("Failed to checkpoint session: {e}"),
+                                            ));
+                                        }
                                         // Clean up current session if empty
                                         if let Err(e) = agent.cleanup_empty_session().await {
                                             app.conversation.push(ConversationEntry::new(
