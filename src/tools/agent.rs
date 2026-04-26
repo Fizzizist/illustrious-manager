@@ -41,12 +41,68 @@ impl SubAgentSpawner for AgentSpawner {
 
 pub struct AgentTool {
     spawner: Arc<dyn SubAgentSpawner>,
+    available_roles: Vec<String>,
+    schema: Value,
+    description_text: String,
 }
 
 impl AgentTool {
-    pub fn new(spawner: Arc<AgentSpawner>) -> Self {
-        Self { spawner }
+    pub fn new(spawner: Arc<AgentSpawner>, available_roles: Vec<String>) -> Self {
+        Self::with_spawner(spawner, available_roles)
     }
+
+    pub fn with_spawner(spawner: Arc<dyn SubAgentSpawner>, available_roles: Vec<String>) -> Self {
+        let schema = build_schema(&available_roles);
+        let description_text = build_description(&available_roles);
+        Self {
+            spawner,
+            available_roles,
+            schema,
+            description_text,
+        }
+    }
+}
+
+fn build_schema(available_roles: &[String]) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "prompt": {
+                "type": "string",
+                "description": "The task or question for the sub-agent to handle."
+            },
+            "role": {
+                "type": "string",
+                "description": "Named model role from [models] config. Defaults to 'default'.",
+                "enum": available_roles
+            },
+            "confirmation": {
+                "type": "string",
+                "enum": ["Always", "WriteOnly", "Never"],
+                "description": "Confirmation mode for the sub-agent. Clamped to be no more permissive than the parent."
+            },
+            "tools": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Explicit allowlist of tool names for the sub-agent. If omitted, inherits the parent's tool set."
+            }
+        },
+        "required": ["prompt"]
+    })
+}
+
+fn build_description(available_roles: &[String]) -> String {
+    let role_list = available_roles.join(", ");
+    format!(
+        "Spawn an independent sub-agent to run a focused task in its own session. \
+         The sub-agent has its own conversation history and tool set. \
+         Returns the sub-agent's final response text.\n\n\
+         NOTE: Sub-agents inherit the parent's confirmation mode by default. \
+         In `WriteOnly` or `Always` mode the sub-agent cannot perform write tool calls \
+         without aborting — pass `confirmation: \"Never\"` only when the parent also \
+         runs in `Never` mode (clamping prevents elevation beyond the parent).\n\n\
+         Available roles: {role_list}"
+    )
 }
 
 #[async_trait]
@@ -56,43 +112,11 @@ impl Tool for AgentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn an independent sub-agent to run a focused task in its own session. \
-         The sub-agent has its own conversation history and tool set. \
-         Returns the sub-agent's final response text.\n\n\
-         NOTE: Sub-agents inherit the parent's confirmation mode by default. \
-         In `WriteOnly` or `Always` mode the sub-agent cannot perform write tool calls \
-         without aborting — pass `confirmation: \"Never\"` only when the parent also \
-         runs in `Never` mode (clamping prevents elevation beyond the parent)."
+        &self.description_text
     }
 
     fn input_schema(&self) -> &Value {
-        static SCHEMA: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-        SCHEMA.get_or_init(|| {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "prompt": {
-                        "type": "string",
-                        "description": "The task or question for the sub-agent to handle."
-                    },
-                    "role": {
-                        "type": "string",
-                        "description": "Named model role from [models] config. Defaults to 'default'."
-                    },
-                    "confirmation": {
-                        "type": "string",
-                        "enum": ["Always", "WriteOnly", "Never"],
-                        "description": "Confirmation mode for the sub-agent. Clamped to be no more permissive than the parent."
-                    },
-                    "tools": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Explicit allowlist of tool names for the sub-agent. If omitted, inherits the parent's tool set."
-                    }
-                },
-                "required": ["prompt"]
-            })
-        })
+        &self.schema
     }
 
     fn is_write_tool(&self) -> bool {
@@ -108,6 +132,13 @@ impl Tool for AgentTool {
             .to_string();
 
         let role = input["role"].as_str().unwrap_or("default").to_string();
+
+        if !self.available_roles.contains(&role) {
+            let valid = self.available_roles.join(", ");
+            return Err(ToolError::InvalidInput {
+                message: format!("Invalid role '{role}'. Available roles: {valid}"),
+            });
+        }
 
         let requested_confirmation = input["confirmation"].as_str().and_then(|s| match s {
             "Always" => Some(ConfirmationMode::Always),
@@ -241,9 +272,10 @@ mod tests {
         parent: ConfirmationMode,
     ) -> (AgentTool, Arc<FakeSpawner>) {
         let spawner = FakeSpawner::new(outcome, parent);
-        let tool = AgentTool {
-            spawner: Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>,
-        };
+        let tool = AgentTool::with_spawner(
+            Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>,
+            vec!["default".to_string()],
+        );
         (tool, spawner)
     }
 
@@ -450,7 +482,7 @@ mod tests {
             }
         }
 
-        let tool = AgentTool { spawner };
+        let tool = AgentTool::with_spawner(spawner, vec!["default".to_string()]);
 
         let count_before = std::fs::read_dir(&dir_path)
             .expect("read dir")
@@ -485,6 +517,61 @@ mod tests {
             count_after,
             count_before + 1,
             "AgentTool::execute must create exactly one new session DB file"
+        );
+    }
+
+    #[test]
+    fn agent_tool_schema_lists_available_roles() {
+        let roles = vec![
+            "default".to_string(),
+            "implement".to_string(),
+            "thinking".to_string(),
+        ];
+        let spawner = FakeSpawner::new(ok_outcome("ok"), ConfirmationMode::Never);
+        let tool = AgentTool::with_spawner(Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>, roles);
+        let schema = tool.input_schema();
+        let role_enum = schema["properties"]["role"]["enum"]
+            .as_array()
+            .expect("enum array");
+        assert_eq!(role_enum.len(), 3);
+        assert_eq!(role_enum[0].as_str(), Some("default"));
+        assert_eq!(role_enum[1].as_str(), Some("implement"));
+        assert_eq!(role_enum[2].as_str(), Some("thinking"));
+    }
+
+    #[test]
+    fn agent_tool_description_lists_available_roles() {
+        let roles = vec!["default".to_string(), "implement".to_string()];
+        let spawner = FakeSpawner::new(ok_outcome("ok"), ConfirmationMode::Never);
+        let tool = AgentTool::with_spawner(Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>, roles);
+        let desc = tool.description();
+        assert!(
+            desc.contains("Available roles: default, implement"),
+            "description should list roles, got: {desc}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_rejects_invalid_role_with_error() {
+        let spawner = FakeSpawner::new(ok_outcome("ok"), ConfirmationMode::Never);
+        let tool = AgentTool::with_spawner(
+            Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>,
+            vec!["default".to_string(), "implement".to_string()],
+        );
+        let input = serde_json::json!({"prompt": "do", "role": "nonexistent"});
+        let result = tool.execute(input).await;
+        assert!(result.is_err(), "should reject invalid role");
+        let msg = match result {
+            Err(ToolError::InvalidInput { message }) => message,
+            _ => panic!("expected InvalidInput error"),
+        };
+        assert!(
+            msg.contains("Invalid role 'nonexistent'"),
+            "error should mention the invalid role, got: {msg}"
+        );
+        assert!(
+            msg.contains("Available roles: default, implement"),
+            "error should list valid roles, got: {msg}"
         );
     }
 }

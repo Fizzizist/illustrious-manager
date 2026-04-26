@@ -274,10 +274,12 @@ fn build_agent_spawner_and_register(
     let app_config_clone = Arc::clone(app_config);
     let skills_clone = skills.clone();
     let tools_config = app_config.tools.clone();
+    let available_roles: Vec<String> = app_config.models.keys().cloned().collect();
 
     let spawner_cell: Arc<std::sync::OnceLock<Arc<agent::AgentSpawner>>> =
         Arc::new(std::sync::OnceLock::new());
     let spawner_cell_clone = Arc::clone(&spawner_cell);
+    let roles_for_closure = available_roles.clone();
 
     let spawner = Arc::new(agent::AgentSpawner {
         factory: factory_clone,
@@ -285,7 +287,7 @@ fn build_agent_spawner_and_register(
         registry_builder: Box::new(move |sub_session| {
             let agent_tool = spawner_cell_clone
                 .get()
-                .map(|s| AgentTool::new(Arc::clone(s)));
+                .map(|s| AgentTool::new(Arc::clone(s), roles_for_closure.clone()));
             build_tool_registry(sub_session, &tools_config, &skills_clone, agent_tool)
         }),
         parent_confirmation: app_config.tools.confirmation.clone(),
@@ -297,7 +299,7 @@ fn build_agent_spawner_and_register(
         .ok()
         .expect("spawner_cell set exactly once at startup");
 
-    registry.register(Box::new(AgentTool::new(spawner)))?;
+    registry.register(Box::new(AgentTool::new(spawner, available_roles)))?;
     Ok(())
 }
 
