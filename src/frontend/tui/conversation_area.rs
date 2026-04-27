@@ -5,6 +5,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
 use tui_markdown::from_str as markdown_to_text;
 
+use super::markdown_tables::preprocess_tables;
+
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
 const CONVERSATION_TITLE: &str = "Conversation";
@@ -154,7 +156,8 @@ fn render_role_lines(
         Style::default().fg(role.color()),
     )));
     let display_content = maybe_truncate(content, role);
-    let rendered = markdown_to_text(&display_content);
+    let preprocessed = preprocess_tables(&display_content);
+    let rendered = markdown_to_text(&preprocessed);
     for line in rendered.lines {
         let mut prefixed = Line::from(Span::raw("  "));
         prefixed.spans.extend(
@@ -626,6 +629,69 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_markdown_list", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_table() {
+        let table = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_table", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_table_with_alignment() {
+        let table = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |\n| longer | mid | r |";
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_markdown_table_with_alignment", terminal.backend());
+    }
+
+    #[test]
+    fn render_markdown_table_in_assistant_with_surrounding_text() {
+        let content = "# Results\n\n| File | Lines |\n|------|-------|\n| main.rs | 100 |\n| lib.rs | 200 |\n\nSee above.";
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            content.to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_table_in_assistant_with_surrounding_text",
+            terminal.backend()
+        );
     }
 
     #[test]
