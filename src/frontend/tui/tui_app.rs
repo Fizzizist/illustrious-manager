@@ -52,6 +52,7 @@ pub struct App {
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
     pub usage: TokenUsage,
+    pub subagent_usage: TokenUsage,
     /// The input_tokens value reported by the last Usage event. The API always
     /// reports the full context size, so we subtract the previous value to
     /// count only the newly added (non-cached) input tokens per turn.
@@ -90,6 +91,7 @@ impl App {
             text_width: 0,
             session_picker: None,
             usage: TokenUsage::default(),
+            subagent_usage: TokenUsage::default(),
             last_input_total: 0,
             model: String::new(),
             git_branch: None,
@@ -281,6 +283,12 @@ impl App {
         }
     }
 
+    pub fn reset_for_session_switch(&mut self) {
+        self.usage = TokenUsage::default();
+        self.subagent_usage = TokenUsage::default();
+        self.last_input_total = 0;
+    }
+
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
@@ -333,6 +341,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         git_branch: app.git_branch.as_deref(),
         working_dir: &app.working_dir,
         usage: &app.usage,
+        subagent_usage: Some(&app.subagent_usage),
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -442,7 +451,7 @@ pub fn handle_agent_event(
             output_tokens,
             ..
         } => {
-            app.usage.add(input_tokens, output_tokens);
+            app.subagent_usage.add(input_tokens, output_tokens);
         }
     }
     Ok(())
@@ -598,8 +607,7 @@ async fn run_app(
                                                         app.conversation.clear();
                                                         app.current_response.clear();
                                                         app.scroll_offset = 0;
-                                                        app.usage = TokenUsage::default();
-                                                        app.last_input_total = 0;
+                                                        app.reset_for_session_switch();
                                                         app.load_history(&history);
                                                         agent.load_session(session).await;
                                                     }
@@ -1018,10 +1026,10 @@ mod tests {
     }
 
     #[test]
-    fn subagent_usage_event_aggregates_into_app_usage() {
+    fn subagent_usage_event_feeds_subagent_usage_only() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        assert_eq!(app.usage.input_tokens, 0);
-        assert_eq!(app.usage.output_tokens, 0);
+        assert_eq!(app.subagent_usage.input_tokens, 0);
+        assert_eq!(app.subagent_usage.output_tokens, 0);
 
         let event = AgentEvent::SubAgentUsage {
             input_tokens: 200,
@@ -1030,9 +1038,13 @@ mod tests {
         };
         handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
 
-        assert_eq!(app.usage.input_tokens, 200);
-        assert_eq!(app.usage.output_tokens, 80);
-        // SubAgentUsage does not update last_input_total (no deduplication logic needed)
+        // SubAgentUsage must NOT touch app.usage
+        assert_eq!(app.usage.input_tokens, 0, "parent usage must stay zero");
+        assert_eq!(app.usage.output_tokens, 0, "parent usage must stay zero");
+
+        // SubAgentUsage MUST accumulate into app.subagent_usage
+        assert_eq!(app.subagent_usage.input_tokens, 200);
+        assert_eq!(app.subagent_usage.output_tokens, 80);
         assert_eq!(app.last_input_total, 0);
 
         // A subsequent SubAgentUsage should add on top.
@@ -1043,8 +1055,52 @@ mod tests {
         };
         handle_agent_event(&mut app, event2, None).expect("handle second SubAgentUsage");
 
-        assert_eq!(app.usage.input_tokens, 250);
-        assert_eq!(app.usage.output_tokens, 110);
+        assert_eq!(app.subagent_usage.input_tokens, 250);
+        assert_eq!(app.subagent_usage.output_tokens, 110);
+        // parent still untouched
+        assert_eq!(app.usage.input_tokens, 0);
+    }
+
+    #[test]
+    fn parent_usage_event_does_not_touch_subagent_usage() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let event = AgentEvent::Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle Usage");
+
+        assert_eq!(app.usage.input_tokens, 100);
+        assert_eq!(
+            app.subagent_usage.input_tokens, 0,
+            "subagent_usage must be untouched by Usage event"
+        );
+        assert_eq!(
+            app.subagent_usage.output_tokens, 0,
+            "subagent_usage must be untouched by Usage event"
+        );
+    }
+
+    #[test]
+    fn session_switch_resets_both_usage_counters() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        app.usage.add(500, 200);
+        app.subagent_usage.add(300, 100);
+        app.last_input_total = 500;
+
+        app.reset_for_session_switch();
+
+        assert_eq!(app.usage.input_tokens, 0, "usage should be reset");
+        assert_eq!(app.usage.output_tokens, 0);
+        assert_eq!(
+            app.subagent_usage.input_tokens, 0,
+            "subagent_usage should be reset"
+        );
+        assert_eq!(app.subagent_usage.output_tokens, 0);
+        assert_eq!(app.last_input_total, 0);
     }
 
     #[test]
@@ -1079,6 +1135,34 @@ mod tests {
         assert!(
             rendered.contains("↓500"),
             "status line should show output tokens"
+        );
+    }
+
+    #[test]
+    fn render_app_with_subagent_usage_shows_arrow_glyph() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.model = "test-model".to_string();
+        app.usage.add(1000, 500);
+        app.subagent_usage.add(300, 100);
+        app.git_branch = Some("main".to_string());
+        app.working_dir = std::path::PathBuf::from("/test/project");
+
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains('↗'),
+            "status line should show ↗ glyph when subagent_usage is non-zero"
+        );
+        assert!(
+            rendered.contains("↑300"),
+            "status line should show subagent input tokens"
         );
     }
 
