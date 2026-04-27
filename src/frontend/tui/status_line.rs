@@ -27,6 +27,7 @@ pub struct StatusLineInfo<'a> {
     pub git_branch: Option<&'a str>,
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
+    pub subagent_usage: Option<&'a TokenUsage>,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -102,16 +103,30 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     let branch_str = info.git_branch.unwrap_or("no git");
     let dir_str = compact_path(info.working_dir);
 
-    let left_spans = vec![
-        Span::styled(
-            format!(" {usage_str} "),
-            Style::default().fg(Color::White).bg(STATUS_BG),
-        ),
-        Span::styled(
-            format!("  {branch_str} "),
-            Style::default().fg(Color::Cyan).bg(STATUS_BG),
-        ),
-    ];
+    let subagent_span: Option<Span<'static>> = info.subagent_usage.and_then(|su| {
+        if su.input_tokens + su.output_tokens > 0 {
+            let s = format!(
+                " ↗↑{} ↓{} ",
+                format_token_count(su.input_tokens),
+                format_token_count(su.output_tokens)
+            );
+            Some(Span::styled(
+                s,
+                Style::default().fg(Color::Green).bg(STATUS_BG),
+            ))
+        } else {
+            None
+        }
+    });
+
+    let parent_span = Span::styled(
+        format!(" {usage_str} "),
+        Style::default().fg(Color::White).bg(STATUS_BG),
+    );
+    let branch_span = Span::styled(
+        format!("  {branch_str} "),
+        Style::default().fg(Color::Cyan).bg(STATUS_BG),
+    );
 
     let right_spans = vec![
         Span::styled(
@@ -124,9 +139,24 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         ),
     ];
 
-    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
     let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
     let total_width = width as usize;
+
+    // Determine whether the subagent span fits.
+    let include_subagent = if let Some(ref sub_span) = subagent_span {
+        let left_width_with = parent_span.width() + sub_span.width() + branch_span.width();
+        left_width_with + right_width <= total_width
+    } else {
+        false
+    };
+
+    let mut left_spans = vec![parent_span];
+    if include_subagent {
+        left_spans.push(subagent_span.expect("checked above"));
+    }
+    left_spans.push(branch_span);
+
+    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
     let gap = total_width.saturating_sub(left_width + right_width);
 
     let mut spans = left_spans;
@@ -183,6 +213,7 @@ mod tests {
             git_branch,
             working_dir,
             usage,
+            subagent_usage: None,
         }
     }
 
@@ -471,5 +502,120 @@ mod tests {
         let (input, output) = estimate_usage_from_messages(&messages);
         assert_eq!(input, 10, "40 chars / 4 = 10 input tokens");
         assert_eq!(output, 0);
+    }
+
+    #[test]
+    fn build_status_line_with_subagent_usage_zero_omits_span() {
+        let (model, branch, dir, usage) = test_info();
+        let subagent_zero = TokenUsage::default();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: Some(&subagent_zero),
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains('↗'),
+            "zero subagent usage should not render ↗ glyph"
+        );
+    }
+
+    #[test]
+    fn build_status_line_with_subagent_usage_renders_green_span() {
+        let (model, branch, dir, usage) = test_info();
+        let subagent = TokenUsage {
+            input_tokens: 300,
+            output_tokens: 120,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: Some(&subagent),
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            text.contains('↗'),
+            "non-zero subagent usage should render ↗ glyph"
+        );
+        assert!(text.contains("↑300"), "should show subagent input tokens");
+        assert!(text.contains("↓120"), "should show subagent output tokens");
+
+        // The subagent span must be Color::Green
+        let green_span = line.spans.iter().find(|s| s.content.contains('↗'));
+        assert!(green_span.is_some(), "should find the ↗ span");
+        assert_eq!(
+            green_span.expect("checked").style.fg,
+            Some(Color::Green),
+            "subagent span should be green"
+        );
+    }
+
+    #[test]
+    fn build_status_line_subagent_span_dropped_on_narrow_terminal() {
+        let (model, branch, dir, usage) = test_info();
+        let subagent = TokenUsage {
+            input_tokens: 300,
+            output_tokens: 120,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: Some(&subagent),
+        };
+        // Use a very narrow width where the subagent span won't fit
+        let line = build_status_line(&info, 30);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains('↗'),
+            "subagent span should be dropped on narrow terminal (width=30)"
+        );
+        // Parent counter must still be present
+        assert!(text.contains('↑'), "parent counter must not be dropped");
+    }
+
+    #[test]
+    fn render_status_line_with_subagent_usage_snapshot() {
+        use std::path::PathBuf;
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage {
+            input_tokens: 12500,
+            output_tokens: 3200,
+            ..Default::default()
+        };
+        let subagent = TokenUsage {
+            input_tokens: 4000,
+            output_tokens: 800,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: Some(&subagent),
+        };
+
+        let backend = ratatui::backend::TestBackend::new(120, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 120, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
     }
 }
