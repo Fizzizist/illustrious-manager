@@ -281,12 +281,19 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tool_returns_final_text_from_subagent() {
-        let (tool, _) =
+        let (tool, spawner) =
             agent_tool_with_spawner(ok_outcome("sub-agent result"), ConfirmationMode::Never);
         let input = serde_json::json!({"prompt": "do something"});
         let result = tool.execute(input).await.expect("execute should succeed");
         assert!(!result.is_error);
         assert!(matches!(&result.content[0], ContentBlock::Text(t) if t == "sub-agent result"));
+        let captured = spawner
+            .captured_role
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("should be set");
+        assert_eq!(captured, "default");
     }
 
     #[tokio::test]
@@ -572,6 +579,28 @@ mod tests {
         assert!(
             msg.contains("Available roles: default, implement"),
             "error should list valid roles, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_forwards_explicit_valid_role_to_spawner() {
+        let spawner = FakeSpawner::new(ok_outcome("ok"), ConfirmationMode::Never);
+        let tool = AgentTool::with_spawner(
+            Arc::clone(&spawner) as Arc<dyn SubAgentSpawner>,
+            vec!["default".to_string(), "implement".to_string()],
+        );
+        let input = serde_json::json!({"prompt": "refactor this", "role": "implement"});
+        let result = tool.execute(input).await.expect("execute should succeed");
+        assert!(!result.is_error);
+        let captured = spawner
+            .captured_role
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("should be set");
+        assert_eq!(
+            captured, "implement",
+            "explicit valid role should be forwarded to spawner"
         );
     }
 }
