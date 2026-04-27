@@ -283,6 +283,12 @@ impl App {
         }
     }
 
+    pub fn reset_for_session_switch(&mut self) {
+        self.usage = TokenUsage::default();
+        self.subagent_usage = TokenUsage::default();
+        self.last_input_total = 0;
+    }
+
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
@@ -330,17 +336,12 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     app.input.render(frame, chunks[1]);
 
-    let subagent_ref = if app.subagent_usage.input_tokens + app.subagent_usage.output_tokens > 0 {
-        Some(&app.subagent_usage)
-    } else {
-        None
-    };
     let info = StatusLineInfo {
         model: &app.model,
         git_branch: app.git_branch.as_deref(),
         working_dir: &app.working_dir,
         usage: &app.usage,
-        subagent_usage: subagent_ref,
+        subagent_usage: Some(&app.subagent_usage),
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -606,9 +607,7 @@ async fn run_app(
                                                         app.conversation.clear();
                                                         app.current_response.clear();
                                                         app.scroll_offset = 0;
-                                                        app.usage = TokenUsage::default();
-                                                        app.subagent_usage = TokenUsage::default();
-                                                        app.last_input_total = 0;
+                                                        app.reset_for_session_switch();
                                                         app.load_history(&history);
                                                         agent.load_session(session).await;
                                                     }
@@ -1088,25 +1087,17 @@ mod tests {
     fn session_switch_resets_both_usage_counters() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
-        // Simulate some accumulated usage
         app.usage.add(500, 200);
         app.subagent_usage.add(300, 100);
-        assert_eq!(app.usage.input_tokens, 500);
-        assert_eq!(app.subagent_usage.input_tokens, 300);
+        app.last_input_total = 500;
 
-        // Simulate the session-switch reset block
-        app.usage = TokenUsage::default();
-        app.subagent_usage = TokenUsage::default();
-        app.last_input_total = 0;
+        app.reset_for_session_switch();
 
-        assert_eq!(
-            app.usage.input_tokens, 0,
-            "usage should be reset on session switch"
-        );
+        assert_eq!(app.usage.input_tokens, 0, "usage should be reset");
         assert_eq!(app.usage.output_tokens, 0);
         assert_eq!(
             app.subagent_usage.input_tokens, 0,
-            "subagent_usage should be reset on session switch"
+            "subagent_usage should be reset"
         );
         assert_eq!(app.subagent_usage.output_tokens, 0);
         assert_eq!(app.last_input_total, 0);
@@ -1144,6 +1135,34 @@ mod tests {
         assert!(
             rendered.contains("↓500"),
             "status line should show output tokens"
+        );
+    }
+
+    #[test]
+    fn render_app_with_subagent_usage_shows_arrow_glyph() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.model = "test-model".to_string();
+        app.usage.add(1000, 500);
+        app.subagent_usage.add(300, 100);
+        app.git_branch = Some("main".to_string());
+        app.working_dir = std::path::PathBuf::from("/test/project");
+
+        let backend = ratatui::backend::TestBackend::new(120, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains('↗'),
+            "status line should show ↗ glyph when subagent_usage is non-zero"
+        );
+        assert!(
+            rendered.contains("↑300"),
+            "status line should show subagent input tokens"
         );
     }
 
