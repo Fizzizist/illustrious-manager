@@ -63,7 +63,7 @@ Update task: prepare → completed, review → in_progress.
 
 **Available review agents:**
 
-The MD files for these agents can be found alongside the SKILL.md file for this skill. Provide the filepath to the agent to read, _do not read the file yourself_. E.g. `code-reviewer` agent should read `code-reviewer.md`. 
+The MD files for these agents can be found alongside the SKILL.md file for this skill. Provide the filepath to the agent to read, _do not read the file yourself_. E.g. `code-reviewer` agent should read `code-reviewer.md`. Use the `implement` role for these subagents, use `default` if `implement` is not available.
 
 | Agent | Question | When to run |
 |---|---|---|
