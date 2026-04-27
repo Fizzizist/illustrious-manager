@@ -156,6 +156,14 @@ impl Agent {
             .await
     }
 
+    /// Checkpoint the WAL of the current session into the main DB file.
+    ///
+    /// Errors are returned but callers are expected to log and swallow them so
+    /// the frontend's `Result` is preserved.
+    pub async fn checkpoint_session(&self) -> Result<()> {
+        self.session.lock().await.checkpoint().await
+    }
+
     /// If the current session has no messages, delete its DB file from disk.
     pub async fn cleanup_empty_session(&self) -> Result<()> {
         let session = self.session.lock().await;
