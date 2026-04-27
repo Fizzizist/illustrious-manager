@@ -695,6 +695,51 @@ mod tests {
     }
 
     #[test]
+    fn render_markdown_table_in_streaming_response() {
+        // Finding 10: verify preprocess_tables runs on the current_response (streaming) path.
+        let table = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
+        let mut entries: Vec<ConversationEntry> = Vec::new();
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, table, 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_table_in_streaming_response",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_with_cjk_and_emoji() {
+        // Finding 11: snapshot pins exact column widths for wide Unicode characters.
+        let table = "| 言語 | 記号 |\n|------|------|\n| 🦀 Rust | ✓ |\n| Python | ✗ |";
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_table_with_cjk_and_emoji",
+            terminal.backend()
+        );
+    }
+
+    #[test]
     fn render_user_markdown_italic() {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::User,
