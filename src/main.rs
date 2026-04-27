@@ -213,9 +213,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    if let Err(e) = agent.checkpoint_session().await
-        && cli.debug
-    {
+    if let Err(e) = agent.checkpoint_session().await {
         eprintln!("checkpoint_session failed: {e}");
     }
 
