@@ -142,7 +142,6 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
     let total_width = width as usize;
 
-    // Determine whether the subagent span fits.
     let include_subagent = if let Some(ref sub_span) = subagent_span {
         let left_width_with = parent_span.width() + sub_span.width() + branch_span.width();
         left_width_with + right_width <= total_width
