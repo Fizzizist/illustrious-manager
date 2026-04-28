@@ -612,49 +612,83 @@ async fn execute_tool_calls(
     }
 
     // Execute approved tools concurrently; produce results in input order.
+    // Each Approved execution races against the cancel token so that pressing
+    // Esc mid-tool drops the in-flight future (which kills bash subprocesses
+    // via tokio's kill_on_drop) and returns a cancelled-result block.
     let futures: Vec<_> = resolved
         .iter()
-        .map(|r| async move {
-            match &r.decision {
-                ToolDecision::ParseError(err) => (
-                    r.index,
-                    r.id.clone(),
-                    r.name.clone(),
-                    err.clone(),
-                    true,
-                    vec![],
-                ),
-                ToolDecision::Declined => (
-                    r.index,
-                    r.id.clone(),
-                    r.name.clone(),
-                    "User declined to execute this tool.".to_string(),
-                    true,
-                    vec![],
-                ),
-                ToolDecision::Approved => match tools.lookup(&r.name) {
-                    Ok(tool) => match tool.execute(r.input.clone()).await {
-                        Ok(result) => {
-                            let content = result
-                                .content
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(s) = b {
-                                        Some(s.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (
-                                r.index,
-                                r.id.clone(),
-                                r.name.clone(),
-                                content,
-                                result.is_error,
-                                result.agent_events,
-                            )
+        .map(|r| {
+            let cancel_token = cancel_token.clone();
+            async move {
+                match &r.decision {
+                    ToolDecision::ParseError(err) => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        err.clone(),
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::Declined => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        "User declined to execute this tool.".to_string(),
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::Approved => match tools.lookup(&r.name) {
+                        Ok(tool) => {
+                            let exec = tool.execute(r.input.clone());
+                            let outcome = if let Some(ref token) = cancel_token {
+                                tokio::select! {
+                                    biased;
+                                    _ = token.cancelled() => None,
+                                    result = exec => Some(result),
+                                }
+                            } else {
+                                Some(exec.await)
+                            };
+                            match outcome {
+                                None => (
+                                    r.index,
+                                    r.id.clone(),
+                                    r.name.clone(),
+                                    "Tool cancelled by user.".to_string(),
+                                    true,
+                                    vec![],
+                                ),
+                                Some(Ok(result)) => {
+                                    let content = result
+                                        .content
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let ContentBlock::Text(s) = b {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    (
+                                        r.index,
+                                        r.id.clone(),
+                                        r.name.clone(),
+                                        content,
+                                        result.is_error,
+                                        result.agent_events,
+                                    )
+                                }
+                                Some(Err(e)) => (
+                                    r.index,
+                                    r.id.clone(),
+                                    r.name.clone(),
+                                    e.to_string(),
+                                    true,
+                                    vec![],
+                                ),
+                            }
                         }
                         Err(e) => (
                             r.index,
@@ -665,15 +699,7 @@ async fn execute_tool_calls(
                             vec![],
                         ),
                     },
-                    Err(e) => (
-                        r.index,
-                        r.id.clone(),
-                        r.name.clone(),
-                        e.to_string(),
-                        true,
-                        vec![],
-                    ),
-                },
+                }
             }
         })
         .collect();
@@ -2981,6 +3007,76 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "ResponseComplete must not appear after cancellation; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tool_execution_returns_promptly_with_cancelled_result() {
+        // Regression: prior to wiring cancel_token into execute_tool_calls, pressing
+        // Esc while a long-running tool was executing left the agent blocked on
+        // tool.execute().await for the full duration of the tool — freezing the TUI
+        // until the tool finished. With the fix, the in-flight execute future is
+        // dropped and a "Tool cancelled by user." result is produced.
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        // Backend: emit a single 5-second sleep tool call.
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "s1".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":5000}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ]]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(SleepTool { duration_ms: 5000 })),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        // Cancel after 100ms — well before the 5s sleep would finish.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("sleep".to_string(), None, Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        // Must complete well under 5s (the tool's natural duration).
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "agent did not interrupt mid-tool; took {}ms (sleep would have taken 5000ms)",
+            elapsed.as_millis()
+        );
+
+        // The cancelled tool result must appear (proof the future was dropped, not awaited).
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { content, is_error: true, .. }
+                    if content.contains("cancelled")
+            )),
+            "expected ToolResult with 'cancelled' content; got: {events:?}"
+        );
+
+        // Stream must end with Interrupted.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted; got: {events:?}"
         );
     }
 }
