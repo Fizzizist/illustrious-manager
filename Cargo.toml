@@ -29,6 +29,7 @@ tokio-util = "0.7.18"
 toml = "1.1.0"
 tui-markdown = "0.3.7"
 turso = "0.5.3"
+unicode-segmentation = "1.13.2"
 unicode-width = "0.2.2"
 uuid = { version = "1.23.0", features = ["v7"] }
 
