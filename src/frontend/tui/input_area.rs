@@ -6,7 +6,7 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
-const STREAMING_TITLE: &str = "Streaming...";
+const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 

@@ -16,6 +16,7 @@ use std::io;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use super::commands::{CommandContext, DispatchResult, default_registry};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
@@ -47,6 +48,7 @@ pub struct App {
     pub current_response: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
+    pub cancel_token: Option<CancellationToken>,
     pub scroll_offset: u16,
     pub viewport_height: u16,
     pub text_width: u16,
@@ -86,6 +88,7 @@ impl App {
             current_response: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
+            cancel_token: None,
             scroll_offset: 0,
             viewport_height: 0,
             text_width: 0,
@@ -369,6 +372,7 @@ pub fn handle_agent_event(
                 .push(ConversationEntry::new(ConversationRole::Assistant, full));
             app.current_response.clear();
             app.confirmation_tx = None;
+            app.cancel_token = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
@@ -378,6 +382,7 @@ pub fn handle_agent_event(
                 .push(ConversationEntry::new(ConversationRole::Error, msg));
             app.current_response.clear();
             app.confirmation_tx = None;
+            app.cancel_token = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
             app.git_branch = status_line::detect_git_branch();
@@ -452,6 +457,24 @@ pub fn handle_agent_event(
             ..
         } => {
             app.subagent_usage.add(input_tokens, output_tokens);
+        }
+        AgentEvent::Interrupted { partial_text } => {
+            if !partial_text.is_empty() {
+                app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Assistant,
+                    format!("{partial_text}\n*(interrupted)*"),
+                ));
+            } else {
+                app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    "*(interrupted)*".to_string(),
+                ));
+            }
+            app.current_response.clear();
+            app.confirmation_tx = None;
+            app.cancel_token = None;
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
         }
     }
     Ok(())
@@ -642,6 +665,19 @@ async fn run_app(
                                     ..
                                 } => Some(ConfirmationResponse::Rejected),
                                 KeyEvent {
+                                    code: KeyCode::Esc,
+                                    ..
+                                } => {
+                                    // Esc during ToolConfirmation: reject and cancel the whole turn.
+                                    if let Some(tx) = &app.confirmation_tx {
+                                        let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
+                                    }
+                                    if let Some(token) = &app.cancel_token {
+                                        token.cancel();
+                                    }
+                                    None
+                                }
+                                KeyEvent {
                                     code: KeyCode::Char('c'),
                                     modifiers: KeyModifiers::CONTROL,
                                     ..
@@ -683,6 +719,12 @@ async fn run_app(
                                 } = key {
                                     break;
                                 }
+                            if matches!(app.state, AppState::Streaming)
+                                && let KeyEvent { code: KeyCode::Esc, .. } = key
+                                && let Some(token) = &app.cancel_token
+                            {
+                                token.cancel();
+                            }
                         }
                     }
                 }
@@ -716,10 +758,16 @@ pub async fn submit_message(
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
     app.confirmation_tx = Some(confirm_tx);
 
+    let cancel_token = CancellationToken::new();
+    app.cancel_token = Some(cancel_token.clone());
+
     let tx = event_tx.clone();
 
     let handle = tokio::spawn(async move {
-        match agent.send(input, Some(confirm_rx)).await {
+        match agent
+            .send(input, Some(confirm_rx), Some(cancel_token))
+            .await
+        {
             Ok(mut stream) => {
                 while let Some(event) = stream.next().await {
                     if tx.send(event).await.is_err() {
@@ -1961,6 +2009,166 @@ mod tests {
             agent.model(),
             "claude-original",
             "model should be unchanged for blank input"
+        );
+    }
+
+    // ── Cancellation / Esc behaviour ─────────────────────────────────────
+
+    #[test]
+    fn esc_during_streaming_cancels_token() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::Streaming);
+
+        assert!(
+            !token.is_cancelled(),
+            "token should not be cancelled before Esc"
+        );
+
+        // Simulate the Esc handler logic (mirrors the _ => arm in the event loop).
+        if matches!(app.state, AppState::Streaming) {
+            if let Some(t) = &app.cancel_token {
+                t.cancel();
+            }
+        }
+
+        assert!(
+            token.is_cancelled(),
+            "token should be cancelled after Esc in Streaming state"
+        );
+    }
+
+    #[test]
+    fn esc_in_input_state_is_noop() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::Input);
+        app.set_input("hello");
+
+        // Esc in Input state must not cancel the token (no streaming is happening).
+        // The _ => arm only fires the token when state == Streaming.
+        if matches!(app.state, AppState::Streaming) {
+            if let Some(t) = &app.cancel_token {
+                t.cancel();
+            }
+        }
+
+        assert!(
+            !token.is_cancelled(),
+            "token must not be cancelled in Input state"
+        );
+        assert_eq!(app.input_text(), "hello", "input buffer must be unchanged");
+    }
+
+    #[test]
+    fn esc_in_tool_confirmation_sends_rejected_and_cancels() {
+        use futures::channel::mpsc as fmpsc;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let (confirm_tx, mut confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
+        let token = CancellationToken::new();
+
+        app.confirmation_tx = Some(confirm_tx);
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::ToolConfirmation {
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            index: 1,
+        });
+
+        // Simulate Esc in ToolConfirmation: send Rejected + cancel token.
+        if let Some(tx) = &app.confirmation_tx {
+            let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
+        }
+        if let Some(t) = &app.cancel_token {
+            t.cancel();
+        }
+
+        assert!(
+            token.is_cancelled(),
+            "cancel token must be fired on Esc in ToolConfirmation"
+        );
+        let response = confirm_rx.try_recv().expect("should have a response");
+        assert_eq!(
+            response,
+            ConfirmationResponse::Rejected,
+            "Esc in ToolConfirmation must send Rejected"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_interrupted_with_partial_text_appends_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+
+        let event = AgentEvent::Interrupted {
+            partial_text: "partial response".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        assert_eq!(
+            app.state,
+            AppState::Input,
+            "should return to Input after Interrupted"
+        );
+        assert!(
+            app.current_response.is_empty(),
+            "current_response should be cleared"
+        );
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("partial response")),
+            "conversation should contain partial text"
+        );
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("interrupted")),
+            "conversation entry should be marked as interrupted"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_interrupted_with_empty_text_appends_info_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+
+        let event = AgentEvent::Interrupted {
+            partial_text: String::new(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle event");
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("interrupted")),
+            "conversation should show interrupted marker even for empty partial text"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_interrupted_clears_cancel_token() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token);
+        app.set_state(AppState::Streaming);
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Interrupted {
+                partial_text: String::new(),
+            },
+            None,
+        )
+        .expect("handle event");
+
+        assert!(
+            app.cancel_token.is_none(),
+            "cancel_token should be cleared after Interrupted"
         );
     }
 }

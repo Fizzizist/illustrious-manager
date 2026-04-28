@@ -259,6 +259,9 @@ pub enum AgentEvent {
         output_tokens: u32,
         role: String,
     },
+    Interrupted {
+        partial_text: String,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

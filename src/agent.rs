@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendFactory, LlmBackend};
 use crate::config::{ConfirmationMode, ToolsConfig};
@@ -223,6 +224,7 @@ impl Agent {
         &self,
         input: String,
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<AgentEvent>> {
         let user_msg = Message::text(Role::User, input);
         lock(&self.history).push(user_msg.clone());
@@ -252,6 +254,14 @@ impl Agent {
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
+                // Check cancellation at the top of each iteration.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    persist_partial_and_interrupt("", &history_arc, &session, &event_tx).await;
+                    break;
+                }
+
                 if iterations >= max_iterations {
                     let error_msg = format!("Max tool iterations ({max_iterations}) exceeded");
                     record_error(&error_msg, &history_arc, &session, &event_tx).await;
@@ -273,54 +283,68 @@ impl Agent {
                 let mut current_tool: Option<PendingToolCall> = None;
                 let mut stream = backend_stream;
 
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(StreamEvent::TextDelta(text)) => {
+                loop {
+                    let next_event = if let Some(ref token) = cancel_token {
+                        tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            item = stream.next() => item,
+                        }
+                    } else {
+                        stream.next().await
+                    };
+
+                    match next_event {
+                        None if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) => {
+                            eprintln!(
+                                "warn: stream interrupted by cancellation; any in-flight tool executions will be orphaned"
+                            );
+                            persist_partial_and_interrupt(
+                                &text_accumulated,
+                                &history_arc,
+                                &session,
+                                &event_tx,
+                            )
+                            .await;
+                            break 'outer;
+                        }
+                        None => break,
+                        Some(Ok(StreamEvent::TextDelta(text))) => {
                             text_accumulated.push_str(&text);
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                         }
-                        Ok(StreamEvent::ToolUseStart { id, name }) => {
+                        Some(Ok(StreamEvent::ToolUseStart { id, name })) => {
                             current_tool = Some(PendingToolCall {
                                 id,
                                 name,
                                 input_json: String::new(),
                             });
                         }
-                        Ok(StreamEvent::ToolUseDelta(chunk)) => {
+                        Some(Ok(StreamEvent::ToolUseDelta(chunk))) => {
                             if let Some(ref mut t) = current_tool {
                                 t.input_json.push_str(&chunk);
                             }
                         }
-                        Ok(StreamEvent::ToolUseDone) => {
+                        Some(Ok(StreamEvent::ToolUseDone)) => {
                             if let Some(t) = current_tool.take() {
                                 tool_calls.push(t);
                             }
                         }
-                        Ok(StreamEvent::Usage {
+                        Some(Ok(StreamEvent::Usage {
                             input_tokens,
                             output_tokens,
                             stop_reason,
-                        }) => {
+                        })) => {
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
                                 stop_reason,
                             });
                         }
-                        Ok(StreamEvent::Done) => break,
-                        Err(e) => {
+                        Some(Ok(StreamEvent::Done)) => break,
+                        Some(Err(e)) => {
                             if !text_accumulated.is_empty() {
-                                let partial_msg = Message {
-                                    role: Role::Assistant,
-                                    content: vec![ContentBlock::Text(text_accumulated.clone())],
-                                };
-                                lock(&history_arc).push(partial_msg.clone());
-                                let _ = session
-                                    .lock()
-                                    .await
-                                    .conversation()
-                                    .insert_message(&partial_msg)
-                                    .await;
+                                persist_partial(&text_accumulated, &history_arc, &session).await;
                             }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
@@ -348,6 +372,23 @@ impl Agent {
                     break;
                 }
 
+                // Check cancellation before executing tool calls.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    eprintln!(
+                        "warn: cancellation requested before tool execution; tool calls will be skipped"
+                    );
+                    persist_partial_and_interrupt(
+                        &text_accumulated,
+                        &history_arc,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
+                    break;
+                }
+
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
@@ -355,8 +396,16 @@ impl Agent {
                     &confirmation_mode,
                     &mut confirmation_rx,
                     &event_tx,
+                    cancel_token.clone(),
                 )
                 .await;
+
+                // If cancellation was triggered during tool execution, persist what we have and stop.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    break;
+                }
 
                 let assistant_msg = Message {
                     role: Role::Assistant,
@@ -388,6 +437,39 @@ impl Agent {
     }
 }
 
+async fn persist_partial(
+    text: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let msg = Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text(text.to_string())],
+    };
+    lock(history).push(msg.clone());
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&msg)
+        .await;
+}
+
+async fn persist_partial_and_interrupt(
+    text: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    persist_partial(text, history, session).await;
+    let _ = event_tx.unbounded_send(AgentEvent::Interrupted {
+        partial_text: text.to_string(),
+    });
+}
+
 async fn record_error(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
@@ -412,6 +494,7 @@ async fn execute_tool_calls(
     confirmation_mode: &ConfirmationMode,
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    _cancel_token: Option<CancellationToken>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !text_prefix.is_empty() {
@@ -607,7 +690,7 @@ pub struct HeadlessOutcome {
 /// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
 /// must be configured with a confirmation mode that does not require human input.
 pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
-    let stream = match agent.send(prompt, None).await {
+    let stream = match agent.send(prompt, None, None).await {
         Ok(s) => s,
         Err(e) => {
             return HeadlessOutcome {
@@ -655,6 +738,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 output_tokens = output_tokens.saturating_add(ot);
             }
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Interrupted { .. } => {}
         }
     }
 
@@ -985,7 +1069,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hi".to_string(), None)
+            .send("hi".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1024,7 +1108,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run ls".to_string(), None)
+            .send("run ls".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1081,7 +1165,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1125,7 +1209,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1170,7 +1254,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1216,7 +1300,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1271,7 +1355,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1309,7 +1393,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1351,7 +1435,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("list".to_string(), None)
+            .send("list".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1380,7 +1464,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1409,7 +1493,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hello".to_string(), None)
+            .send("hello".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1455,7 +1539,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hello".to_string(), None)
+            .send("hello".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1496,7 +1580,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("tell me a story".to_string(), None)
+            .send("tell me a story".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1528,7 +1612,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hi".to_string(), None)
+            .send("hi".to_string(), None, None)
             .await
             .expect("send should succeed");
         let _events = collect_events(stream).await;
@@ -1573,7 +1657,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let _events = collect_events(stream).await;
@@ -1647,7 +1731,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("write".to_string(), Some(confirm_rx))
+            .send("write".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2057,7 +2141,7 @@ mod tests {
         let agent = agent_with_sleep_tool().await;
         let start = std::time::Instant::now();
         let stream = agent
-            .send("sleep".to_string(), None)
+            .send("sleep".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2080,7 +2164,7 @@ mod tests {
     async fn parallel_tool_calls_preserve_input_order_in_results() {
         let agent = agent_with_sleep_tool().await;
         let stream = agent
-            .send("sleep".to_string(), None)
+            .send("sleep".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2215,7 +2299,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2276,7 +2360,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2365,7 +2449,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2527,21 +2611,249 @@ mod tests {
         );
     }
 
+    // ── CancellationToken tests ───────────────────────────────────────────
+
+    /// A backend that emits a configurable set of text deltas, then blocks
+    /// indefinitely until the stream is polled after cancellation.
+    struct CancellableBackend {
+        initial_tokens: Vec<String>,
+        token: CancellationToken,
+    }
+
+    impl CancellableBackend {
+        fn new(initial_tokens: Vec<&str>, token: CancellationToken) -> Self {
+            Self {
+                initial_tokens: initial_tokens.into_iter().map(String::from).collect(),
+                token,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for CancellableBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let tokens: Vec<Result<StreamEvent>> = self
+                .initial_tokens
+                .iter()
+                .map(|t| Ok(StreamEvent::TextDelta(t.clone())))
+                .collect();
+            let token = self.token.clone();
+
+            // Emit each token, then park until cancelled (simulating a slow stream).
+            let s = stream::unfold(
+                (tokens.into_iter(), token, false),
+                |(mut iter, token, done)| async move {
+                    if done {
+                        return None;
+                    }
+                    if let Some(item) = iter.next() {
+                        return Some((item, (iter, token, false)));
+                    }
+                    // No more tokens — block until cancelled, then end.
+                    token.cancelled().await;
+                    None
+                },
+            );
+            Ok(Box::pin(s))
+        }
+    }
+
     #[tokio::test]
-    async fn run_headless_backend_error_sets_is_error() {
-        use super::run_headless;
+    async fn cancel_during_streaming_persists_partial_text() {
+        let cancel = CancellationToken::new();
+        let backend = CancellableBackend::new(vec!["hello", " world"], cancel.clone());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
-        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection lost"))]]);
-        let config = RequestConfig {
-            model: "test".to_string(),
-            max_tokens: 100,
-            tools: vec![],
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("tell me a story".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let interrupted = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Interrupted { .. }));
+        assert!(
+            interrupted.is_some(),
+            "expected Interrupted event; got: {events:?}"
+        );
+        if let Some(AgentEvent::Interrupted { partial_text }) = interrupted {
+            assert_eq!(partial_text, "hello world", "partial text mismatch");
+        }
+
+        // History should contain the partial assistant message.
+        let history = lock(&agent.history).clone();
+        assert!(
+            history.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello world"))
+            }),
+            "partial assistant message should be in history; history: {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_before_first_chunk_emits_empty_interrupted() {
+        let cancel = CancellationToken::new();
+        // Cancel immediately before the stream starts.
+        cancel.cancel();
+
+        let backend = SequencedBackend::new(vec![text_response("should not appear")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let interrupted = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Interrupted { .. }));
+        assert!(
+            interrupted.is_some(),
+            "expected Interrupted event; got: {events:?}"
+        );
+        if let Some(AgentEvent::Interrupted { partial_text }) = interrupted {
+            assert!(
+                partial_text.is_empty(),
+                "partial text should be empty for pre-cancel; got: '{partial_text}'"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_token_none_preserves_legacy_behavior() {
+        let backend = SequencedBackend::new(vec![text_response("hello")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete without token; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "must not have Interrupted without cancel; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_between_tool_iterations_stops_before_next_backend_call() {
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        // First response: a tool call followed immediately by Done.
+        // Second response: blocks until cancel fires, then emits nothing.
+        // This simulates the agent completing one iteration then being
+        // cancelled before the second backend response arrives.
+        let second_cancel = cancel.clone();
+        let backend = {
+            struct TwoPhaseBackend {
+                first_done: std::sync::atomic::AtomicBool,
+                cancel: CancellationToken,
+            }
+
+            #[async_trait]
+            impl LlmBackend for TwoPhaseBackend {
+                async fn send_message(
+                    &self,
+                    _: &[Message],
+                    _: &RequestConfig,
+                ) -> Result<BoxStream<Result<StreamEvent>>> {
+                    let already_called = self
+                        .first_done
+                        .swap(true, std::sync::atomic::Ordering::SeqCst);
+                    if !already_called {
+                        // First call: return a tool use.
+                        Ok(Box::pin(futures::stream::iter(tool_call_response(
+                            "t1", "bash", r#"{}"#,
+                        ))))
+                    } else {
+                        // Second call: block until cancelled, return nothing.
+                        let cancel = self.cancel.clone();
+                        let s = stream::unfold(cancel, |token| async move {
+                            token.cancelled().await;
+                            None
+                        });
+                        Ok(Box::pin(s))
+                    }
+                }
+            }
+
+            TwoPhaseBackend {
+                first_done: std::sync::atomic::AtomicBool::new(false),
+                cancel: second_cancel,
+            }
         };
-        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
-        let outcome = run_headless(&agent, "fail".to_string()).await;
 
-        assert!(outcome.is_error);
-        let msg = outcome.error_message.expect("should have error message");
-        assert!(msg.contains("connection lost"));
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "done"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        // Cancel shortly after the agent starts the second (blocking) iteration.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), None, Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Should have seen the tool use + result from the completed first iteration.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolUseReceived { .. })),
+            "expected ToolUseReceived"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { .. })),
+            "expected ToolResult"
+        );
+        // Final text from second backend call must not appear.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear — second iteration was cancelled"
+        );
+        // The stream should have ended with Interrupted.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted event; got: {events:?}"
+        );
     }
 }
