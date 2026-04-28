@@ -259,6 +259,12 @@ pub enum AgentEvent {
         output_tokens: u32,
         role: String,
     },
+    Interrupted {
+        partial_text: String,
+    },
+    /// A diagnostic warning from the agent, written to the debug log when
+    /// `--debug` is active. Not displayed in the conversation UI.
+    Warn(String),
 }
 
 /// A pinned, boxed stream type alias for convenience

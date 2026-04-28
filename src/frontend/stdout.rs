@@ -72,7 +72,7 @@ async fn run_with_writer<W: Write, R: BufRead>(
     match format {
         OutputFormat::Text => {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
-            let mut stream = agent.send(prompt, Some(confirm_rx)).await?;
+            let mut stream = agent.send(prompt, Some(confirm_rx), None).await?;
             run_text(&mut stream, writer, confirm_tx, is_tty, stdin, &mut logger).await
         }
         OutputFormat::Json => {
@@ -136,6 +136,11 @@ async fn run_text<W: Write, R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Warn(_) => {}
+            AgentEvent::Interrupted { .. } => {
+                writeln!(writer, "\n*(interrupted)*")?;
+                break;
+            }
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                 handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
@@ -191,6 +196,12 @@ async fn collect_response<R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Warn(_) => {}
+            AgentEvent::Interrupted { partial_text } => {
+                is_error = true;
+                result_text = partial_text;
+                break;
+            }
             AgentEvent::ToolConfirmationRequired { name, .. } if !is_tty => {
                 let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
                 is_error = true;
@@ -228,7 +239,7 @@ async fn run_json<W: Write, R: BufRead>(
     logger: &mut Option<&mut Logger>,
 ) -> Result<()> {
     let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
-    let mut stream = agent.send(initial_prompt, Some(confirm_rx)).await?;
+    let mut stream = agent.send(initial_prompt, Some(confirm_rx), None).await?;
     let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
 
     let (result, is_error) = apply_schema_retry(
@@ -299,7 +310,7 @@ async fn apply_schema_retry<R: BufRead>(
                         validation_err, schema.raw
                     );
                     let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
-                    let mut retry_stream = agent.send(reprompt, Some(retry_rx)).await?;
+                    let mut retry_stream = agent.send(reprompt, Some(retry_rx), None).await?;
                     let (new_text, new_error) =
                         collect_response(&mut retry_stream, retry_tx, is_tty, stdin, logger)
                             .await?;
@@ -953,5 +964,43 @@ mod tests {
 
         assert!(is_error);
         assert_eq!(result, "stream error");
+    }
+
+    // ── Interrupted event ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_text_interrupted_writes_marker_and_returns_ok() {
+        let events = vec![
+            AgentEvent::TokenReceived("partial".to_string()),
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+        ];
+        let (result, buf) = run_text_events(events, false).await;
+        result.expect("run_text should return Ok on Interrupted");
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("*(interrupted)*"),
+            "output should contain interrupted marker; got: {output:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_response_interrupted_sets_is_error_and_returns_partial_text() {
+        let events = vec![
+            AgentEvent::TokenReceived("partial".to_string()),
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+        ];
+        let (text, is_error) = run_json_collect(events, false).await;
+        assert!(
+            is_error,
+            "collect_response should set is_error=true for Interrupted"
+        );
+        assert_eq!(
+            text, "partial",
+            "collect_response should return partial text for Interrupted"
+        );
     }
 }

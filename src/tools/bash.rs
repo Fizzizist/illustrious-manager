@@ -146,11 +146,13 @@ impl Tool for BashTool {
             }
         }
 
-        let output = std::process::Command::new("sh")
+        let output = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.sandbox_root)
+            .kill_on_drop(true)
             .output()
+            .await
             .map_err(|e| ToolError::Execution {
                 tool_name: "bash".to_string(),
                 message: format!("Failed to spawn command: {}", e),
@@ -525,5 +527,42 @@ mod tests {
         let md = tool.markdown_output(&result);
         assert!(md.contains("```"), "should wrap in code block");
         assert!(md.contains("hello"), "should include output");
+    }
+
+    #[tokio::test]
+    async fn dropping_execute_future_kills_long_running_subprocess() {
+        // Regression: prior to migrating to tokio::process::Command with kill_on_drop,
+        // dropping the execute() future on cancellation left bash subprocesses running
+        // for the full sleep duration, freezing the TUI from the user's perspective.
+        //
+        // Strategy: spawn `sleep 30 && touch <marker>`. Race against a 100ms timeout.
+        // After timeout fires (dropping the future), wait 500ms and assert the marker
+        // file does NOT exist — proving the subprocess was killed before it could run
+        // the `touch`.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let sandbox = temp_dir.path().to_path_buf();
+        let marker = sandbox.join("ran_to_completion.marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
+        let tool = make_tool(ConfirmationMode::Never, sandbox.clone(), Box::new(|_| true));
+
+        let command = format!("sleep 30 && touch {}", marker_str);
+        let exec_future = tool.execute(serde_json::json!({"command": command}));
+
+        // Race the execution against a short timeout; on timeout the future is dropped.
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(100), exec_future).await;
+        assert!(
+            outcome.is_err(),
+            "test setup error: bash should not have completed in 100ms"
+        );
+
+        // Give the OS a moment to reap the killed child before checking the filesystem.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            !marker.exists(),
+            "marker file at {marker_str} exists — subprocess was NOT killed when future was dropped"
+        );
     }
 }

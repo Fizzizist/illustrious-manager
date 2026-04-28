@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendFactory, LlmBackend};
 use crate::config::{ConfirmationMode, ToolsConfig};
@@ -235,6 +236,7 @@ impl Agent {
         &self,
         input: String,
         confirmation_rx: Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<AgentEvent>> {
         let user_msg = Message::text(Role::User, input);
         lock(&self.history).push(user_msg.clone());
@@ -264,6 +266,14 @@ impl Agent {
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
+                // Check cancellation at the top of each iteration.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    persist_partial_and_interrupt("", &history_arc, &session, &event_tx).await;
+                    break;
+                }
+
                 if iterations >= max_iterations {
                     let error_msg = format!("Max tool iterations ({max_iterations}) exceeded");
                     record_error(&error_msg, &history_arc, &session, &event_tx).await;
@@ -285,54 +295,68 @@ impl Agent {
                 let mut current_tool: Option<PendingToolCall> = None;
                 let mut stream = backend_stream;
 
-                while let Some(result) = stream.next().await {
-                    match result {
-                        Ok(StreamEvent::TextDelta(text)) => {
+                loop {
+                    let next_event = if let Some(ref token) = cancel_token {
+                        tokio::select! {
+                            biased;
+                            _ = token.cancelled() => None,
+                            item = stream.next() => item,
+                        }
+                    } else {
+                        stream.next().await
+                    };
+
+                    match next_event {
+                        None if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) => {
+                            let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                                "stream interrupted by cancellation; any in-flight tool executions will be orphaned".to_string(),
+                            ));
+                            persist_partial_and_interrupt(
+                                &text_accumulated,
+                                &history_arc,
+                                &session,
+                                &event_tx,
+                            )
+                            .await;
+                            break 'outer;
+                        }
+                        None => break,
+                        Some(Ok(StreamEvent::TextDelta(text))) => {
                             text_accumulated.push_str(&text);
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
                         }
-                        Ok(StreamEvent::ToolUseStart { id, name }) => {
+                        Some(Ok(StreamEvent::ToolUseStart { id, name })) => {
                             current_tool = Some(PendingToolCall {
                                 id,
                                 name,
                                 input_json: String::new(),
                             });
                         }
-                        Ok(StreamEvent::ToolUseDelta(chunk)) => {
+                        Some(Ok(StreamEvent::ToolUseDelta(chunk))) => {
                             if let Some(ref mut t) = current_tool {
                                 t.input_json.push_str(&chunk);
                             }
                         }
-                        Ok(StreamEvent::ToolUseDone) => {
+                        Some(Ok(StreamEvent::ToolUseDone)) => {
                             if let Some(t) = current_tool.take() {
                                 tool_calls.push(t);
                             }
                         }
-                        Ok(StreamEvent::Usage {
+                        Some(Ok(StreamEvent::Usage {
                             input_tokens,
                             output_tokens,
                             stop_reason,
-                        }) => {
+                        })) => {
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
                                 stop_reason,
                             });
                         }
-                        Ok(StreamEvent::Done) => break,
-                        Err(e) => {
+                        Some(Ok(StreamEvent::Done)) => break,
+                        Some(Err(e)) => {
                             if !text_accumulated.is_empty() {
-                                let partial_msg = Message {
-                                    role: Role::Assistant,
-                                    content: vec![ContentBlock::Text(text_accumulated.clone())],
-                                };
-                                lock(&history_arc).push(partial_msg.clone());
-                                let _ = session
-                                    .lock()
-                                    .await
-                                    .conversation()
-                                    .insert_message(&partial_msg)
-                                    .await;
+                                persist_partial(&text_accumulated, &history_arc, &session).await;
                             }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
@@ -360,6 +384,25 @@ impl Agent {
                     break;
                 }
 
+                // Check cancellation before executing tool calls.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                        "cancellation requested before tool execution; tool calls will be skipped"
+                            .to_string(),
+                    ));
+                    persist_partial_and_interrupt(
+                        &text_accumulated,
+                        &history_arc,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
+                    break;
+                }
+
+                let text_for_cancel = text_accumulated.clone();
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
@@ -367,8 +410,23 @@ impl Agent {
                     &confirmation_mode,
                     &mut confirmation_rx,
                     &event_tx,
+                    cancel_token.clone(),
                 )
                 .await;
+
+                // If cancellation was triggered during tool execution, persist what we have and stop.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    persist_partial_and_interrupt(
+                        &text_for_cancel,
+                        &history_arc,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
+                    break;
+                }
 
                 let assistant_msg = Message {
                     role: Role::Assistant,
@@ -400,6 +458,39 @@ impl Agent {
     }
 }
 
+async fn persist_partial(
+    text: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let msg = Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::Text(text.to_string())],
+    };
+    lock(history).push(msg.clone());
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&msg)
+        .await;
+}
+
+async fn persist_partial_and_interrupt(
+    text: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    persist_partial(text, history, session).await;
+    let _ = event_tx.unbounded_send(AgentEvent::Interrupted {
+        partial_text: text.to_string(),
+    });
+}
+
 async fn record_error(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
@@ -424,6 +515,7 @@ async fn execute_tool_calls(
     confirmation_mode: &ConfirmationMode,
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel_token: Option<CancellationToken>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !text_prefix.is_empty() {
@@ -483,21 +575,39 @@ async fn execute_tool_calls(
                 }
             };
             if needs_confirmation {
-                let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    input: input.clone(),
-                    index,
-                });
-                let approved = if let Some(rx) = confirmation_rx.as_mut() {
-                    matches!(rx.next().await, Some(ConfirmationResponse::Approved))
-                } else {
-                    false
-                };
-                if approved {
-                    ToolDecision::Approved
-                } else {
+                // If already cancelled, skip confirmation and decline immediately.
+                if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                     ToolDecision::Declined
+                } else {
+                    let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input: input.clone(),
+                        index,
+                    });
+                    let approved = if let Some(rx) = confirmation_rx.as_mut() {
+                        // Race the confirmation against the cancel token so that Esc
+                        // during a multi-tool confirmation sequence declines all
+                        // remaining tools without requiring another keypress.
+                        if let Some(ref token) = cancel_token {
+                            tokio::select! {
+                                biased;
+                                _ = token.cancelled() => false,
+                                response = rx.next() => {
+                                    matches!(response, Some(ConfirmationResponse::Approved))
+                                }
+                            }
+                        } else {
+                            matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+                        }
+                    } else {
+                        false
+                    };
+                    if approved {
+                        ToolDecision::Approved
+                    } else {
+                        ToolDecision::Declined
+                    }
                 }
             } else {
                 ToolDecision::Approved
@@ -514,49 +624,83 @@ async fn execute_tool_calls(
     }
 
     // Execute approved tools concurrently; produce results in input order.
+    // Each Approved execution races against the cancel token so that pressing
+    // Esc mid-tool drops the in-flight future (which kills bash subprocesses
+    // via tokio's kill_on_drop) and returns a cancelled-result block.
     let futures: Vec<_> = resolved
         .iter()
-        .map(|r| async move {
-            match &r.decision {
-                ToolDecision::ParseError(err) => (
-                    r.index,
-                    r.id.clone(),
-                    r.name.clone(),
-                    err.clone(),
-                    true,
-                    vec![],
-                ),
-                ToolDecision::Declined => (
-                    r.index,
-                    r.id.clone(),
-                    r.name.clone(),
-                    "User declined to execute this tool.".to_string(),
-                    true,
-                    vec![],
-                ),
-                ToolDecision::Approved => match tools.lookup(&r.name) {
-                    Ok(tool) => match tool.execute(r.input.clone()).await {
-                        Ok(result) => {
-                            let content = result
-                                .content
-                                .iter()
-                                .filter_map(|b| {
-                                    if let ContentBlock::Text(s) = b {
-                                        Some(s.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            (
-                                r.index,
-                                r.id.clone(),
-                                r.name.clone(),
-                                content,
-                                result.is_error,
-                                result.agent_events,
-                            )
+        .map(|r| {
+            let cancel_token = cancel_token.clone();
+            async move {
+                match &r.decision {
+                    ToolDecision::ParseError(err) => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        err.clone(),
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::Declined => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        "User declined to execute this tool.".to_string(),
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::Approved => match tools.lookup(&r.name) {
+                        Ok(tool) => {
+                            let exec = tool.execute(r.input.clone());
+                            let outcome = if let Some(ref token) = cancel_token {
+                                tokio::select! {
+                                    biased;
+                                    _ = token.cancelled() => None,
+                                    result = exec => Some(result),
+                                }
+                            } else {
+                                Some(exec.await)
+                            };
+                            match outcome {
+                                None => (
+                                    r.index,
+                                    r.id.clone(),
+                                    r.name.clone(),
+                                    "Tool cancelled by user.".to_string(),
+                                    true,
+                                    vec![],
+                                ),
+                                Some(Ok(result)) => {
+                                    let content = result
+                                        .content
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let ContentBlock::Text(s) = b {
+                                                Some(s.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    (
+                                        r.index,
+                                        r.id.clone(),
+                                        r.name.clone(),
+                                        content,
+                                        result.is_error,
+                                        result.agent_events,
+                                    )
+                                }
+                                Some(Err(e)) => (
+                                    r.index,
+                                    r.id.clone(),
+                                    r.name.clone(),
+                                    e.to_string(),
+                                    true,
+                                    vec![],
+                                ),
+                            }
                         }
                         Err(e) => (
                             r.index,
@@ -567,15 +711,7 @@ async fn execute_tool_calls(
                             vec![],
                         ),
                     },
-                    Err(e) => (
-                        r.index,
-                        r.id.clone(),
-                        r.name.clone(),
-                        e.to_string(),
-                        true,
-                        vec![],
-                    ),
-                },
+                }
             }
         })
         .collect();
@@ -619,7 +755,7 @@ pub struct HeadlessOutcome {
 /// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
 /// must be configured with a confirmation mode that does not require human input.
 pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
-    let stream = match agent.send(prompt, None).await {
+    let stream = match agent.send(prompt, None, None).await {
         Ok(s) => s,
         Err(e) => {
             return HeadlessOutcome {
@@ -667,6 +803,8 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 output_tokens = output_tokens.saturating_add(ot);
             }
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Interrupted { .. } => {}
+            AgentEvent::Warn(_) => {}
         }
     }
 
@@ -997,7 +1135,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hi".to_string(), None)
+            .send("hi".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1036,7 +1174,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run ls".to_string(), None)
+            .send("run ls".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1093,7 +1231,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1137,7 +1275,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1182,7 +1320,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1228,7 +1366,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1283,7 +1421,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1321,7 +1459,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1363,7 +1501,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("list".to_string(), None)
+            .send("list".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1392,7 +1530,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1421,7 +1559,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hello".to_string(), None)
+            .send("hello".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1467,7 +1605,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hello".to_string(), None)
+            .send("hello".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1508,7 +1646,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("tell me a story".to_string(), None)
+            .send("tell me a story".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -1540,7 +1678,7 @@ mod tests {
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
-            .send("hi".to_string(), None)
+            .send("hi".to_string(), None, None)
             .await
             .expect("send should succeed");
         let _events = collect_events(stream).await;
@@ -1585,7 +1723,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let _events = collect_events(stream).await;
@@ -1659,7 +1797,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("write".to_string(), Some(confirm_rx))
+            .send("write".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2069,7 +2207,7 @@ mod tests {
         let agent = agent_with_sleep_tool().await;
         let start = std::time::Instant::now();
         let stream = agent
-            .send("sleep".to_string(), None)
+            .send("sleep".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2092,7 +2230,7 @@ mod tests {
     async fn parallel_tool_calls_preserve_input_order_in_results() {
         let agent = agent_with_sleep_tool().await;
         let stream = agent
-            .send("sleep".to_string(), None)
+            .send("sleep".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2227,7 +2365,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2288,7 +2426,7 @@ mod tests {
         .await;
 
         let stream = agent
-            .send("run".to_string(), None)
+            .send("run".to_string(), None, None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2377,7 +2515,7 @@ mod tests {
             .with_tool_config(&tool_config);
 
         let stream = agent
-            .send("run".to_string(), Some(confirm_rx))
+            .send("run".to_string(), Some(confirm_rx), None)
             .await
             .expect("send should succeed");
         let events = collect_events(stream).await;
@@ -2555,5 +2693,402 @@ mod tests {
         assert!(outcome.is_error);
         let msg = outcome.error_message.expect("should have error message");
         assert!(msg.contains("connection lost"));
+    }
+
+    // ── CancellationToken tests ───────────────────────────────────────────
+
+    /// A backend that emits a configurable set of text deltas, then blocks
+    /// indefinitely until the stream is polled after cancellation.
+    struct CancellableBackend {
+        initial_tokens: Vec<String>,
+        token: CancellationToken,
+    }
+
+    impl CancellableBackend {
+        fn new(initial_tokens: Vec<&str>, token: CancellationToken) -> Self {
+            Self {
+                initial_tokens: initial_tokens.into_iter().map(String::from).collect(),
+                token,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for CancellableBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let tokens: Vec<Result<StreamEvent>> = self
+                .initial_tokens
+                .iter()
+                .map(|t| Ok(StreamEvent::TextDelta(t.clone())))
+                .collect();
+            let token = self.token.clone();
+
+            // Emit each token, then park until cancelled (simulating a slow stream).
+            let s = stream::unfold(
+                (tokens.into_iter(), token, false),
+                |(mut iter, token, done)| async move {
+                    if done {
+                        return None;
+                    }
+                    if let Some(item) = iter.next() {
+                        return Some((item, (iter, token, false)));
+                    }
+                    // No more tokens — block until cancelled, then end.
+                    token.cancelled().await;
+                    None
+                },
+            );
+            Ok(Box::pin(s))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_streaming_persists_partial_text() {
+        let cancel = CancellationToken::new();
+        let backend = CancellableBackend::new(vec!["hello", " world"], cancel.clone());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("tell me a story".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let interrupted = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Interrupted { .. }));
+        assert!(
+            interrupted.is_some(),
+            "expected Interrupted event; got: {events:?}"
+        );
+        if let Some(AgentEvent::Interrupted { partial_text }) = interrupted {
+            assert_eq!(partial_text, "hello world", "partial text mismatch");
+        }
+
+        // History should contain the partial assistant message.
+        let history = lock(&agent.history).clone();
+        assert!(
+            history.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello world"))
+            }),
+            "partial assistant message should be in history; history: {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_before_first_chunk_emits_empty_interrupted() {
+        let cancel = CancellationToken::new();
+        // Cancel immediately before the stream starts.
+        cancel.cancel();
+
+        let backend = SequencedBackend::new(vec![text_response("should not appear")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let interrupted = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Interrupted { .. }));
+        assert!(
+            interrupted.is_some(),
+            "expected Interrupted event; got: {events:?}"
+        );
+        if let Some(AgentEvent::Interrupted { partial_text }) = interrupted {
+            assert!(
+                partial_text.is_empty(),
+                "partial text should be empty for pre-cancel; got: '{partial_text}'"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_token_none_preserves_legacy_behavior() {
+        let backend = SequencedBackend::new(vec![text_response("hello")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete without token; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "must not have Interrupted without cancel; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_between_tool_iterations_stops_before_next_backend_call() {
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        // First response: a tool call followed immediately by Done.
+        // Second response: blocks until cancel fires, then emits nothing.
+        // This simulates the agent completing one iteration then being
+        // cancelled before the second backend response arrives.
+        let second_cancel = cancel.clone();
+        let backend = {
+            struct TwoPhaseBackend {
+                first_done: std::sync::atomic::AtomicBool,
+                cancel: CancellationToken,
+            }
+
+            #[async_trait]
+            impl LlmBackend for TwoPhaseBackend {
+                async fn send_message(
+                    &self,
+                    _: &[Message],
+                    _: &RequestConfig,
+                ) -> Result<BoxStream<Result<StreamEvent>>> {
+                    let already_called = self
+                        .first_done
+                        .swap(true, std::sync::atomic::Ordering::SeqCst);
+                    if !already_called {
+                        // First call: return a tool use.
+                        Ok(Box::pin(futures::stream::iter(tool_call_response(
+                            "t1", "bash", r#"{}"#,
+                        ))))
+                    } else {
+                        // Second call: block until cancelled, return nothing.
+                        let cancel = self.cancel.clone();
+                        let s = stream::unfold(cancel, |token| async move {
+                            token.cancelled().await;
+                            None
+                        });
+                        Ok(Box::pin(s))
+                    }
+                }
+            }
+
+            TwoPhaseBackend {
+                first_done: std::sync::atomic::AtomicBool::new(false),
+                cancel: second_cancel,
+            }
+        };
+
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "done"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        // Cancel shortly after the agent starts the second (blocking) iteration.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), None, Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Should have seen the tool use + result from the completed first iteration.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolUseReceived { .. })),
+            "expected ToolUseReceived"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { .. })),
+            "expected ToolResult"
+        );
+        // Final text from second backend call must not appear.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear — second iteration was cancelled"
+        );
+        // The stream should have ended with Interrupted.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted event; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tool_confirmation_emits_interrupted_without_second_confirmation() {
+        // Scenario: LLM emits two write-tool calls in one turn (Always mode).
+        // User presses Esc during the first confirmation dialog.
+        // Expected: agent declines both tools and emits Interrupted — no second
+        // ToolConfirmationRequired should appear, and the loop does not continue.
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        let backend = SequencedBackend::new(vec![
+            {
+                // Two tool calls in a single response.
+                let mut events = tool_call_response("t1", "bash", r#"{}"#);
+                // Remove the trailing Done; append a second tool call then Done.
+                events.pop(); // remove Done
+                events.extend(vec![
+                    Ok(StreamEvent::ToolUseStart {
+                        id: "t2".to_string(),
+                        name: "bash".to_string(),
+                    }),
+                    Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+                    Ok(StreamEvent::ToolUseDone),
+                    Ok(StreamEvent::Done),
+                ]);
+                events
+            },
+            text_response("should not be reached"),
+        ]);
+
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Always,
+        )
+        .await;
+
+        // Simulate Esc: send Rejected for the first dialog and cancel the token.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            // Give the agent time to emit the first ToolConfirmationRequired.
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx), Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // First ToolConfirmationRequired must appear (the user sees the dialog).
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolConfirmationRequired { index: 1, .. })),
+            "expected first ToolConfirmationRequired; got: {events:?}"
+        );
+        // Second ToolConfirmationRequired must NOT appear (Esc cancelled it).
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolConfirmationRequired { index: 2, .. })),
+            "second ToolConfirmationRequired must not appear after Esc; got: {events:?}"
+        );
+        // Stream must end with Interrupted, not ResponseComplete.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted after Esc during confirmation; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear after cancellation; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tool_execution_returns_promptly_with_cancelled_result() {
+        // Regression: prior to wiring cancel_token into execute_tool_calls, pressing
+        // Esc while a long-running tool was executing left the agent blocked on
+        // tool.execute().await for the full duration of the tool — freezing the TUI
+        // until the tool finished. With the fix, the in-flight execute future is
+        // dropped and a "Tool cancelled by user." result is produced.
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        // Backend: emit a single 5-second sleep tool call.
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::ToolUseStart {
+                id: "s1".to_string(),
+                name: "sleep".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"duration_ms":5000}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Done),
+        ]]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(SleepTool { duration_ms: 5000 })),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        // Cancel after 100ms — well before the 5s sleep would finish.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("sleep".to_string(), None, Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        // Must complete well under 5s (the tool's natural duration).
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "agent did not interrupt mid-tool; took {}ms (sleep would have taken 5000ms)",
+            elapsed.as_millis()
+        );
+
+        // The cancelled tool result must appear (proof the future was dropped, not awaited).
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ToolResult { content, is_error: true, .. }
+                    if content.contains("cancelled")
+            )),
+            "expected ToolResult with 'cancelled' content; got: {events:?}"
+        );
+
+        // Stream must end with Interrupted.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted; got: {events:?}"
+        );
     }
 }
