@@ -1,8 +1,8 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, DataCursor, TextArea, WrapMode};
 
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
@@ -82,6 +82,30 @@ impl<'a> InputArea<'a> {
                     self.textarea.insert_newline();
                     self.textarea.move_cursor(CursorMove::Up);
                     self.set_mode(InputMode::Insert);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('w'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::WordForward);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('b'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::WordBack);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('e'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    self.textarea.move_cursor(CursorMove::WordEnd);
                     true
                 }
                 _ => false,
@@ -196,6 +220,10 @@ impl<'a> InputArea<'a> {
 
     pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
         frame.render_widget(&self.textarea, area);
+    }
+
+    pub fn cursor(&self) -> DataCursor {
+        self.textarea.cursor()
     }
 }
 
@@ -587,5 +615,90 @@ mod tests {
         });
         let height = input.height_for_width(60, 24);
         assert!(height >= MIN_HEIGHT);
+    }
+
+    #[test]
+    fn normal_mode_w_moves_cursor_word_forward() {
+        let mut input = InputArea::new();
+        input.set_text("hello world");
+        input.set_mode(InputMode::Normal);
+        // Move cursor to start via Home key equivalent (Head)
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let col_before = input.cursor().1;
+        let consumed = input.input(char_key('w'));
+        assert!(consumed, "w should be consumed in Normal mode");
+        let col_after = input.cursor().1;
+        assert!(
+            col_after > col_before,
+            "w should move cursor forward: before={col_before} after={col_after}"
+        );
+    }
+
+    #[test]
+    fn normal_mode_b_moves_cursor_word_back() {
+        let mut input = InputArea::new();
+        input.set_text("hello world");
+        input.set_mode(InputMode::Normal);
+        // Move cursor forward with w first, then test b moves back
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.input(char_key('w'));
+        let col_before = input.cursor().1;
+        let consumed = input.input(char_key('b'));
+        assert!(consumed, "b should be consumed in Normal mode");
+        let col_after = input.cursor().1;
+        assert!(
+            col_after < col_before,
+            "b should move cursor back: before={col_before} after={col_after}"
+        );
+    }
+
+    #[test]
+    fn normal_mode_e_moves_cursor_word_end() {
+        let mut input = InputArea::new();
+        input.set_text("hello world");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        let col_before = input.cursor().1;
+        let consumed = input.input(char_key('e'));
+        assert!(consumed, "e should be consumed in Normal mode");
+        let col_after = input.cursor().1;
+        assert!(
+            col_after > col_before,
+            "e should move cursor to word end: before={col_before} after={col_after}"
+        );
+    }
+
+    #[test]
+    fn insert_mode_w_inserts_literal() {
+        let mut input = InputArea::new();
+        assert_eq!(input.mode(), &InputMode::Insert);
+        input.input(char_key('w'));
+        assert_eq!(
+            input.text(),
+            "w",
+            "w in Insert mode should insert literal 'w'"
+        );
+    }
+
+    #[test]
+    fn insert_mode_b_inserts_literal() {
+        let mut input = InputArea::new();
+        input.input(char_key('b'));
+        assert_eq!(
+            input.text(),
+            "b",
+            "b in Insert mode should insert literal 'b'"
+        );
+    }
+
+    #[test]
+    fn insert_mode_e_inserts_literal() {
+        let mut input = InputArea::new();
+        input.input(char_key('e'));
+        assert_eq!(
+            input.text(),
+            "e",
+            "e in Insert mode should insert literal 'e'"
+        );
     }
 }
