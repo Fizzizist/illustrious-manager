@@ -2,7 +2,7 @@
 source: src/frontend/tui/input_area.rs
 expression: terminal.backend()
 ---
-"┌Streaming...──────────────────────────┐"
+"┌Streaming... (Esc to interrupt)───────┐"
 "│                                      │"
 "└──────────────────────────────────────┘"
 "                                        "

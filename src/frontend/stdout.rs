@@ -72,7 +72,7 @@ async fn run_with_writer<W: Write, R: BufRead>(
     match format {
         OutputFormat::Text => {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
-            let mut stream = agent.send(prompt, Some(confirm_rx)).await?;
+            let mut stream = agent.send(prompt, Some(confirm_rx), None).await?;
             run_text(&mut stream, writer, confirm_tx, is_tty, stdin, &mut logger).await
         }
         OutputFormat::Json => {
@@ -136,6 +136,10 @@ async fn run_text<W: Write, R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Interrupted { .. } => {
+                writeln!(writer, "\n*(interrupted)*")?;
+                break;
+            }
             AgentEvent::ToolConfirmationRequired { name, input, .. } => {
                 handle_confirmation(confirm_tx.clone(), is_tty, stdin, &name, &input)?;
             }
@@ -191,6 +195,11 @@ async fn collect_response<R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Interrupted { partial_text } => {
+                is_error = true;
+                result_text = partial_text;
+                break;
+            }
             AgentEvent::ToolConfirmationRequired { name, .. } if !is_tty => {
                 let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
                 is_error = true;
@@ -228,7 +237,7 @@ async fn run_json<W: Write, R: BufRead>(
     logger: &mut Option<&mut Logger>,
 ) -> Result<()> {
     let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
-    let mut stream = agent.send(initial_prompt, Some(confirm_rx)).await?;
+    let mut stream = agent.send(initial_prompt, Some(confirm_rx), None).await?;
     let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
 
     let (result, is_error) = apply_schema_retry(
@@ -299,7 +308,7 @@ async fn apply_schema_retry<R: BufRead>(
                         validation_err, schema.raw
                     );
                     let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
-                    let mut retry_stream = agent.send(reprompt, Some(retry_rx)).await?;
+                    let mut retry_stream = agent.send(reprompt, Some(retry_rx), None).await?;
                     let (new_text, new_error) =
                         collect_response(&mut retry_stream, retry_tx, is_tty, stdin, logger)
                             .await?;
