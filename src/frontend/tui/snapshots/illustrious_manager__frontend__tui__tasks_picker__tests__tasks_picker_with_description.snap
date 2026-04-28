@@ -1,0 +1,28 @@
+---
+source: src/frontend/tui/tasks_picker.rs
+expression: terminal.backend()
+---
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"        ┌ Tasks (j/k to navigate, q to close) ─────────────────────────┐        "
+"        │> ● implement feature — this is a task with a description     │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        │                                                              │        "
+"        └──────────────────────────────────────────────────────────────┘        "
+"                                                                                "
+"                                                                                "
+"                                                                                "
+"                                                                                "
