@@ -27,13 +27,12 @@ impl SessionPicker {
     }
 
     pub fn selected_id(&self) -> Option<&str> {
-        let idx = self.inner.selected_index()?;
-        self.inner.items.get(idx).map(|s| s.id.as_str())
+        self.inner.selected_item().map(|s| s.id.as_str())
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SessionPickerAction {
         match self.inner.handle_key(key, true) {
-            PickerAction::Select(idx) => match self.inner.items.get(idx) {
+            PickerAction::Select(idx) => match self.inner.items().get(idx) {
                 Some(s) => SessionPickerAction::Select(s.id.clone()),
                 None => SessionPickerAction::None,
             },
@@ -300,5 +299,57 @@ mod tests {
             })
             .expect("draw");
         insta::assert_snapshot!("session_picker_second_selected", terminal.backend());
+    }
+
+    #[test]
+    fn preview_exactly_60_chars_renders_without_ellipsis() {
+        let msg = "a".repeat(60);
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
+        let mut picker = SessionPicker::new(sessions);
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            !rendered.contains('…'),
+            "exactly-60-char preview should not be truncated"
+        );
+    }
+
+    #[test]
+    fn preview_61_chars_renders_with_ellipsis() {
+        let msg = "b".repeat(61);
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
+        let mut picker = SessionPicker::new(sessions);
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains('…'),
+            "61-char preview should be truncated with ellipsis"
+        );
+    }
+
+    #[test]
+    fn preview_multibyte_chars_truncate_on_char_boundary() {
+        // Each '→' is 3 bytes but 1 char; 61 of them → truncated at 60 chars
+        let msg = "→".repeat(61);
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
+        let mut picker = SessionPicker::new(sessions);
+        let backend = ratatui::backend::TestBackend::new(160, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains('…'),
+            "multibyte 61-char preview should be truncated with ellipsis"
+        );
     }
 }

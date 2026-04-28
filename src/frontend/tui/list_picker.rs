@@ -5,7 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 pub struct ListPicker<T> {
-    pub items: Vec<T>,
+    items: Vec<T>,
     state: ListState,
 }
 
@@ -49,6 +49,15 @@ impl<T> ListPicker<T> {
 
     pub fn selected_index(&self) -> Option<usize> {
         self.state.selected()
+    }
+
+    pub fn items(&self) -> &[T] {
+        &self.items
+    }
+
+    pub fn selected_item(&self) -> Option<&T> {
+        let idx = self.state.selected()?;
+        self.items.get(idx)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent, enter_selects: bool) -> PickerAction {

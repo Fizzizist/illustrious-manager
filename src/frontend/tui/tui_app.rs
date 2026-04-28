@@ -1283,6 +1283,47 @@ mod tests {
     }
 
     #[test]
+    fn render_app_with_tasks_picker_overlay_snapshot() {
+        use crate::frontend::tui::TasksPicker;
+        use crate::session::{TaskRecord, TaskStatus};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.model = "test-model".to_string();
+        app.working_dir = std::path::PathBuf::from("/test/project");
+
+        let tasks = vec![
+            TaskRecord {
+                id: 1,
+                title: "implement feature".to_string(),
+                description: None,
+                status: TaskStatus::InProgress,
+                created_at: 1000,
+                updated_at: 1000,
+            },
+            TaskRecord {
+                id: 2,
+                title: "write tests".to_string(),
+                description: None,
+                status: TaskStatus::Pending,
+                created_at: 2000,
+                updated_at: 2000,
+            },
+        ];
+        app.tasks_picker = Some(TasksPicker::new(tasks));
+        app.set_state(AppState::TasksPicker);
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_app_with_tasks_picker_overlay", terminal.backend());
+    }
+
+    #[test]
     fn tool_use_received_preserves_accumulated_text_as_assistant_entry() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.current_response = "Let me look into that.".to_string();
