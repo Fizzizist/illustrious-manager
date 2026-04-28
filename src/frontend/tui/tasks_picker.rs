@@ -28,7 +28,11 @@ impl TasksPicker {
     }
 
     pub fn tasks(&self) -> &[TaskRecord] {
-        &self.inner.items
+        self.inner.items()
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        self.inner.selected_index()
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> TasksPickerAction {
@@ -131,13 +135,13 @@ mod tests {
             make_task(2, "task b", TaskStatus::Completed, 2000),
         ];
         let picker = TasksPicker::new(tasks);
-        assert!(picker.inner.selected_index() == Some(0));
+        assert!(picker.selected_index() == Some(0));
     }
 
     #[test]
     fn new_picker_with_empty_list_has_no_selection() {
         let picker = TasksPicker::new(vec![]);
-        assert!(picker.inner.selected_index().is_none());
+        assert!(picker.selected_index().is_none());
     }
 
     #[test]
@@ -148,10 +152,10 @@ mod tests {
         ];
         let mut picker = TasksPicker::new(tasks);
         picker.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(picker.inner.selected_index(), Some(1));
+        assert_eq!(picker.selected_index(), Some(1));
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(picker.inner.selected_index(), Some(1));
+        assert_eq!(picker.selected_index(), Some(1));
     }
 
     #[test]
@@ -163,9 +167,9 @@ mod tests {
         let mut picker = TasksPicker::new(tasks);
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(picker.inner.selected_index(), Some(0));
+        assert_eq!(picker.selected_index(), Some(0));
         picker.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(picker.inner.selected_index(), Some(0));
+        assert_eq!(picker.selected_index(), Some(0));
     }
 
     #[test]
