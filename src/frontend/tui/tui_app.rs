@@ -23,6 +23,7 @@ use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{InputArea, InputMode};
 use super::session_picker::{SessionPicker, SessionPickerAction};
 use super::status_line::{self, StatusLineInfo, TokenUsage};
+use super::tasks_picker::{TasksPicker, TasksPickerAction};
 use crate::agent::Agent;
 use crate::config::AppConfig;
 use crate::logging::Logger;
@@ -39,6 +40,7 @@ pub enum AppState {
         index: usize,
     },
     SessionPicker,
+    TasksPicker,
 }
 
 pub struct App {
@@ -51,6 +53,7 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
+    pub tasks_picker: Option<TasksPicker>,
     pub usage: TokenUsage,
     pub subagent_usage: TokenUsage,
     /// The input_tokens value reported by the last Usage event. The API always
@@ -76,6 +79,7 @@ impl App {
                 });
             }
             AppState::SessionPicker => self.input.set_mode(InputMode::SessionPicker),
+            AppState::TasksPicker => self.input.set_mode(InputMode::TasksPicker),
         }
     }
 
@@ -90,6 +94,7 @@ impl App {
             viewport_height: 0,
             text_width: 0,
             session_picker: None,
+            tasks_picker: None,
             usage: TokenUsage::default(),
             subagent_usage: TokenUsage::default(),
             last_input_total: 0,
@@ -346,6 +351,10 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     status_line::render_status_line(&info, frame, chunks[2]);
 
     if let Some(ref mut picker) = app.session_picker {
+        picker.render(frame, frame.area());
+    }
+
+    if let Some(ref mut picker) = app.tasks_picker {
         picker.render(frame, frame.area());
     }
 }
@@ -628,6 +637,22 @@ async fn run_app(
                                         }
                                     }
                                     SessionPickerAction::None => {}
+                                }
+                            }
+                        },
+                        AppState::TasksPicker => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key {
+                                break;
+                            }
+                            if let Some(ref mut picker) = app.tasks_picker {
+                                let action = picker.handle_key(key);
+                                if matches!(action, TasksPickerAction::Close) {
+                                    app.tasks_picker = None;
+                                    app.set_state(AppState::Input);
                                 }
                             }
                         },
