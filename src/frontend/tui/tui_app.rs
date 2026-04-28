@@ -65,6 +65,7 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
+    pub pending_g: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -73,15 +74,25 @@ impl App {
         self.state = state;
         match &self.state {
             AppState::Input => self.input.set_mode(InputMode::Insert),
-            AppState::Streaming => self.input.set_mode(InputMode::Streaming),
+            AppState::Streaming => {
+                self.input.set_mode(InputMode::Streaming);
+                self.pending_g = false;
+            }
             AppState::ToolConfirmation { name, input, .. } => {
                 self.input.set_mode(InputMode::ToolConfirmation {
                     name: name.clone(),
                     input: input.clone(),
                 });
+                self.pending_g = false;
             }
-            AppState::SessionPicker => self.input.set_mode(InputMode::SessionPicker),
-            AppState::TasksPicker => self.input.set_mode(InputMode::TasksPicker),
+            AppState::SessionPicker => {
+                self.input.set_mode(InputMode::SessionPicker);
+                self.pending_g = false;
+            }
+            AppState::TasksPicker => {
+                self.input.set_mode(InputMode::TasksPicker);
+                self.pending_g = false;
+            }
         }
     }
 
@@ -104,6 +115,7 @@ impl App {
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
+            pending_g: false,
             tools,
         }
     }
@@ -268,6 +280,7 @@ impl App {
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
+        let is_normal = self.input.mode() == &InputMode::Normal;
         match key {
             KeyEvent {
                 code: KeyCode::Char('u'),
@@ -287,7 +300,33 @@ impl App {
                 self.scroll_down(amount);
                 true
             }
-            _ => false,
+            KeyEvent {
+                code: KeyCode::Char('g'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if is_normal => {
+                if self.pending_g {
+                    self.pending_g = false;
+                    let max = self.max_scroll();
+                    self.scroll_offset = max;
+                } else {
+                    self.pending_g = true;
+                }
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('G'),
+                modifiers,
+                ..
+            } if is_normal && modifiers.contains(KeyModifiers::SHIFT) => {
+                self.scroll_offset = 0;
+                self.pending_g = false;
+                true
+            }
+            _ => {
+                self.pending_g = false;
+                false
+            }
         }
     }
 
@@ -297,6 +336,7 @@ impl App {
         self.last_input_total = 0;
         self.tasks_picker = None;
         self.session_picker = None;
+        self.pending_g = false;
     }
 
     fn max_scroll(&mut self) -> u16 {
@@ -2325,6 +2365,122 @@ mod tests {
         assert!(
             app.cancel_token.is_none(),
             "cancel_token should be cleared after Interrupted"
+        );
+    }
+
+    #[test]
+    fn single_g_sets_pending_flag() {
+        let mut app = app_with_content(10);
+        app.input.set_mode(InputMode::Normal);
+        let before_offset = app.scroll_offset;
+        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&key);
+        assert!(consumed, "g key should be consumed in Normal mode");
+        assert!(app.pending_g, "pending_g should be true after single g");
+        assert_eq!(
+            app.scroll_offset, before_offset,
+            "scroll should not change on single g"
+        );
+    }
+
+    #[test]
+    fn gg_jumps_to_top() {
+        let mut app = app_with_content(10);
+        app.input.set_mode(InputMode::Normal);
+        let max = app.max_scroll();
+        assert!(max > 0, "content should be scrollable");
+        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        app.handle_scroll_key(&g_key);
+        app.handle_scroll_key(&g_key);
+        assert_eq!(
+            app.scroll_offset, max,
+            "gg should set scroll_offset to max_scroll()"
+        );
+        assert!(!app.pending_g, "pending_g should be cleared after gg");
+    }
+
+    #[test]
+    fn capital_g_jumps_to_bottom() {
+        let mut app = app_with_content(10);
+        app.input.set_mode(InputMode::Normal);
+        app.scroll_offset = 20;
+        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        let consumed = app.handle_scroll_key(&key);
+        assert!(consumed, "G should be consumed in Normal mode");
+        assert_eq!(app.scroll_offset, 0, "G should set scroll_offset to 0");
+        assert!(!app.pending_g, "pending_g should be cleared after G");
+    }
+
+    #[test]
+    fn non_g_key_clears_pending_g() {
+        let mut app = app_with_content(10);
+        app.input.set_mode(InputMode::Normal);
+        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        app.handle_scroll_key(&g_key);
+        assert!(app.pending_g);
+        // press 'j' — not a scroll key, falls through
+        let j_key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&j_key);
+        assert!(!consumed, "j should not be consumed by scroll handler");
+        assert!(!app.pending_g, "pending_g should be cleared by non-g key");
+    }
+
+    #[test]
+    fn gg_inert_in_insert_mode() {
+        let mut app = app_with_content(10);
+        // default mode is Insert (from App::new)
+        assert_eq!(app.input.mode(), &InputMode::Insert);
+        let before_offset = app.scroll_offset;
+        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        let consumed1 = app.handle_scroll_key(&g_key);
+        let consumed2 = app.handle_scroll_key(&g_key);
+        assert!(!consumed1, "g should not be consumed in Insert mode");
+        assert!(!consumed2, "g should not be consumed in Insert mode");
+        assert_eq!(
+            app.scroll_offset, before_offset,
+            "scroll should not change in Insert mode"
+        );
+        assert!(
+            !app.pending_g,
+            "pending_g should remain false in Insert mode"
+        );
+    }
+
+    #[test]
+    fn capital_g_inert_in_insert_mode() {
+        let mut app = app_with_content(10);
+        app.scroll_offset = 15;
+        assert_eq!(app.input.mode(), &InputMode::Insert);
+        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        let consumed = app.handle_scroll_key(&key);
+        assert!(!consumed, "G should not be consumed in Insert mode");
+        assert_eq!(
+            app.scroll_offset, 15,
+            "scroll should not change in Insert mode"
+        );
+    }
+
+    #[test]
+    fn ctrl_u_still_works_in_insert_mode() {
+        let mut app = app_with_content(10);
+        app.scroll_offset = 0;
+        app.scroll_up(10);
+        let before = app.scroll_offset;
+        assert!(before > 0);
+        // ctrl-u should work regardless of mode
+        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        let consumed = app.handle_scroll_key(&key);
+        assert!(consumed, "ctrl-u should always be consumed");
+    }
+
+    #[test]
+    fn reset_for_session_switch_clears_pending_g() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.pending_g = true;
+        app.reset_for_session_switch();
+        assert!(
+            !app.pending_g,
+            "pending_g should be false after reset_for_session_switch"
         );
     }
 }
