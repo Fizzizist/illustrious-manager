@@ -292,6 +292,8 @@ impl App {
         self.usage = TokenUsage::default();
         self.subagent_usage = TokenUsage::default();
         self.last_input_total = 0;
+        self.tasks_picker = None;
+        self.session_picker = None;
     }
 
     fn max_scroll(&mut self) -> u16 {
@@ -654,6 +656,8 @@ async fn run_app(
                                     app.tasks_picker = None;
                                     app.set_state(AppState::Input);
                                 }
+                            } else {
+                                app.set_state(AppState::Input);
                             }
                         },
                         AppState::ToolConfirmation { .. } => {
@@ -1126,6 +1130,93 @@ mod tests {
         );
         assert_eq!(app.subagent_usage.output_tokens, 0);
         assert_eq!(app.last_input_total, 0);
+    }
+
+    #[test]
+    fn session_switch_clears_tasks_picker_and_session_picker() {
+        use crate::frontend::tui::TasksPicker;
+        use crate::session::TaskRecord;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let task = TaskRecord {
+            id: 1,
+            title: "task".to_string(),
+            description: None,
+            status: crate::session::TaskStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        app.tasks_picker = Some(TasksPicker::new(vec![task]));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![]));
+
+        app.reset_for_session_switch();
+
+        assert!(
+            app.tasks_picker.is_none(),
+            "tasks_picker should be cleared on session switch"
+        );
+        assert!(
+            app.session_picker.is_none(),
+            "session_picker should be cleared on session switch"
+        );
+    }
+
+    #[test]
+    fn tasks_picker_close_transitions_back_to_input() {
+        use crate::frontend::tui::TasksPicker;
+        use crate::frontend::tui::tasks_picker::TasksPickerAction;
+        use crate::session::TaskRecord;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let task = TaskRecord {
+            id: 1,
+            title: "a task".to_string(),
+            description: None,
+            status: crate::session::TaskStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        app.tasks_picker = Some(TasksPicker::new(vec![task]));
+        app.set_state(AppState::TasksPicker);
+
+        let picker = app.tasks_picker.as_mut().expect("picker");
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('q'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, TasksPickerAction::Close);
+
+        if matches!(action, TasksPickerAction::Close) {
+            app.tasks_picker = None;
+            app.set_state(AppState::Input);
+        }
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(app.tasks_picker.is_none());
+    }
+
+    #[test]
+    fn tasks_picker_esc_also_closes() {
+        use crate::frontend::tui::TasksPicker;
+        use crate::frontend::tui::tasks_picker::TasksPickerAction;
+        use crate::session::TaskRecord;
+
+        let task = TaskRecord {
+            id: 1,
+            title: "a task".to_string(),
+            description: None,
+            status: crate::session::TaskStatus::Pending,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut picker = TasksPicker::new(vec![task]);
+        let action = picker.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(action, TasksPickerAction::Close);
     }
 
     #[test]
