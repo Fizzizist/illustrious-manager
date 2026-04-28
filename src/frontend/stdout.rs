@@ -136,6 +136,7 @@ async fn run_text<W: Write, R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Warn(_) => {}
             AgentEvent::Interrupted { .. } => {
                 writeln!(writer, "\n*(interrupted)*")?;
                 break;
@@ -195,6 +196,7 @@ async fn collect_response<R: BufRead>(
             }
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
+            AgentEvent::Warn(_) => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;
                 result_text = partial_text;
@@ -962,5 +964,43 @@ mod tests {
 
         assert!(is_error);
         assert_eq!(result, "stream error");
+    }
+
+    // ── Interrupted event ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_text_interrupted_writes_marker_and_returns_ok() {
+        let events = vec![
+            AgentEvent::TokenReceived("partial".to_string()),
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+        ];
+        let (result, buf) = run_text_events(events, false).await;
+        result.expect("run_text should return Ok on Interrupted");
+        let output = String::from_utf8(buf).expect("valid utf8");
+        assert!(
+            output.contains("*(interrupted)*"),
+            "output should contain interrupted marker; got: {output:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_response_interrupted_sets_is_error_and_returns_partial_text() {
+        let events = vec![
+            AgentEvent::TokenReceived("partial".to_string()),
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+        ];
+        let (text, is_error) = run_json_collect(events, false).await;
+        assert!(
+            is_error,
+            "collect_response should set is_error=true for Interrupted"
+        );
+        assert_eq!(
+            text, "partial",
+            "collect_response should return partial text for Interrupted"
+        );
     }
 }

@@ -100,6 +100,15 @@ impl Logger {
         Ok(())
     }
 
+    pub fn log_warn(&mut self, message: &str) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[WARN]")?;
+            writeln!(writer, "{}", message)?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
     pub fn log_event(&mut self, event: &AgentEvent) -> Result<()> {
         match event {
             AgentEvent::ToolUseReceived { name, input, .. } => {
@@ -118,6 +127,9 @@ impl Logger {
             }
             AgentEvent::Error(message) => {
                 self.log_error(message)?;
+            }
+            AgentEvent::Warn(message) => {
+                self.log_warn(message)?;
             }
             AgentEvent::Usage {
                 input_tokens,

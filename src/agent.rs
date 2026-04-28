@@ -296,9 +296,9 @@ impl Agent {
 
                     match next_event {
                         None if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) => {
-                            eprintln!(
-                                "warn: stream interrupted by cancellation; any in-flight tool executions will be orphaned"
-                            );
+                            let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                                "stream interrupted by cancellation; any in-flight tool executions will be orphaned".to_string(),
+                            ));
                             persist_partial_and_interrupt(
                                 &text_accumulated,
                                 &history_arc,
@@ -376,9 +376,10 @@ impl Agent {
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
                 {
-                    eprintln!(
-                        "warn: cancellation requested before tool execution; tool calls will be skipped"
-                    );
+                    let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                        "cancellation requested before tool execution; tool calls will be skipped"
+                            .to_string(),
+                    ));
                     persist_partial_and_interrupt(
                         &text_accumulated,
                         &history_arc,
@@ -389,6 +390,7 @@ impl Agent {
                     break;
                 }
 
+                let text_for_cancel = text_accumulated.clone();
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
@@ -404,6 +406,13 @@ impl Agent {
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
                 {
+                    persist_partial_and_interrupt(
+                        &text_for_cancel,
+                        &history_arc,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
                     break;
                 }
 
@@ -494,7 +503,7 @@ async fn execute_tool_calls(
     confirmation_mode: &ConfirmationMode,
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    _cancel_token: Option<CancellationToken>,
+    cancel_token: Option<CancellationToken>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !text_prefix.is_empty() {
@@ -554,21 +563,39 @@ async fn execute_tool_calls(
                 }
             };
             if needs_confirmation {
-                let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    input: input.clone(),
-                    index,
-                });
-                let approved = if let Some(rx) = confirmation_rx.as_mut() {
-                    matches!(rx.next().await, Some(ConfirmationResponse::Approved))
-                } else {
-                    false
-                };
-                if approved {
-                    ToolDecision::Approved
-                } else {
+                // If already cancelled, skip confirmation and decline immediately.
+                if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                     ToolDecision::Declined
+                } else {
+                    let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input: input.clone(),
+                        index,
+                    });
+                    let approved = if let Some(rx) = confirmation_rx.as_mut() {
+                        // Race the confirmation against the cancel token so that Esc
+                        // during a multi-tool confirmation sequence declines all
+                        // remaining tools without requiring another keypress.
+                        if let Some(ref token) = cancel_token {
+                            tokio::select! {
+                                biased;
+                                _ = token.cancelled() => false,
+                                response = rx.next() => {
+                                    matches!(response, Some(ConfirmationResponse::Approved))
+                                }
+                            }
+                        } else {
+                            matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+                        }
+                    } else {
+                        false
+                    };
+                    if approved {
+                        ToolDecision::Approved
+                    } else {
+                        ToolDecision::Declined
+                    }
                 }
             } else {
                 ToolDecision::Approved
@@ -739,6 +766,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             }
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
+            AgentEvent::Warn(_) => {}
         }
     }
 
@@ -2611,6 +2639,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_headless_backend_error_sets_is_error() {
+        use super::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![Err(anyhow::anyhow!("connection lost"))]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let outcome = run_headless(&agent, "fail".to_string()).await;
+
+        assert!(outcome.is_error);
+        let msg = outcome.error_message.expect("should have error message");
+        assert!(msg.contains("connection lost"));
+    }
+
     // ── CancellationToken tests ───────────────────────────────────────────
 
     /// A backend that emits a configurable set of text deltas, then blocks
@@ -2854,6 +2900,87 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
             "expected Interrupted event; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_tool_confirmation_emits_interrupted_without_second_confirmation() {
+        // Scenario: LLM emits two write-tool calls in one turn (Always mode).
+        // User presses Esc during the first confirmation dialog.
+        // Expected: agent declines both tools and emits Interrupted — no second
+        // ToolConfirmationRequired should appear, and the loop does not continue.
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        let cancel = CancellationToken::new();
+        let cancel_for_agent = cancel.clone();
+
+        let backend = SequencedBackend::new(vec![
+            {
+                // Two tool calls in a single response.
+                let mut events = tool_call_response("t1", "bash", r#"{}"#);
+                // Remove the trailing Done; append a second tool call then Done.
+                events.pop(); // remove Done
+                events.extend(vec![
+                    Ok(StreamEvent::ToolUseStart {
+                        id: "t2".to_string(),
+                        name: "bash".to_string(),
+                    }),
+                    Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+                    Ok(StreamEvent::ToolUseDone),
+                    Ok(StreamEvent::Done),
+                ]);
+                events
+            },
+            text_response("should not be reached"),
+        ]);
+
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Always,
+        )
+        .await;
+
+        // Simulate Esc: send Rejected for the first dialog and cancel the token.
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            // Give the agent time to emit the first ToolConfirmationRequired.
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx), Some(cancel_for_agent))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // First ToolConfirmationRequired must appear (the user sees the dialog).
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolConfirmationRequired { index: 1, .. })),
+            "expected first ToolConfirmationRequired; got: {events:?}"
+        );
+        // Second ToolConfirmationRequired must NOT appear (Esc cancelled it).
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolConfirmationRequired { index: 2, .. })),
+            "second ToolConfirmationRequired must not appear after Esc; got: {events:?}"
+        );
+        // Stream must end with Interrupted, not ResponseComplete.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted after Esc during confirmation; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear after cancellation; got: {events:?}"
         );
     }
 }
