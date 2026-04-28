@@ -353,6 +353,28 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     }
 }
 
+/// Handle an Esc keypress. In `Streaming` state, fires the cancel token. In
+/// `ToolConfirmation` state, sends `Rejected` and fires the cancel token. In
+/// all other states, this is a no-op.
+pub fn handle_esc(app: &mut App) {
+    match app.state {
+        AppState::Streaming => {
+            if let Some(token) = &app.cancel_token {
+                token.cancel();
+            }
+        }
+        AppState::ToolConfirmation { .. } => {
+            if let Some(tx) = &app.confirmation_tx {
+                let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
+            }
+            if let Some(token) = &app.cancel_token {
+                token.cancel();
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn handle_agent_event(
     app: &mut App,
     event: AgentEvent,
@@ -475,6 +497,9 @@ pub fn handle_agent_event(
             app.cancel_token = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
+        }
+        AgentEvent::Warn(_) => {
+            // Diagnostic only — written to the debug log via log_event; not shown in UI.
         }
     }
     Ok(())
@@ -668,13 +693,7 @@ async fn run_app(
                                     code: KeyCode::Esc,
                                     ..
                                 } => {
-                                    // Esc during ToolConfirmation: reject and cancel the whole turn.
-                                    if let Some(tx) = &app.confirmation_tx {
-                                        let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
-                                    }
-                                    if let Some(token) = &app.cancel_token {
-                                        token.cancel();
-                                    }
+                                    handle_esc(&mut app);
                                     None
                                 }
                                 KeyEvent {
@@ -719,11 +738,8 @@ async fn run_app(
                                 } = key {
                                     break;
                                 }
-                            if matches!(app.state, AppState::Streaming)
-                                && let KeyEvent { code: KeyCode::Esc, .. } = key
-                                && let Some(token) = &app.cancel_token
-                            {
-                                token.cancel();
+                            if let KeyEvent { code: KeyCode::Esc, .. } = key {
+                                handle_esc(&mut app);
                             }
                         }
                     }
@@ -2026,12 +2042,7 @@ mod tests {
             "token should not be cancelled before Esc"
         );
 
-        // Simulate the Esc handler logic (mirrors the _ => arm in the event loop).
-        if matches!(app.state, AppState::Streaming) {
-            if let Some(t) = &app.cancel_token {
-                t.cancel();
-            }
-        }
+        handle_esc(&mut app);
 
         assert!(
             token.is_cancelled(),
@@ -2047,13 +2058,7 @@ mod tests {
         app.set_state(AppState::Input);
         app.set_input("hello");
 
-        // Esc in Input state must not cancel the token (no streaming is happening).
-        // The _ => arm only fires the token when state == Streaming.
-        if matches!(app.state, AppState::Streaming) {
-            if let Some(t) = &app.cancel_token {
-                t.cancel();
-            }
-        }
+        handle_esc(&mut app);
 
         assert!(
             !token.is_cancelled(),
@@ -2078,13 +2083,7 @@ mod tests {
             index: 1,
         });
 
-        // Simulate Esc in ToolConfirmation: send Rejected + cancel token.
-        if let Some(tx) = &app.confirmation_tx {
-            let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
-        }
-        if let Some(t) = &app.cancel_token {
-            t.cancel();
-        }
+        handle_esc(&mut app);
 
         assert!(
             token.is_cancelled(),
