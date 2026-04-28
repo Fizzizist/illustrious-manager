@@ -1,8 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::session::{TaskRecord, TaskStatus};
 
@@ -59,12 +59,10 @@ impl TasksPicker {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let popup = centered_rect(80, 70, area);
+        let popup = super::centered_rect(80, 70, area);
         frame.render_widget(Clear, popup);
 
         if self.tasks.is_empty() {
-            use ratatui::layout::Alignment;
-            use ratatui::widgets::Paragraph;
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(" Tasks (j/k to navigate, q to close) ");
@@ -95,8 +93,9 @@ impl TasksPicker {
                 };
                 let desc_suffix = match &t.description {
                     Some(d) if !d.is_empty() => {
-                        let truncated: String = d.chars().take(40).collect();
-                        if d.chars().count() > 40 {
+                        let mut chars = d.chars();
+                        let truncated: String = chars.by_ref().take(40).collect();
+                        if chars.next().is_some() {
                             format!(" — {}…", truncated)
                         } else {
                             format!(" — {}", truncated)
@@ -131,19 +130,6 @@ impl TasksPicker {
 pub enum TasksPickerAction {
     None,
     Close,
-}
-
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let w = r.width * percent_x / 100;
-    let h = r.height * percent_y / 100;
-    let x = r.x + (r.width.saturating_sub(w)) / 2;
-    let y = r.y + (r.height.saturating_sub(h)) / 2;
-    Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    }
 }
 
 /// Sort tasks: in-progress first, then pending, then completed; stable by created_at within group.
@@ -323,5 +309,96 @@ mod tests {
             })
             .expect("draw");
         insta::assert_snapshot!("tasks_picker_second_selected", terminal.backend());
+    }
+
+    fn make_task_with_desc(
+        id: i64,
+        title: &str,
+        status: TaskStatus,
+        created_at: i64,
+        desc: &str,
+    ) -> TaskRecord {
+        TaskRecord {
+            id,
+            title: title.to_string(),
+            description: Some(desc.to_string()),
+            status,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    #[test]
+    fn description_short_renders_without_ellipsis() {
+        let task = make_task_with_desc(1, "my task", TaskStatus::Pending, 1000, "short desc");
+        let mut picker = TasksPicker::new(vec![task]);
+        // exercise the render path by drawing to a backend
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains("short desc"),
+            "short description should appear without ellipsis"
+        );
+        assert!(!rendered.contains('…'), "no ellipsis for short description");
+    }
+
+    #[test]
+    fn description_long_renders_with_ellipsis() {
+        // 41 chars — one over the limit
+        let long_desc = "a".repeat(41);
+        let task = make_task_with_desc(1, "my task", TaskStatus::Pending, 1000, &long_desc);
+        let mut picker = TasksPicker::new(vec![task]);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains('…'),
+            "long description should be truncated with ellipsis"
+        );
+    }
+
+    #[test]
+    fn description_exactly_40_chars_renders_without_ellipsis() {
+        let desc = "b".repeat(40);
+        let task = make_task_with_desc(1, "my task", TaskStatus::Pending, 1000, &desc);
+        let mut picker = TasksPicker::new(vec![task]);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| picker.render(frame, frame.area()))
+            .expect("draw");
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            !rendered.contains('…'),
+            "exactly-40-char description should not be truncated"
+        );
+    }
+
+    #[test]
+    fn tasks_picker_with_description_snapshot() {
+        let tasks = vec![make_task_with_desc(
+            1,
+            "implement feature",
+            TaskStatus::InProgress,
+            1000,
+            "this is a task with a description",
+        )];
+        let mut picker = TasksPicker::new(tasks);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                picker.render(frame, area);
+            })
+            .expect("draw");
+        insta::assert_snapshot!("tasks_picker_with_description", terminal.backend());
     }
 }

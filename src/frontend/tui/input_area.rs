@@ -7,6 +7,7 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const STREAMING_TITLE: &str = "Streaming...";
+const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 
@@ -140,9 +141,7 @@ impl<'a> InputArea<'a> {
             InputMode::SessionPicker => Block::default()
                 .borders(Borders::ALL)
                 .title(STREAMING_TITLE),
-            InputMode::TasksPicker => Block::default()
-                .borders(Borders::ALL)
-                .title(STREAMING_TITLE),
+            InputMode::TasksPicker => Block::default().borders(Borders::ALL).title(TASKS_TITLE),
             InputMode::ToolConfirmation { name, .. } => Block::default()
                 .borders(Borders::ALL)
                 .title(format!("Allow '{name}'? [y/n]")),

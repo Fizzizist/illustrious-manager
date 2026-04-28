@@ -72,7 +72,7 @@ impl SessionPicker {
 
     /// Render the session picker as an overlay centred in `area`.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let popup = centered_rect(80, 70, area);
+        let popup = super::centered_rect(80, 70, area);
         frame.render_widget(Clear, popup);
 
         let items: Vec<ListItem> = self
@@ -117,20 +117,6 @@ pub enum SessionPickerAction {
     None,
     Select(String),
     Close,
-}
-
-/// Compute a centred rectangle that is `percent_x`% wide and `percent_y`% tall of `r`.
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let w = r.width * percent_x / 100;
-    let h = r.height * percent_y / 100;
-    let x = r.x + (r.width.saturating_sub(w)) / 2;
-    let y = r.y + (r.height.saturating_sub(h)) / 2;
-    Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    }
 }
 
 #[cfg(test)]
