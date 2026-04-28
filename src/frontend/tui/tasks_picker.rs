@@ -1,91 +1,49 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::widgets::ListItem;
 
 use crate::session::{TaskRecord, TaskStatus};
 
+use super::list_picker::{ListPicker, PickerAction};
+
 pub struct TasksPicker {
-    pub tasks: Vec<TaskRecord>,
-    state: ListState,
+    inner: ListPicker<TaskRecord>,
 }
 
 impl TasksPicker {
     pub fn new(tasks: Vec<TaskRecord>) -> Self {
-        let mut state = ListState::default();
-        if !tasks.is_empty() {
-            state.select(Some(0));
+        Self {
+            inner: ListPicker::new(tasks),
         }
-        Self { tasks, state }
     }
 
     pub fn move_down(&mut self) {
-        if self.tasks.is_empty() {
-            return;
-        }
-        let next = match self.state.selected() {
-            Some(i) => (i + 1).min(self.tasks.len() - 1),
-            None => 0,
-        };
-        self.state.select(Some(next));
+        self.inner.move_down();
     }
 
     pub fn move_up(&mut self) {
-        if self.tasks.is_empty() {
-            return;
-        }
-        let prev = match self.state.selected() {
-            Some(i) => i.saturating_sub(1),
-            None => 0,
-        };
-        self.state.select(Some(prev));
+        self.inner.move_up();
+    }
+
+    pub fn tasks(&self) -> &[TaskRecord] {
+        &self.inner.items
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> TasksPickerAction {
-        match key.code {
-            KeyCode::Char('j') => {
-                self.move_down();
-                TasksPickerAction::None
-            }
-            KeyCode::Char('k') => {
-                self.move_up();
-                TasksPickerAction::None
-            }
-            KeyCode::Enter => TasksPickerAction::None,
-            KeyCode::Char('q') | KeyCode::Esc => TasksPickerAction::Close,
+        match self.inner.handle_key(key, false) {
+            PickerAction::Close => TasksPickerAction::Close,
             _ => TasksPickerAction::None,
         }
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let popup = super::centered_rect(80, 70, area);
-        frame.render_widget(Clear, popup);
-
-        if self.tasks.is_empty() {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Tasks (j/k to navigate, q to close) ");
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-            let msg = Paragraph::new("No tasks yet.")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray));
-            // centre vertically
-            let y_offset = inner.height / 2;
-            let msg_area = Rect {
-                y: inner.y + y_offset,
-                height: 1,
-                ..inner
-            };
-            frame.render_widget(msg, msg_area);
-            return;
-        }
-
-        let items: Vec<ListItem> = self
-            .tasks
-            .iter()
-            .map(|t| {
+        self.inner.render(
+            frame,
+            area,
+            " Tasks (j/k to navigate, q to close) ",
+            |t| {
                 let (glyph, color) = match t.status {
                     TaskStatus::InProgress => ('●', Color::Yellow),
                     TaskStatus::Pending => ('○', Color::DarkGray),
@@ -105,24 +63,9 @@ impl TasksPicker {
                 };
                 let label = format!("{} {}{}", glyph, t.title, desc_suffix);
                 ListItem::new(label).style(Style::default().fg(color))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Tasks (j/k to navigate, q to close) "),
-            )
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> ");
-
-        frame.render_stateful_widget(list, popup, &mut self.state);
+            },
+            Some("No tasks yet."),
+        );
     }
 }
 
@@ -160,6 +103,23 @@ mod tests {
         }
     }
 
+    fn make_task_with_desc(
+        id: i64,
+        title: &str,
+        status: TaskStatus,
+        created_at: i64,
+        desc: &str,
+    ) -> TaskRecord {
+        TaskRecord {
+            id,
+            title: title.to_string(),
+            description: Some(desc.to_string()),
+            status,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -171,13 +131,13 @@ mod tests {
             make_task(2, "task b", TaskStatus::Completed, 2000),
         ];
         let picker = TasksPicker::new(tasks);
-        assert!(picker.state.selected() == Some(0));
+        assert!(picker.inner.selected_index() == Some(0));
     }
 
     #[test]
     fn new_picker_with_empty_list_has_no_selection() {
         let picker = TasksPicker::new(vec![]);
-        assert!(picker.state.selected().is_none());
+        assert!(picker.inner.selected_index().is_none());
     }
 
     #[test]
@@ -188,10 +148,10 @@ mod tests {
         ];
         let mut picker = TasksPicker::new(tasks);
         picker.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(picker.state.selected(), Some(1));
+        assert_eq!(picker.inner.selected_index(), Some(1));
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(picker.state.selected(), Some(1));
+        assert_eq!(picker.inner.selected_index(), Some(1));
     }
 
     #[test]
@@ -203,9 +163,9 @@ mod tests {
         let mut picker = TasksPicker::new(tasks);
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(picker.state.selected(), Some(0));
+        assert_eq!(picker.inner.selected_index(), Some(0));
         picker.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(picker.state.selected(), Some(0));
+        assert_eq!(picker.inner.selected_index(), Some(0));
     }
 
     #[test]
@@ -311,28 +271,10 @@ mod tests {
         insta::assert_snapshot!("tasks_picker_second_selected", terminal.backend());
     }
 
-    fn make_task_with_desc(
-        id: i64,
-        title: &str,
-        status: TaskStatus,
-        created_at: i64,
-        desc: &str,
-    ) -> TaskRecord {
-        TaskRecord {
-            id,
-            title: title.to_string(),
-            description: Some(desc.to_string()),
-            status,
-            created_at,
-            updated_at: created_at,
-        }
-    }
-
     #[test]
     fn description_short_renders_without_ellipsis() {
         let task = make_task_with_desc(1, "my task", TaskStatus::Pending, 1000, "short desc");
         let mut picker = TasksPicker::new(vec![task]);
-        // exercise the render path by drawing to a backend
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -348,7 +290,6 @@ mod tests {
 
     #[test]
     fn description_long_renders_with_ellipsis() {
-        // 41 chars — one over the limit
         let long_desc = "a".repeat(41);
         let task = make_task_with_desc(1, "my task", TaskStatus::Pending, 1000, &long_desc);
         let mut picker = TasksPicker::new(vec![task]);
