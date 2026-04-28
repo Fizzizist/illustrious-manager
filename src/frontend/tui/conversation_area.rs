@@ -1253,17 +1253,49 @@ mod tests {
 
     #[test]
     fn render_markdown_table_reflows_on_resize() {
+        use unicode_width::UnicodeWidthStr;
         let table = "| Column One | Column Two | Column Three | Column Four |\n\
                      |------------|------------|--------------|-------------|\n\
                      | Long value here | Another long value | Yet another long value | Final long value |";
         let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
         let wide_count = entry.wrapped_line_count(80);
+        let wide_render: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let narrow_count = entry.wrapped_line_count(40);
+        let narrow_render: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
             narrow_count >= wide_count,
             "narrow count {narrow_count} should be >= wide count {wide_count}"
         );
-        assert!(!entry.lines().is_empty(), "should have rendered lines");
+        assert_ne!(
+            wide_render, narrow_render,
+            "rendered content must differ between widths 80 and 40"
+        );
+        let wide_max = wide_render.lines().map(|l| l.width()).max().unwrap_or(0);
+        let narrow_max = narrow_render.lines().map(|l| l.width()).max().unwrap_or(0);
+        assert!(
+            narrow_max < wide_max,
+            "narrow max line width {narrow_max} should be < wide max {wide_max}"
+        );
     }
 
     #[test]
@@ -1274,8 +1306,32 @@ mod tests {
         let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
         let wide_count = entry.wrapped_line_count(80);
         let lines_at_80 = entry.lines().len();
+        let render_at_80: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let narrow_count = entry.wrapped_line_count(40);
         let lines_at_40 = entry.lines().len();
+        let render_at_40: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
         assert!(
             narrow_count >= wide_count,
             "narrow wrapped count {narrow_count} should be >= wide {wide_count}"
@@ -1283,6 +1339,30 @@ mod tests {
         assert!(
             lines_at_40 >= lines_at_80,
             "lines_at_40={lines_at_40} should be >= lines_at_80={lines_at_80}"
+        );
+        // Content must actually differ — a bug producing more lines at the same
+        // width would not change the rendered text.
+        assert_ne!(
+            render_at_80, render_at_40,
+            "cached_lines content must change after width-driven rebuild"
+        );
+        // Re-rendering at width 80 again should match the original wide render
+        // (cache is rebuilt cleanly, not corrupted).
+        let _ = entry.wrapped_line_count(80);
+        let render_at_80_again: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            render_at_80, render_at_80_again,
+            "rebuilding back to width 80 should produce identical content"
         );
     }
 }
