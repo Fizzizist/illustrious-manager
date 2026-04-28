@@ -177,13 +177,35 @@ pub fn allocate_widths(natural: &[usize], budget: usize) -> Vec<usize> {
 
     let budget_for_content = budget.saturating_sub(border_overhead);
 
-    natural
+    let mut allocated: Vec<usize> = natural
         .iter()
         .map(|&w| {
-            let shrunk = (w as f64 * budget_for_content as f64 / natural_sum as f64) as usize;
+            let shrunk = w.saturating_mul(budget_for_content) / natural_sum;
             shrunk.max(MIN_COL_WIDTH)
         })
-        .collect()
+        .collect();
+
+    let mut current_sum: usize = allocated.iter().sum();
+    while current_sum > budget_for_content {
+        let mut trimmed = false;
+        let mut order: Vec<usize> = (0..num_cols).collect();
+        order.sort_by(|&a, &b| allocated[b].cmp(&allocated[a]));
+        for &i in &order {
+            if allocated[i] > MIN_COL_WIDTH {
+                allocated[i] -= 1;
+                current_sum -= 1;
+                trimmed = true;
+                if current_sum <= budget_for_content {
+                    break;
+                }
+            }
+        }
+        if !trimmed {
+            break;
+        }
+    }
+
+    allocated
 }
 
 pub fn wrap_cell(text: &str, width: usize) -> Vec<String> {
@@ -433,11 +455,14 @@ mod tests {
 
     #[test]
     fn preprocess_wraps_wide_table_to_budget() {
-        let header = "| LongHeader | LongHeader | LongHeader | LongHeader |";
+        // Wide header forces shrink/wrap; short body cells fit per wrap line so
+        // we can assert they survive intact.
+        let header_wide =
+            "| HeaderColumnOne | HeaderColumnTwo | HeaderColumnThree | HeaderColumnFour |";
         let sep = "| --- | --- | --- | --- |";
-        let row1 = "| Long value 1 | Long value 2 | Long value 3 | Long value 4 |";
-        let row2 = "| Long value 5 | Long value 6 | Long value 7 | Long value 8 |";
-        let input = format!("{}\n{}\n{}\n{}", header, sep, row1, row2);
+        let row1 = "| aaa1xx | bbb1xx | ccc1xx | ddd1xx |";
+        let row2 = "| aaa2 | bbb2 | ccc2 | ddd2 |";
+        let input = format!("{}\n{}\n{}\n{}", header_wide, sep, row1, row2);
 
         let result = preprocess_tables(&input, 40);
 
@@ -448,16 +473,186 @@ mod tests {
                 "line too wide ({line_width}): {line:?}"
             );
         }
+
+        for needle in &[
+            "aaa1xx", "bbb1xx", "ccc1xx", "ddd1xx", "aaa2", "bbb2", "ccc2", "ddd2",
+        ] {
+            assert!(
+                result.contains(needle),
+                "missing cell value {needle:?} in:\n{result}"
+            );
+        }
+    }
+
+    #[test]
+    fn preprocess_pathological_narrow_does_not_panic() {
+        // Acceptance criterion 6: 8-column table at width 30 must not panic;
+        // output must still be a valid fenced code block (overflow fallback).
+        let header = "| A | B | C | D | E | F | G | H |";
+        let sep = "|---|---|---|---|---|---|---|---|";
+        let row = "| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |";
+        let input = format!("{}\n{}\n{}", header, sep, row);
+
+        let result = preprocess_tables(&input, 30);
+
+        assert!(result.contains("```"), "should still be fenced: {result}");
+        assert!(result.contains('│'), "should still have borders: {result}");
+        // All cell contents survive (overflow is the documented fallback).
+        for needle in &["A", "B", "H", "1", "8"] {
+            assert!(result.contains(needle), "missing {needle:?}: {result}");
+        }
+    }
+
+    #[test]
+    fn preprocess_right_alignment_with_wrapping() {
+        // Wide right-aligned cell forced to wrap — every non-empty sub-line
+        // in the right column must be flush right (no trailing spaces between
+        // content and the right border padding).
+        let input =
+            "| Left | Right |\n|:-----|------:|\n| short | a longer value that should wrap |";
+        let result = preprocess_tables(input, 30);
+
+        // Only inspect lines below the header separator (after ╞) — those are
+        // body rows containing the wrapped right-aligned cell.
+        let mut in_body = false;
+        let mut checked_at_least_one = false;
+        for line in result.lines() {
+            if line.starts_with('╞') {
+                in_body = true;
+                continue;
+            }
+            if !in_body || !line.starts_with('│') {
+                continue;
+            }
+            let segments: Vec<&str> = line.split('│').collect();
+            if segments.len() != 4 {
+                continue;
+            }
+            let right_seg = segments[2];
+            // Strip the outer single-space pads.
+            let inner = right_seg
+                .strip_prefix(' ')
+                .and_then(|s| s.strip_suffix(' '))
+                .unwrap_or(right_seg);
+            if inner.trim().is_empty() {
+                continue;
+            }
+            checked_at_least_one = true;
+            // Right-aligned: content flush right, so inner does not end with space.
+            assert!(
+                !inner.ends_with(' '),
+                "right-aligned content not flush right: {line:?}"
+            );
+        }
+        assert!(
+            checked_at_least_one,
+            "expected at least one wrapped right-aligned body sub-line in: {result}"
+        );
+    }
+
+    #[test]
+    fn preprocess_center_alignment_with_wrapping() {
+        // Wide center-aligned cell forced to wrap — sub-lines should be
+        // center-padded (left and right pad differ by at most 1).
+        let input =
+            "| Left | Center |\n|:-----|:------:|\n| short | a longer value that should wrap |";
+        let result = preprocess_tables(input, 30);
+
+        let mut in_body = false;
+        let mut checked = false;
+        for line in result.lines() {
+            if line.starts_with('╞') {
+                in_body = true;
+                continue;
+            }
+            if !in_body || !line.starts_with('│') {
+                continue;
+            }
+            let segments: Vec<&str> = line.split('│').collect();
+            if segments.len() != 4 {
+                continue;
+            }
+            let center_seg = segments[2];
+            let inner = center_seg
+                .strip_prefix(' ')
+                .and_then(|s| s.strip_suffix(' '))
+                .unwrap_or(center_seg);
+            if inner.trim().is_empty() {
+                continue;
+            }
+            checked = true;
+            let leading = inner.len() - inner.trim_start().len();
+            let trailing = inner.len() - inner.trim_end().len();
+            let diff = leading.abs_diff(trailing);
+            assert!(
+                diff <= 1,
+                "center-aligned padding asymmetric (leading={leading}, trailing={trailing}): {line:?}"
+            );
+        }
+        assert!(
+            checked,
+            "expected at least one wrapped center-aligned body sub-line in: {result}"
+        );
     }
 
     #[test]
     fn allocate_widths_proportional_shrink() {
+        // Equal natural widths should produce equal allocated widths.
         let result = allocate_widths(&[20, 20, 20], 40);
         let border_overhead = 3 * 3 + 1;
+        let budget_for_content = 40usize.saturating_sub(border_overhead);
         let sum: usize = result.iter().sum();
-        assert!(sum <= 40usize.saturating_sub(border_overhead));
+        assert!(
+            sum <= budget_for_content,
+            "sum {sum} exceeds content budget {budget_for_content}"
+        );
         for &w in &result {
             assert!(w >= MIN_COL_WIDTH);
+        }
+        // Equal naturals → equal allocations.
+        assert_eq!(result[0], result[1]);
+        assert_eq!(result[1], result[2]);
+    }
+
+    #[test]
+    fn allocate_widths_proportional_shrink_unequal_naturals() {
+        // Unequal naturals should produce unequal allocations roughly proportional to inputs.
+        let natural = vec![10, 30, 60]; // ratios 1:3:6
+        let result = allocate_widths(&natural, 50);
+        let border_overhead = 3 * 3 + 1;
+        let budget_for_content = 50usize.saturating_sub(border_overhead);
+        let sum: usize = result.iter().sum();
+        assert!(
+            sum <= budget_for_content,
+            "sum {sum} exceeds content budget {budget_for_content}"
+        );
+        // Largest natural still gets largest allocation.
+        assert!(result[2] >= result[1], "{result:?}");
+        assert!(result[1] >= result[0], "{result:?}");
+        // Distinct allocations (not collapsed to all-MIN).
+        assert!(result[2] > result[0], "{result:?}");
+        for &w in &result {
+            assert!(w >= MIN_COL_WIDTH);
+        }
+    }
+
+    #[test]
+    fn allocate_widths_skewed_naturals_does_not_overshoot_budget() {
+        // Regression: previously, clamping small columns up to MIN_COL_WIDTH
+        // produced a sum > budget_for_content because surplus was not
+        // redistributed.  See review finding 1.
+        let natural = vec![1, 1, 100, 1, 1];
+        let budget = 40;
+        let result = allocate_widths(&natural, budget);
+        let border_overhead = 5 * 3 + 1;
+        let budget_for_content = budget.saturating_sub(border_overhead);
+        let sum: usize = result.iter().sum();
+        assert!(
+            sum <= budget_for_content,
+            "skewed allocation sum {sum} exceeds content budget {budget_for_content}: {result:?}"
+        );
+        for &w in &result {
+            assert!(w >= MIN_COL_WIDTH, "column below floor: {result:?}");
         }
     }
 
@@ -486,6 +681,37 @@ mod tests {
     #[test]
     fn wrap_cell_empty() {
         assert_eq!(wrap_cell("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_cell_wide_grapheme_at_boundary_fits() {
+        // 🦀 is width 2.  "ab" (width 2) + 🦀 (width 2) = 4 fits at width 4.
+        // Then "cd" wraps to next line.
+        let lines = wrap_cell("ab🦀cd", 4);
+        assert_eq!(lines, vec!["ab🦀".to_owned(), "cd".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 4, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_wide_grapheme_exceeds_remaining_wraps() {
+        // "ab" (width 2) + 🦀 (width 2) = 4 > width 3, so 🦀 starts a new line.
+        let lines = wrap_cell("ab🦀", 3);
+        assert_eq!(lines, vec!["ab".to_owned(), "🦀".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 3, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_cjk_at_boundary() {
+        // 言 and 語 are width 2 each.  Width 4 fits two CJK chars per line.
+        let lines = wrap_cell("言語言語", 4);
+        assert_eq!(lines, vec!["言語".to_owned(), "言語".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 4, "line too wide: {line:?}");
+        }
     }
 
     #[test]
