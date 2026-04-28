@@ -156,6 +156,14 @@ impl Agent {
             .await
     }
 
+    /// Return a snapshot of all tasks in the current session.
+    ///
+    /// # Lock note
+    /// The session `Mutex` is held for the duration of the DB query. `TaskRepo`
+    /// borrows `&Session`, so the guard cannot be dropped before `list()` returns.
+    /// This is acceptable here because `/tasks` is only dispatched from
+    /// `AppState::Input` (no concurrent streaming), and `list()` is a fast
+    /// read-only scan with no user-visible latency impact.
     pub async fn tasks_snapshot(&self) -> anyhow::Result<Vec<crate::session::TaskRecord>> {
         self.session.lock().await.tasks().list(None).await
     }
