@@ -1,5 +1,6 @@
 use crate::agent::Agent;
 use crate::config::AppConfig;
+use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
 use crate::frontend::tui::{ConversationEntry, ConversationRole, SessionPicker};
 use crate::session::list_sessions;
@@ -155,11 +156,46 @@ impl SlashCommand for ModelCommand {
     }
 }
 
+/// Built-in `/tasks` command — opens the tasks picker overlay.
+pub struct TasksCommand;
+
+impl SlashCommand for TasksCommand {
+    fn name(&self) -> &str {
+        "tasks"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            match ctx.agent.tasks_snapshot().await {
+                Ok(mut tasks) => {
+                    sort_tasks(&mut tasks);
+                    ctx.app.tasks_picker = Some(TasksPicker::new(tasks));
+                    ctx.app.set_state(AppState::TasksPicker);
+                }
+                Err(e) => {
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Error,
+                        format!("Failed to load tasks: {e}"),
+                    ));
+                }
+            }
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.register(Box::new(SessionsCommand));
     registry.register(Box::new(ModelCommand));
+    registry.register(Box::new(TasksCommand));
     registry
 }
 
@@ -426,5 +462,96 @@ mod tests {
         {
             Ok(Box::pin(futures::stream::empty()))
         }
+    }
+
+    #[test]
+    fn tasks_command_opens_picker_and_sets_state() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+
+        rt.block_on(async {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("session");
+            let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+            let agent = Arc::new(
+                crate::agent::Agent::new(
+                    Box::new(FakeBackend),
+                    crate::types::RequestConfig {
+                        model: "test".to_string(),
+                        max_tokens: 1024,
+                        tools: vec![],
+                    },
+                    session,
+                )
+                .await,
+            );
+            let cmd = TasksCommand;
+            let mut ctx = CommandContext {
+                app: &mut app,
+                agent,
+                config: &config,
+            };
+            let result = cmd.execute("", &mut ctx).await.expect("execute");
+            assert_eq!(result, DispatchResult::Handled);
+            assert_eq!(ctx.app.state, AppState::TasksPicker);
+            assert!(ctx.app.tasks_picker.is_some());
+        });
+    }
+
+    #[tokio::test]
+    async fn tasks_command_pulls_current_session_tasks() {
+        use crate::session::Session;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+
+        // Pre-populate two tasks
+        session
+            .tasks()
+            .create("task alpha", None)
+            .await
+            .expect("create alpha");
+        session
+            .tasks()
+            .create("task beta", None)
+            .await
+            .expect("create beta");
+
+        let session_arc = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                session_arc,
+            )
+            .await,
+        );
+
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = TasksCommand;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        let picker = ctx.app.tasks_picker.as_ref().expect("picker present");
+        assert_eq!(picker.tasks.len(), 2);
+        // both pending → sorted by created_at, alpha first
+        assert_eq!(picker.tasks[0].title, "task alpha");
+        assert_eq!(picker.tasks[1].title, "task beta");
     }
 }

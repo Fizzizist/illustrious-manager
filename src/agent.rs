@@ -156,6 +156,10 @@ impl Agent {
             .await
     }
 
+    pub async fn tasks_snapshot(&self) -> anyhow::Result<Vec<crate::session::TaskRecord>> {
+        self.session.lock().await.tasks().list(None).await
+    }
+
     /// Checkpoint the WAL of the current session into the main DB file.
     ///
     /// Errors are returned but callers are expected to log and swallow them so
