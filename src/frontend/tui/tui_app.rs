@@ -65,7 +65,7 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
-    pub pending_g: bool,
+    pending_g: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -2481,6 +2481,84 @@ mod tests {
         assert!(
             !app.pending_g,
             "pending_g should be false after reset_for_session_switch"
+        );
+    }
+
+    #[test]
+    fn gg_inert_in_session_picker_state() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::SessionPicker);
+        let before = app.scroll_offset;
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert!(!app.handle_scroll_key(&g));
+        assert!(!app.handle_scroll_key(&g));
+        assert_eq!(app.scroll_offset, before);
+        assert!(!app.pending_g);
+    }
+
+    #[test]
+    fn gg_inert_in_tasks_picker_state() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::TasksPicker);
+        let before = app.scroll_offset;
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert!(!app.handle_scroll_key(&g));
+        assert!(!app.handle_scroll_key(&g));
+        assert_eq!(app.scroll_offset, before);
+        assert!(!app.pending_g);
+    }
+
+    #[test]
+    fn gg_inert_in_tool_confirmation_state() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::ToolConfirmation {
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            index: 1,
+        });
+        let before = app.scroll_offset;
+        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+        assert!(!app.handle_scroll_key(&g));
+        assert!(!app.handle_scroll_key(&g));
+        assert_eq!(app.scroll_offset, before);
+        assert!(!app.pending_g);
+    }
+
+    #[test]
+    fn capital_g_inert_in_session_picker_state() {
+        let mut app = app_with_content(10);
+        app.scroll_offset = 10;
+        app.set_state(AppState::SessionPicker);
+        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert!(!app.handle_scroll_key(&key));
+        assert_eq!(app.scroll_offset, 10);
+    }
+
+    #[test]
+    fn set_state_non_input_clears_pending_g() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.pending_g = true;
+
+        app.set_state(AppState::Streaming);
+        assert!(!app.pending_g, "Streaming state should clear pending_g");
+
+        app.pending_g = true;
+        app.set_state(AppState::SessionPicker);
+        assert!(!app.pending_g, "SessionPicker state should clear pending_g");
+
+        app.pending_g = true;
+        app.set_state(AppState::TasksPicker);
+        assert!(!app.pending_g, "TasksPicker state should clear pending_g");
+
+        app.pending_g = true;
+        app.set_state(AppState::ToolConfirmation {
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            index: 1,
+        });
+        assert!(
+            !app.pending_g,
+            "ToolConfirmation state should clear pending_g"
         );
     }
 }
