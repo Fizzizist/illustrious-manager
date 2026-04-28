@@ -1,114 +1,68 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::ListItem;
 
 use crate::session::SessionSummary;
 
+use super::list_picker::{ListPicker, PickerAction};
+
 pub struct SessionPicker {
-    pub sessions: Vec<SessionSummary>,
-    state: ListState,
+    inner: ListPicker<SessionSummary>,
 }
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionSummary>) -> Self {
-        let mut state = ListState::default();
-        if !sessions.is_empty() {
-            state.select(Some(0));
+        Self {
+            inner: ListPicker::new(sessions),
         }
-        Self { sessions, state }
     }
 
-    /// Move selection down (vim `j`).
     pub fn move_down(&mut self) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        let next = match self.state.selected() {
-            Some(i) => (i + 1).min(self.sessions.len() - 1),
-            None => 0,
-        };
-        self.state.select(Some(next));
+        self.inner.move_down();
     }
 
-    /// Move selection up (vim `k`).
     pub fn move_up(&mut self) {
-        if self.sessions.is_empty() {
-            return;
-        }
-        let prev = match self.state.selected() {
-            Some(i) => i.saturating_sub(1),
-            None => 0,
-        };
-        self.state.select(Some(prev));
+        self.inner.move_up();
     }
 
-    /// Return the currently selected session ID, if any.
     pub fn selected_id(&self) -> Option<&str> {
-        let idx = self.state.selected()?;
-        self.sessions.get(idx).map(|s| s.id.as_str())
+        let idx = self.inner.selected_index()?;
+        self.inner.items.get(idx).map(|s| s.id.as_str())
     }
 
-    /// Handle a key event. Returns a `SessionPickerAction` indicating what happened.
     pub fn handle_key(&mut self, key: KeyEvent) -> SessionPickerAction {
-        match key.code {
-            KeyCode::Char('j') => {
-                self.move_down();
-                SessionPickerAction::None
-            }
-            KeyCode::Char('k') => {
-                self.move_up();
-                SessionPickerAction::None
-            }
-            KeyCode::Enter => match self.selected_id() {
-                Some(id) => SessionPickerAction::Select(id.to_string()),
+        match self.inner.handle_key(key, true) {
+            PickerAction::Select(idx) => match self.inner.items.get(idx) {
+                Some(s) => SessionPickerAction::Select(s.id.clone()),
                 None => SessionPickerAction::None,
             },
-            KeyCode::Char('q') | KeyCode::Esc => SessionPickerAction::Close,
-            _ => SessionPickerAction::None,
+            PickerAction::Close => SessionPickerAction::Close,
+            PickerAction::None => SessionPickerAction::None,
         }
     }
 
-    /// Render the session picker as an overlay centred in `area`.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let popup = super::centered_rect(80, 70, area);
-        frame.render_widget(Clear, popup);
-
-        let items: Vec<ListItem> = self
-            .sessions
-            .iter()
-            .map(|s| {
+        self.inner.render(
+            frame,
+            area,
+            " Sessions (j/k to navigate, Enter to open, q to close) ",
+            |s| {
                 let preview = if s.first_user_message.is_empty() {
                     "(no messages)".to_string()
                 } else {
-                    let truncated: String =
-                        s.first_user_message.chars().take(60).collect::<String>();
-                    if s.first_user_message.chars().count() > 60 {
+                    let mut chars = s.first_user_message.chars();
+                    let truncated: String = chars.by_ref().take(60).collect();
+                    if chars.next().is_some() {
                         format!("{}…", truncated)
                     } else {
                         truncated
                     }
                 };
                 ListItem::new(format!("{}  {}", s.id.get(..8).unwrap_or(&s.id), preview))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Sessions (j/k to navigate, Enter to open, q to close) "),
-            )
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> ");
-
-        frame.render_stateful_widget(list, popup, &mut self.state);
+            },
+            None,
+        );
     }
 }
 
@@ -279,7 +233,6 @@ mod tests {
     #[test]
     fn render_session_picker_empty() {
         let mut picker = SessionPicker::new(vec![]);
-
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -288,7 +241,6 @@ mod tests {
                 picker.render(frame, area);
             })
             .expect("draw");
-
         insta::assert_snapshot!("session_picker_empty", terminal.backend());
     }
 
@@ -312,7 +264,6 @@ mod tests {
             },
         ];
         let mut picker = SessionPicker::new(sessions);
-
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -321,7 +272,6 @@ mod tests {
                 picker.render(frame, area);
             })
             .expect("draw");
-
         insta::assert_snapshot!("session_picker_with_sessions", terminal.backend());
     }
 
@@ -341,7 +291,6 @@ mod tests {
         ];
         let mut picker = SessionPicker::new(sessions);
         picker.move_down();
-
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -350,7 +299,6 @@ mod tests {
                 picker.render(frame, area);
             })
             .expect("draw");
-
         insta::assert_snapshot!("session_picker_second_selected", terminal.backend());
     }
 }

@@ -549,9 +549,9 @@ mod tests {
         let result = cmd.execute("", &mut ctx).await.expect("execute");
         assert_eq!(result, DispatchResult::Handled);
         let picker = ctx.app.tasks_picker.as_ref().expect("picker present");
-        assert_eq!(picker.tasks.len(), 2);
+        assert_eq!(picker.tasks().len(), 2);
         // both pending → sorted by created_at, alpha first
-        assert_eq!(picker.tasks[0].title, "task alpha");
-        assert_eq!(picker.tasks[1].title, "task beta");
+        assert_eq!(picker.tasks()[0].title, "task alpha");
+        assert_eq!(picker.tasks()[1].title, "task beta");
     }
 }
