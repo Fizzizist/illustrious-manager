@@ -2,7 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders};
-use ratatui_textarea::{CursorMove, DataCursor, TextArea, WrapMode};
+#[cfg(test)]
+use ratatui_textarea::DataCursor;
+use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
@@ -222,7 +224,8 @@ impl<'a> InputArea<'a> {
         frame.render_widget(&self.textarea, area);
     }
 
-    pub fn cursor(&self) -> DataCursor {
+    #[cfg(test)]
+    pub(super) fn cursor(&self) -> DataCursor {
         self.textarea.cursor()
     }
 }
@@ -622,15 +625,13 @@ mod tests {
         let mut input = InputArea::new();
         input.set_text("hello world");
         input.set_mode(InputMode::Normal);
-        // Move cursor to start via Home key equivalent (Head)
         input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let col_before = input.cursor().1;
         let consumed = input.input(char_key('w'));
         assert!(consumed, "w should be consumed in Normal mode");
-        let col_after = input.cursor().1;
-        assert!(
-            col_after > col_before,
-            "w should move cursor forward: before={col_before} after={col_after}"
+        assert_eq!(
+            input.cursor().1,
+            6,
+            "w from col 0 on 'hello world' should land at col 6 (start of 'world')"
         );
     }
 
@@ -639,16 +640,14 @@ mod tests {
         let mut input = InputArea::new();
         input.set_text("hello world");
         input.set_mode(InputMode::Normal);
-        // Move cursor forward with w first, then test b moves back
         input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('w'));
-        let col_before = input.cursor().1;
+        input.input(char_key('w')); // now at col 6
         let consumed = input.input(char_key('b'));
         assert!(consumed, "b should be consumed in Normal mode");
-        let col_after = input.cursor().1;
-        assert!(
-            col_after < col_before,
-            "b should move cursor back: before={col_before} after={col_after}"
+        assert_eq!(
+            input.cursor().1,
+            0,
+            "b from col 6 on 'hello world' should return to col 0"
         );
     }
 
@@ -658,13 +657,12 @@ mod tests {
         input.set_text("hello world");
         input.set_mode(InputMode::Normal);
         input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let col_before = input.cursor().1;
         let consumed = input.input(char_key('e'));
         assert!(consumed, "e should be consumed in Normal mode");
-        let col_after = input.cursor().1;
-        assert!(
-            col_after > col_before,
-            "e should move cursor to word end: before={col_before} after={col_after}"
+        assert_eq!(
+            input.cursor().1,
+            4,
+            "e from col 0 on 'hello world' should land at col 4 (end of 'hello')"
         );
     }
 
