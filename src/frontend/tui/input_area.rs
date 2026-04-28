@@ -7,6 +7,8 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
+const SESSIONS_TITLE: &str = " Sessions ";
+const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 
@@ -16,6 +18,7 @@ pub enum InputMode {
     Normal,
     Streaming,
     SessionPicker,
+    TasksPicker,
     ToolConfirmation {
         name: String,
         input: serde_json::Value,
@@ -136,9 +139,10 @@ impl<'a> InputArea<'a> {
             InputMode::Streaming => Block::default()
                 .borders(Borders::ALL)
                 .title(STREAMING_TITLE),
-            InputMode::SessionPicker => Block::default()
-                .borders(Borders::ALL)
-                .title(STREAMING_TITLE),
+            InputMode::SessionPicker => {
+                Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
+            }
+            InputMode::TasksPicker => Block::default().borders(Borders::ALL).title(TASKS_TITLE),
             InputMode::ToolConfirmation { name, .. } => Block::default()
                 .borders(Borders::ALL)
                 .title(format!("Allow '{name}'? [y/n]")),
@@ -157,7 +161,7 @@ impl<'a> InputArea<'a> {
                     .max(MIN_HEIGHT)
                     .min(max_height)
             }
-            InputMode::Streaming | InputMode::SessionPicker => MIN_HEIGHT,
+            InputMode::Streaming | InputMode::SessionPicker | InputMode::TasksPicker => MIN_HEIGHT,
             InputMode::Insert => self.text_height_for_width(width, max_height),
             InputMode::Normal => self.text_height_for_width(width, max_height),
         }
