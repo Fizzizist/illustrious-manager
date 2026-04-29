@@ -51,30 +51,33 @@ pub struct ConversationEntry {
     /// Per-turn 1-based index for tool use / result entries. `None` for other roles.
     pub tool_index: Option<usize>,
     cached_lines: Vec<Line<'static>>,
+    cached_lines_width: u16,
     cached_wrapped_count: u16,
     cached_width: u16,
 }
 
 impl ConversationEntry {
     pub fn new(role: ConversationRole, content: String) -> Self {
-        let cached_lines = render_entry_lines(&role, None, &content);
+        let cached_lines = render_entry_lines(&role, None, &content, 0);
         Self {
             role,
             content,
             tool_index: None,
             cached_lines,
+            cached_lines_width: 0,
             cached_wrapped_count: 0,
             cached_width: 0,
         }
     }
 
     pub fn new_indexed(role: ConversationRole, content: String, index: usize) -> Self {
-        let cached_lines = render_entry_lines(&role, Some(index), &content);
+        let cached_lines = render_entry_lines(&role, Some(index), &content, 0);
         Self {
             role,
             content,
             tool_index: Some(index),
             cached_lines,
+            cached_lines_width: 0,
             cached_wrapped_count: 0,
             cached_width: 0,
         }
@@ -114,6 +117,7 @@ impl ConversationEntry {
             content,
             tool_index: index,
             cached_lines: all_lines,
+            cached_lines_width: u16::MAX,
             cached_wrapped_count: 0,
             cached_width: 0,
         }
@@ -124,6 +128,12 @@ impl ConversationEntry {
     }
 
     pub fn wrapped_line_count(&mut self, text_width: u16) -> u16 {
+        if self.cached_lines_width != u16::MAX && self.cached_lines_width != text_width {
+            self.cached_lines =
+                render_entry_lines(&self.role, self.tool_index, &self.content, text_width);
+            self.cached_lines_width = text_width;
+            self.cached_width = 0;
+        }
         if text_width == self.cached_width && self.cached_width > 0 {
             return self.cached_wrapped_count;
         }
@@ -148,6 +158,7 @@ fn render_role_lines(
     index: Option<usize>,
     content: &str,
     trailing_blank: bool,
+    text_width: u16,
 ) -> Vec<Line<'static>> {
     let label = role_label(role, index);
     let mut lines = Vec::new();
@@ -156,7 +167,8 @@ fn render_role_lines(
         Style::default().fg(role.color()),
     )));
     let display_content = maybe_truncate(content, role);
-    let preprocessed = preprocess_tables(&display_content);
+    let budget = usize::from(text_width).saturating_sub(2);
+    let preprocessed = preprocess_tables(&display_content, budget);
     let rendered = markdown_to_text(&preprocessed);
     for line in rendered.lines {
         let mut prefixed = Line::from(Span::raw("  "));
@@ -177,12 +189,19 @@ fn render_entry_lines(
     role: &ConversationRole,
     index: Option<usize>,
     content: &str,
+    text_width: u16,
 ) -> Vec<Line<'static>> {
-    render_role_lines(role, index, content, true)
+    render_role_lines(role, index, content, true, text_width)
 }
 
-fn render_current_response_lines(current_response: &str) -> Vec<Line<'static>> {
-    render_role_lines(&ConversationRole::Assistant, None, current_response, false)
+fn render_current_response_lines(current_response: &str, text_width: u16) -> Vec<Line<'static>> {
+    render_role_lines(
+        &ConversationRole::Assistant,
+        None,
+        current_response,
+        false,
+        text_width,
+    )
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
@@ -234,7 +253,7 @@ impl<'a> ConversationArea<'a> {
         let response_count = if self.current_response.is_empty() {
             0u16
         } else {
-            let response_lines = render_current_response_lines(self.current_response);
+            let response_lines = render_current_response_lines(self.current_response, text_width);
             estimate_wrapped_count(&response_lines, text_width)
         };
 
@@ -251,7 +270,7 @@ impl<'a> ConversationArea<'a> {
         let response_lines = if self.current_response.is_empty() {
             Vec::new()
         } else {
-            render_current_response_lines(self.current_response)
+            render_current_response_lines(self.current_response, text_width)
         };
         let response_count = if response_lines.is_empty() {
             0u16
@@ -1204,6 +1223,146 @@ mod tests {
         assert_ne!(
             content_a, content_b,
             "adjacent scroll positions should show different content"
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_overflow_wraps_cells() {
+        let table = "| Column One | Column Two | Column Three | Column Four |\n\
+                     |------------|------------|--------------|-------------|\n\
+                     | Long value here | Another long value | Yet another long value | Final long value |";
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(40, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 40, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, "", 0, 20);
+                area_widget.render(frame, rect, 38);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_table_overflow_wraps_cells",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn render_markdown_table_reflows_on_resize() {
+        use unicode_width::UnicodeWidthStr;
+        let table = "| Column One | Column Two | Column Three | Column Four |\n\
+                     |------------|------------|--------------|-------------|\n\
+                     | Long value here | Another long value | Yet another long value | Final long value |";
+        let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
+        let wide_count = entry.wrapped_line_count(80);
+        let wide_render: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let narrow_count = entry.wrapped_line_count(40);
+        let narrow_render: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            narrow_count >= wide_count,
+            "narrow count {narrow_count} should be >= wide count {wide_count}"
+        );
+        assert_ne!(
+            wide_render, narrow_render,
+            "rendered content must differ between widths 80 and 40"
+        );
+        let wide_max = wide_render.lines().map(|l| l.width()).max().unwrap_or(0);
+        let narrow_max = narrow_render.lines().map(|l| l.width()).max().unwrap_or(0);
+        assert!(
+            narrow_max < wide_max,
+            "narrow max line width {narrow_max} should be < wide max {wide_max}"
+        );
+    }
+
+    #[test]
+    fn cached_lines_rebuild_on_width_change() {
+        let table = "| Column One | Column Two | Column Three | Column Four |\n\
+                     |------------|------------|--------------|-------------|\n\
+                     | Long value here | Another long value | Yet another long value | Final long value |";
+        let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
+        let wide_count = entry.wrapped_line_count(80);
+        let lines_at_80 = entry.lines().len();
+        let render_at_80: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let narrow_count = entry.wrapped_line_count(40);
+        let lines_at_40 = entry.lines().len();
+        let render_at_40: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            narrow_count >= wide_count,
+            "narrow wrapped count {narrow_count} should be >= wide {wide_count}"
+        );
+        assert!(
+            lines_at_40 >= lines_at_80,
+            "lines_at_40={lines_at_40} should be >= lines_at_80={lines_at_80}"
+        );
+        // Content must actually differ — a bug producing more lines at the same
+        // width would not change the rendered text.
+        assert_ne!(
+            render_at_80, render_at_40,
+            "cached_lines content must change after width-driven rebuild"
+        );
+        // Re-rendering at width 80 again should match the original wide render
+        // (cache is rebuilt cleanly, not corrupted).
+        let _ = entry.wrapped_line_count(80);
+        let render_at_80_again: String = entry
+            .lines()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            render_at_80, render_at_80_again,
+            "rebuilding back to width 80 should produce identical content"
         );
     }
 }
