@@ -137,6 +137,12 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::ThinkingReceived(text) => {
+                if logger.is_some() {
+                    write!(writer, "// {}", text)?;
+                    writer.flush()?;
+                }
+            }
             AgentEvent::Interrupted { .. } => {
                 writeln!(writer, "\n*(interrupted)*")?;
                 break;
@@ -197,6 +203,7 @@ async fn collect_response<R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;
                 result_text = partial_text;
@@ -789,6 +796,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 1024,
             tools: vec![],
+            thinking: None,
         };
         Arc::new(Agent::new(Box::new(backend), config, session).await)
     }

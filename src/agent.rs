@@ -79,6 +79,14 @@ impl Agent {
         self
     }
 
+    pub fn with_thinking(self, thinking: Option<crate::types::ThinkingConfig>) -> Self {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .thinking = thinking;
+        self
+    }
+
     pub fn with_context_files(self) -> Result<Self> {
         let files = discover_context_files_from_env()?;
         self.load_context_files(files);
@@ -291,6 +299,7 @@ impl Agent {
                 };
 
                 let mut text_accumulated = String::new();
+                let mut thinking_accumulated = String::new();
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
                 let mut stream = backend_stream;
@@ -324,6 +333,10 @@ impl Agent {
                         Some(Ok(StreamEvent::TextDelta(text))) => {
                             text_accumulated.push_str(&text);
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
+                        }
+                        Some(Ok(StreamEvent::ThinkingDelta(text))) => {
+                            thinking_accumulated.push_str(&text);
+                            let _ = event_tx.unbounded_send(AgentEvent::ThinkingReceived(text));
                         }
                         Some(Ok(StreamEvent::ToolUseStart { id, name })) => {
                             current_tool = Some(PendingToolCall {
@@ -366,6 +379,12 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     let mut content = vec![];
+                    if !thinking_accumulated.is_empty() {
+                        content.push(ContentBlock::Thinking {
+                            text: thinking_accumulated.clone(),
+                            signature: String::new(),
+                        });
+                    }
                     if !text_accumulated.is_empty() {
                         content.push(ContentBlock::Text(text_accumulated.clone()));
                     }
@@ -403,9 +422,11 @@ impl Agent {
                 }
 
                 let text_for_cancel = text_accumulated.clone();
+                let thinking_for_cancel = thinking_accumulated.clone();
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
+                    thinking_accumulated,
                     &tools,
                     &confirmation_mode,
                     &mut confirmation_rx,
@@ -425,6 +446,23 @@ impl Agent {
                         &event_tx,
                     )
                     .await;
+                    // Also persist thinking if any
+                    if !thinking_for_cancel.is_empty() {
+                        let thinking_msg = Message {
+                            role: Role::Assistant,
+                            content: vec![ContentBlock::Thinking {
+                                text: thinking_for_cancel,
+                                signature: String::new(),
+                            }],
+                        };
+                        lock(&history_arc).push(thinking_msg.clone());
+                        let _ = session
+                            .lock()
+                            .await
+                            .conversation()
+                            .insert_message(&thinking_msg)
+                            .await;
+                    }
                     break;
                 }
 
@@ -508,9 +546,11 @@ async fn record_error(
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     tool_calls: Vec<PendingToolCall>,
     text_prefix: String,
+    thinking_prefix: String,
     tools: &ToolRegistry,
     confirmation_mode: &ConfirmationMode,
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
@@ -518,6 +558,12 @@ async fn execute_tool_calls(
     cancel_token: Option<CancellationToken>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
+    if !thinking_prefix.is_empty() {
+        assistant_content.push(ContentBlock::Thinking {
+            text: thinking_prefix,
+            signature: String::new(),
+        });
+    }
     if !text_prefix.is_empty() {
         assistant_content.push(ContentBlock::Text(text_prefix));
     }
@@ -805,6 +851,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::ThinkingReceived(_) => {}
         }
     }
 
@@ -916,7 +963,7 @@ impl AgentSpawner {
 
         let agent =
             match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
-                Ok(a) => a,
+                Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
                 Err(e) => {
                     return HeadlessOutcome {
                         text: String::new(),
@@ -975,6 +1022,7 @@ pub async fn spawn_agent_with_selection(
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
         tools: tools.definitions(),
+        thinking: None,
     };
     Ok(Agent::new(selection.backend, request_config, session)
         .await
@@ -1105,6 +1153,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         if let Some(t) = tool {
@@ -1211,6 +1260,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1255,6 +1305,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1300,6 +1351,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1349,6 +1401,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1405,6 +1458,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1706,6 +1760,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1777,6 +1832,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1824,6 +1880,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -1861,6 +1918,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -1899,6 +1957,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -1947,6 +2006,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -2000,6 +2060,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2026,6 +2087,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2055,6 +2117,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2187,6 +2250,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2348,6 +2412,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2490,6 +2555,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2618,6 +2684,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "hi".to_string()).await;
@@ -2643,6 +2710,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2686,6 +2754,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "fail".to_string()).await;

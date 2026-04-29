@@ -143,6 +143,14 @@ model = "gpt-oss:120b"
 # [models.implement]
 # backend = "vertex"
 # model = "claude-sonnet-4-20250514"
+
+# [thinking]
+# Whether extended thinking is enabled
+# enabled = true
+# Thinking mode: "budget" (fixed token count) or "adaptive" (model decides)
+# mode = { type = "adaptive" }
+# Default token budget when mode is "budget"
+# budget_tokens = 8192
 "#;
 
 /// A named model role binding a backend to a specific model string.
@@ -176,6 +184,8 @@ pub struct AppConfig {
     /// the top-level `backend` + `[vertex]`/`[zai]` blocks for back-compat.
     #[serde(default, rename = "models")]
     pub models: BTreeMap<String, ModelRole>,
+    #[serde(default)]
+    pub thinking: Option<crate::types::ThinkingConfig>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -603,6 +613,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -623,6 +634,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -642,6 +654,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -665,6 +678,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -688,6 +702,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -707,6 +722,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -727,6 +743,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
@@ -755,6 +772,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
@@ -781,6 +799,7 @@ mod tests {
             },
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
@@ -803,6 +822,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(
@@ -825,6 +845,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
@@ -878,6 +899,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         config.normalize_back_compat();
         assert!(
@@ -924,6 +946,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         config.normalize_back_compat();
         assert_eq!(
@@ -975,6 +998,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let resolved = config.resolve_role("fast").expect("should resolve");
         assert_eq!(resolved.backend_name, "vertex");
@@ -995,6 +1019,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = config.resolve_role("nonexistent");
         assert!(result.is_err());
@@ -1023,6 +1048,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1058,6 +1084,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1082,6 +1109,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1106,6 +1134,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1130,6 +1159,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1153,6 +1183,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1176,6 +1207,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
@@ -1207,6 +1239,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         config.normalize_back_compat();
 
@@ -1238,6 +1271,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         config.normalize_back_compat();
 
@@ -1267,6 +1301,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         config.normalize_back_compat();
 
@@ -1300,6 +1335,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1336,6 +1372,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let result = validate(&config, None);
         assert!(result.is_ok(), "ollama role with valid config should pass");
@@ -1392,11 +1429,77 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
         assert!(msg.contains("gpt-oss:120b"), "should mention ollama model");
         assert!(msg.contains("ollama.com"), "should mention base_url");
         assert!(!msg.contains("secret-key"), "should not leak API key");
+    }
+
+    // ── Thinking config tests ─────────────────────────────────────────────
+
+    #[test]
+    fn thinking_section_parses_from_toml() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            enabled = true
+            budget_tokens = 16384
+            mode = { type = "adaptive" }
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        let thinking = config.thinking.expect("thinking should be present");
+        assert!(thinking.enabled);
+        assert_eq!(thinking.budget_tokens, 16384);
+        assert_eq!(thinking.mode, crate::types::ThinkingMode::Adaptive);
+    }
+
+    #[test]
+    fn thinking_section_defaults_to_none() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(
+            config.thinking.is_none(),
+            "thinking should be None when not specified"
+        );
+    }
+
+    #[test]
+    fn thinking_budget_mode_parses_correctly() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "budget", tokens = 16384 }
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        let thinking = config.thinking.expect("thinking should be present");
+        assert_eq!(
+            thinking.mode,
+            crate::types::ThinkingMode::Budget { tokens: 16384 }
+        );
+    }
+
+    #[test]
+    fn thinking_adaptive_mode_parses_correctly() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "adaptive" }
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        let thinking = config.thinking.expect("thinking should be present");
+        assert_eq!(thinking.mode, crate::types::ThinkingMode::Adaptive);
     }
 }

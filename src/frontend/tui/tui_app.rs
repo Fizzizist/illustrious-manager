@@ -48,6 +48,7 @@ pub struct App {
     pub input: InputArea<'static>,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
+    pub current_thinking: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
     pub cancel_token: Option<CancellationToken>,
@@ -101,6 +102,7 @@ impl App {
             input: InputArea::new(),
             conversation: Vec::new(),
             current_response: String::new(),
+            current_thinking: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
             cancel_token: None,
@@ -184,6 +186,15 @@ impl App {
                             ConversationEntry::new(entry_role, content.clone())
                         };
                         Some(entry)
+                    }
+                    crate::types::ContentBlock::Thinking { text, .. } => Some(
+                        ConversationEntry::new(ConversationRole::Thinking, text.clone()),
+                    ),
+                    crate::types::ContentBlock::RedactedThinking { .. } => {
+                        Some(ConversationEntry::new(
+                            ConversationRole::Thinking,
+                            "[redacted thinking]".to_string(),
+                        ))
                     }
                 };
                 if let Some(e) = entry {
@@ -441,9 +452,16 @@ pub fn handle_agent_event(
             app.scroll_offset = 0;
         }
         AgentEvent::ResponseComplete(full) => {
+            if !app.current_thinking.is_empty() {
+                app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Thinking,
+                    std::mem::take(&mut app.current_thinking),
+                ));
+            }
             app.conversation
                 .push(ConversationEntry::new(ConversationRole::Assistant, full));
             app.current_response.clear();
+            app.current_thinking.clear();
             app.confirmation_tx = None;
             app.cancel_token = None;
             app.set_state(AppState::Input);
@@ -454,6 +472,7 @@ pub fn handle_agent_event(
             app.conversation
                 .push(ConversationEntry::new(ConversationRole::Error, msg));
             app.current_response.clear();
+            app.current_thinking.clear();
             app.confirmation_tx = None;
             app.cancel_token = None;
             app.set_state(AppState::Input);
@@ -544,6 +563,7 @@ pub fn handle_agent_event(
                 ));
             }
             app.current_response.clear();
+            app.current_thinking.clear();
             app.confirmation_tx = None;
             app.cancel_token = None;
             app.set_state(AppState::Input);
@@ -551,6 +571,9 @@ pub fn handle_agent_event(
         }
         AgentEvent::Warn(_) => {
             // Diagnostic only — written to the debug log via log_event; not shown in UI.
+        }
+        AgentEvent::ThinkingReceived(text) => {
+            app.current_thinking.push_str(&text);
         }
     }
     Ok(())
@@ -974,6 +997,7 @@ mod tests {
                     model: "test".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 session,
             )
@@ -1890,6 +1914,7 @@ mod tests {
                     model: "test".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 initial_session,
             )
@@ -1987,6 +2012,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
+            thinking: None,
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2163,6 +2189,7 @@ mod tests {
                     model: "claude-original".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 session,
             )
@@ -2207,6 +2234,7 @@ mod tests {
                     model: "claude-original".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 session,
             )

@@ -49,6 +49,8 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
                     name.len() + input.to_string().len()
                 }
                 crate::types::ContentBlock::ToolResult { content, .. } => content.len(),
+                crate::types::ContentBlock::Thinking { text, .. } => text.len(),
+                crate::types::ContentBlock::RedactedThinking { .. } => 0,
             })
             .sum();
 
