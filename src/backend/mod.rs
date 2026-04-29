@@ -168,6 +168,7 @@ mod tests {
             model: "test-model".to_string(),
             max_tokens: 1024,
             tools: vec![],
+            thinking: None,
         };
 
         let mut stream = backend
@@ -218,6 +219,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            thinking: None,
         };
         let factory = super::BackendFactory::new(config);
 
@@ -264,6 +266,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            thinking: None,
         };
         let factory = super::BackendFactory::new(config);
 

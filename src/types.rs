@@ -20,6 +20,42 @@ pub enum Role {
     Assistant,
 }
 
+/// Thinking mode for extended thinking requests.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingMode {
+    Budget { tokens: u32 },
+    Adaptive,
+}
+
+/// Thinking configuration for requests that support extended thinking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    pub mode: ThinkingMode,
+    #[serde(default = "default_thinking_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_budget_tokens")]
+    pub budget_tokens: u32,
+}
+
+fn default_thinking_enabled() -> bool {
+    true
+}
+
+fn default_budget_tokens() -> u32 {
+    8192
+}
+
+impl Default for ThinkingConfig {
+    fn default() -> Self {
+        Self {
+            mode: ThinkingMode::Adaptive,
+            enabled: true,
+            budget_tokens: 8192,
+        }
+    }
+}
+
 /// A content block within a message
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
@@ -33,6 +69,13 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
         is_error: bool,
+    },
+    Thinking {
+        text: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
     },
 }
 
@@ -69,6 +112,21 @@ impl Serialize for ContentBlock {
                 map.serialize_entry("tool_use_id", tool_use_id)?;
                 map.serialize_entry("content", content)?;
                 map.serialize_entry("is_error", is_error)?;
+                map.end()
+            }
+            ContentBlock::Thinking { text, signature } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("type", "thinking")?;
+                map.serialize_entry("thinking", text)?;
+                map.serialize_entry("signature", signature)?;
+                map.end()
+            }
+            ContentBlock::RedactedThinking { data } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "redacted_thinking")?;
+                map.serialize_entry("data", data)?;
                 map.end()
             }
         }
@@ -118,6 +176,8 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let mut content = None;
                 let mut is_error = None;
                 let mut text = None;
+                let mut signature = None;
+                let mut data = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -125,6 +185,9 @@ impl<'de> Deserialize<'de> for ContentBlock {
                             type_field = Some(map.next_value()?);
                         }
                         "text" => {
+                            text = Some(map.next_value()?);
+                        }
+                        "thinking" => {
                             text = Some(map.next_value()?);
                         }
                         "id" => {
@@ -144,6 +207,12 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         }
                         "is_error" => {
                             is_error = Some(map.next_value()?);
+                        }
+                        "signature" => {
+                            signature = Some(map.next_value()?);
+                        }
+                        "data" => {
+                            data = Some(map.next_value()?);
                         }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
@@ -166,9 +235,23 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         content: content.ok_or_else(|| de::Error::missing_field("content"))?,
                         is_error: is_error.ok_or_else(|| de::Error::missing_field("is_error"))?,
                     }),
+                    Some("thinking") => Ok(ContentBlock::Thinking {
+                        text: text.ok_or_else(|| de::Error::missing_field("thinking"))?,
+                        signature: signature
+                            .ok_or_else(|| de::Error::missing_field("signature"))?,
+                    }),
+                    Some("redacted_thinking") => Ok(ContentBlock::RedactedThinking {
+                        data: data.ok_or_else(|| de::Error::missing_field("data"))?,
+                    }),
                     Some(other) => Err(de::Error::unknown_variant(
                         other,
-                        &["text", "tool_use", "tool_result"],
+                        &[
+                            "text",
+                            "tool_use",
+                            "tool_result",
+                            "thinking",
+                            "redacted_thinking",
+                        ],
                     )),
                     None => Err(de::Error::missing_field("type")),
                 }
@@ -201,12 +284,14 @@ pub struct RequestConfig {
     pub model: String,
     pub max_tokens: u32,
     pub tools: Vec<ToolDefinition>,
+    pub thinking: Option<ThinkingConfig>,
 }
 
 /// Events emitted by the LLM backend during streaming
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     TextDelta(String),
+    ThinkingDelta(String),
     ToolUseStart {
         id: String,
         name: String,
@@ -226,6 +311,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     TokenReceived(String),
+    ThinkingReceived(String),
     ToolUseReceived {
         id: String,
         name: String,
@@ -400,9 +486,6 @@ mod tests {
 
     #[test]
     fn content_block_text_produces_object_not_string_for_api_compatibility() {
-        // Regression test: Vertex AI / Anthropic API requires content blocks to be
-        // dictionaries, not plain strings. ContentBlock::Text must serialize as
-        // {"type":"text","text":"..."} rather than a bare string.
         let block = ContentBlock::Text("hello".to_string());
         let value = serde_json::to_value(&block).expect("should serialize");
         assert!(
@@ -469,7 +552,10 @@ mod tests {
         let json = serde_json::to_string(&msg).expect("Message should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
         assert_eq!(parsed["role"], "assistant");
-        assert_eq!(parsed["content"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            parsed["content"].as_array().expect("content array").len(),
+            2
+        );
         assert_eq!(parsed["content"][0]["type"], "text");
         assert_eq!(parsed["content"][0]["text"], "Thinking...");
         assert_eq!(parsed["content"][1]["type"], "tool_use");
@@ -571,6 +657,168 @@ mod tests {
             assert_eq!(name, "bash");
             assert_eq!(event_input, input);
             assert_eq!(index, 1);
+        }
+    }
+
+    // ── Thinking types ────────────────────────────────────────────────────
+
+    #[test]
+    fn thinking_content_block_roundtrips_through_serde() {
+        let original = ContentBlock::Thinking {
+            text: "I need to reason about this carefully.".to_string(),
+            signature: "sig_abc123".to_string(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let deserialized: ContentBlock = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn redacted_thinking_content_block_roundtrips_through_serde() {
+        let original = ContentBlock::RedactedThinking {
+            data: "encrypted_blob_data".to_string(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let deserialized: ContentBlock = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn thinking_serializes_to_anthropic_format() {
+        let block = ContentBlock::Thinking {
+            text: "reasoning text".to_string(),
+            signature: "sig123".to_string(),
+        };
+        let json = serde_json::to_string(&block).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["type"], "thinking");
+        assert_eq!(parsed["thinking"], "reasoning text");
+        assert_eq!(parsed["signature"], "sig123");
+    }
+
+    #[test]
+    fn redacted_thinking_serializes_to_anthropic_format() {
+        let block = ContentBlock::RedactedThinking {
+            data: "encrypted".to_string(),
+        };
+        let json = serde_json::to_string(&block).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["type"], "redacted_thinking");
+        assert_eq!(parsed["data"], "encrypted");
+    }
+
+    #[test]
+    fn thinking_deserializes_from_anthropic_json() {
+        let json = r#"{"type":"thinking","thinking":"reasoning text","signature":"sig123"}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        match block {
+            ContentBlock::Thinking { text, signature } => {
+                assert_eq!(text, "reasoning text");
+                assert_eq!(signature, "sig123");
+            }
+            other => panic!("expected Thinking block, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redacted_thinking_deserializes_from_anthropic_json() {
+        let json = r#"{"type":"redacted_thinking","data":"encrypted"}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        match block {
+            ContentBlock::RedactedThinking { data } => {
+                assert_eq!(data, "encrypted");
+            }
+            other => panic!("expected RedactedThinking block, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thinking_mode_budget_serializes_correctly() {
+        let mode = ThinkingMode::Budget { tokens: 4096 };
+        let json = serde_json::to_string(&mode).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["type"], "budget");
+        assert_eq!(parsed["tokens"], 4096);
+    }
+
+    #[test]
+    fn thinking_mode_adaptive_serializes_correctly() {
+        let mode = ThinkingMode::Adaptive;
+        let json = serde_json::to_string(&mode).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["type"], "adaptive");
+    }
+
+    #[test]
+    fn thinking_config_defaults_are_correct() {
+        let config = ThinkingConfig::default();
+        assert_eq!(config.enabled, true);
+        assert_eq!(config.budget_tokens, 8192);
+        assert_eq!(config.mode, ThinkingMode::Adaptive);
+    }
+
+    #[test]
+    fn message_with_thinking_blocks_roundtrips() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "deep reasoning here".to_string(),
+                    signature: "sig_xyz".to_string(),
+                },
+                ContentBlock::Text("Here is my answer.".to_string()),
+            ],
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let deserialized: Message = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(msg, deserialized);
+    }
+
+    #[test]
+    fn backward_compat_old_session_without_thinking() {
+        let json = r#"{
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Hello world"},
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"cmd": "ls"}},
+                {"type": "tool_result", "tool_use_id": "t1", "content": "output", "is_error": false}
+            ]
+        }"#;
+        let msg: Message = serde_json::from_str(json).expect("should deserialize old format");
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.content.len(), 3);
+        assert!(matches!(&msg.content[0], ContentBlock::Text(_)));
+        assert!(matches!(&msg.content[1], ContentBlock::ToolUse { .. }));
+        assert!(matches!(&msg.content[2], ContentBlock::ToolResult { .. }));
+    }
+
+    #[test]
+    fn thinking_config_toml_roundtrip() {
+        let config = ThinkingConfig {
+            mode: ThinkingMode::Budget { tokens: 16384 },
+            enabled: true,
+            budget_tokens: 16384,
+        };
+        let toml_str = toml::to_string(&config).expect("serialize to TOML");
+        let deserialized: ThinkingConfig = toml::from_str(&toml_str).expect("parse from TOML");
+        assert_eq!(config, deserialized);
+    }
+
+    #[test]
+    fn stream_event_thinking_delta_contains_text() {
+        let event = StreamEvent::ThinkingDelta("I am thinking...".to_string());
+        assert!(matches!(event, StreamEvent::ThinkingDelta(_)));
+        if let StreamEvent::ThinkingDelta(text) = event {
+            assert_eq!(text, "I am thinking...");
+        }
+    }
+
+    #[test]
+    fn agent_event_thinking_received_contains_text() {
+        let event = AgentEvent::ThinkingReceived("Let me reason about this.".to_string());
+        assert!(matches!(event, AgentEvent::ThinkingReceived(_)));
+        if let AgentEvent::ThinkingReceived(text) = event {
+            assert_eq!(text, "Let me reason about this.");
         }
     }
 }

@@ -19,6 +19,7 @@ pub enum ConversationRole {
     ToolUse,
     ToolResult,
     Info,
+    Thinking,
 }
 
 impl ConversationRole {
@@ -30,6 +31,7 @@ impl ConversationRole {
             ConversationRole::ToolUse => "[Tool]",
             ConversationRole::ToolResult => "[Result]",
             ConversationRole::Info => "Info",
+            ConversationRole::Thinking => "[Thinking]",
         }
     }
 
@@ -41,6 +43,7 @@ impl ConversationRole {
             ConversationRole::ToolUse => Color::Cyan,
             ConversationRole::ToolResult => Color::Yellow,
             ConversationRole::Info => Color::Magenta,
+            ConversationRole::Thinking => Color::DarkGray,
         }
     }
 }
@@ -793,6 +796,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
+            thinking: None,
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,
