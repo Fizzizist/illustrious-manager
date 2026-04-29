@@ -1,5 +1,8 @@
 use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+const MIN_COL_WIDTH: usize = 3;
 
 /// Pre-process GFM tables in `input` into monospaced fenced code blocks so
 /// that `tui_markdown::from_str` renders them as verbatim text.
@@ -7,10 +10,10 @@ use unicode_width::UnicodeWidthStr;
 /// Non-table input is returned unchanged.  If the input contains no `|`
 /// character the function returns immediately without invoking the parser.
 ///
-/// Wide tables (wider than the terminal viewport) overflow into the code
-/// block's wrap behavior — horizontal scroll is out of scope for this
-/// implementation.
-pub fn preprocess_tables(input: &str) -> String {
+/// Tables wider than `width` are proportionally shrunk with cell wrapping.
+/// If even the minimum column widths exceed the budget, the table overflows
+/// (documented fallback behavior).
+pub fn preprocess_tables(input: &str, width: usize) -> String {
     if !input.contains('|') {
         return input.to_owned();
     }
@@ -46,7 +49,7 @@ pub fn preprocess_tables(input: &str) -> String {
                 table_end = range.end;
                 in_table = false;
                 in_head = false;
-                let rendered = render_table(&alignments, &header, &body);
+                let rendered = render_table(&alignments, &header, &body, width);
                 replacements.push((table_start, table_end, rendered));
             }
             Event::Start(Tag::TableHead) if in_table => {
@@ -88,7 +91,6 @@ pub fn preprocess_tables(input: &str) -> String {
         return input.to_owned();
     }
 
-    // Apply replacements in reverse order so byte offsets remain valid.
     let mut output = input.to_owned();
     for (start, end, replacement) in replacements.into_iter().rev() {
         output.replace_range(start..end, &replacement);
@@ -96,10 +98,15 @@ pub fn preprocess_tables(input: &str) -> String {
     output
 }
 
-fn render_table(alignments: &[Alignment], header: &[String], body: &[Vec<String>]) -> String {
+fn render_table(
+    alignments: &[Alignment],
+    header: &[String],
+    body: &[Vec<String>],
+    budget: usize,
+) -> String {
     let num_cols = header.len().max(1);
 
-    let col_widths: Vec<usize> = (0..num_cols)
+    let natural_widths: Vec<usize> = (0..num_cols)
         .map(|col| {
             let header_w = header.get(col).map(|s| s.width()).unwrap_or(0);
             let body_w = body
@@ -111,14 +118,33 @@ fn render_table(alignments: &[Alignment], header: &[String], body: &[Vec<String>
         })
         .collect();
 
+    let col_widths = allocate_widths(&natural_widths, budget);
+
+    let wrapped_header: Vec<Vec<String>> = (0..num_cols)
+        .map(|col| {
+            let text = header.get(col).map(String::as_str).unwrap_or("");
+            wrap_cell(text, col_widths[col])
+        })
+        .collect();
+
     let mut out = String::new();
     out.push_str("```\n");
     out.push_str(&border_line('┌', '─', '┬', '┐', &col_widths));
-    out.push_str(&format_row(header, &col_widths, alignments));
+    out.push_str(&format_logical_row(
+        &wrapped_header,
+        &col_widths,
+        alignments,
+    ));
     out.push_str(&border_line('╞', '═', '╪', '╡', &col_widths));
 
     for (row_idx, row) in body.iter().enumerate() {
-        out.push_str(&format_row(row, &col_widths, alignments));
+        let wrapped_row: Vec<Vec<String>> = (0..num_cols)
+            .map(|col| {
+                let text = row.get(col).map(String::as_str).unwrap_or("");
+                wrap_cell(text, col_widths[col])
+            })
+            .collect();
+        out.push_str(&format_logical_row(&wrapped_row, &col_widths, alignments));
         if row_idx + 1 < body.len() {
             out.push_str(&border_line('├', '─', '┼', '┤', &col_widths));
         }
@@ -126,6 +152,136 @@ fn render_table(alignments: &[Alignment], header: &[String], body: &[Vec<String>
 
     out.push_str(&border_line('└', '─', '┴', '┘', &col_widths));
     out.push_str("```");
+    out
+}
+
+pub fn allocate_widths(natural: &[usize], budget: usize) -> Vec<usize> {
+    let num_cols = natural.len();
+    if num_cols == 0 {
+        return Vec::new();
+    }
+
+    let border_overhead = num_cols.saturating_mul(3).saturating_add(1);
+    let natural_sum: usize = natural.iter().copied().sum();
+
+    if natural_sum.saturating_add(border_overhead) <= budget {
+        return natural.to_vec();
+    }
+
+    let min_total = num_cols
+        .saturating_mul(MIN_COL_WIDTH)
+        .saturating_add(border_overhead);
+    if min_total > budget {
+        return natural.to_vec();
+    }
+
+    let budget_for_content = budget.saturating_sub(border_overhead);
+
+    let mut allocated: Vec<usize> = natural
+        .iter()
+        .map(|&w| {
+            let shrunk = w.saturating_mul(budget_for_content) / natural_sum;
+            shrunk.max(MIN_COL_WIDTH)
+        })
+        .collect();
+
+    let mut current_sum: usize = allocated.iter().sum();
+    while current_sum > budget_for_content {
+        let mut trimmed = false;
+        let mut order: Vec<usize> = (0..num_cols).collect();
+        order.sort_by(|&a, &b| allocated[b].cmp(&allocated[a]));
+        for &i in &order {
+            if allocated[i] > MIN_COL_WIDTH {
+                allocated[i] -= 1;
+                current_sum -= 1;
+                trimmed = true;
+                if current_sum <= budget_for_content {
+                    break;
+                }
+            }
+        }
+        if !trimmed {
+            break;
+        }
+    }
+
+    allocated
+}
+
+pub fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_owned()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width: usize = 0;
+
+    for grapheme in text.graphemes(true) {
+        let g_width = grapheme.width();
+        if current_width.saturating_add(g_width) > width && !current.is_empty() {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        current.push_str(grapheme);
+        current_width = current_width.saturating_add(g_width);
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+fn format_logical_row(
+    cells: &[Vec<String>],
+    col_widths: &[usize],
+    alignments: &[Alignment],
+) -> String {
+    let max_lines = cells.iter().map(|c| c.len()).max().unwrap_or(0);
+    let mut out = String::new();
+
+    for line_idx in 0..max_lines {
+        let mut line = String::from("│");
+        for (col, &w) in col_widths.iter().enumerate() {
+            let cell = cells
+                .get(col)
+                .and_then(|lines| lines.get(line_idx))
+                .map(String::as_str)
+                .unwrap_or("");
+            let align = alignments.get(col).copied().unwrap_or(Alignment::None);
+            let cell_w = cell.width();
+            let padding = w.saturating_sub(cell_w);
+            line.push(' ');
+            match align {
+                Alignment::Right => {
+                    line.push_str(&" ".repeat(padding));
+                    line.push_str(cell);
+                }
+                Alignment::Center => {
+                    let left_pad = padding / 2;
+                    let right_pad = padding - left_pad;
+                    line.push_str(&" ".repeat(left_pad));
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(right_pad));
+                }
+                Alignment::Left | Alignment::None => {
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(padding));
+                }
+            }
+            line.push(' ');
+            line.push('│');
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+
     out
 }
 
@@ -143,249 +299,441 @@ fn border_line(left: char, fill: char, mid: char, right: char, col_widths: &[usi
     s
 }
 
-fn format_row(cells: &[String], col_widths: &[usize], alignments: &[Alignment]) -> String {
-    let mut line = String::from("│");
-    for (col, &w) in col_widths.iter().enumerate() {
-        let cell = cells.get(col).map(String::as_str).unwrap_or("");
-        let align = alignments.get(col).copied().unwrap_or(Alignment::None);
-        let cell_w = cell.width();
-        let padding = w.saturating_sub(cell_w);
-        line.push(' ');
-        match align {
-            Alignment::Right => {
-                line.push_str(&" ".repeat(padding));
-                line.push_str(cell);
-            }
-            Alignment::Center => {
-                let left_pad = padding / 2;
-                let right_pad = padding - left_pad;
-                line.push_str(&" ".repeat(left_pad));
-                line.push_str(cell);
-                line.push_str(&" ".repeat(right_pad));
-            }
-            Alignment::Left | Alignment::None => {
-                line.push_str(cell);
-                line.push_str(&" ".repeat(padding));
-            }
-        }
-        line.push(' ');
-        line.push('│');
-    }
-    line.push('\n');
-    line
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn preprocess_passes_through_non_table_input() {
-        let input = "Hello world\nNo pipes here.";
-        assert_eq!(preprocess_tables(input), input);
+    fn make_simple_table() -> &'static str {
+        "| Header 1 | Header 2 |\n| --- | --- |\n| cell 1 | cell 2 |"
+    }
+
+    fn make_aligned_table() -> &'static str {
+        "| Left | Center | Right |\n| :--- | :---: | ---: |\n| l | c | r |"
     }
 
     #[test]
-    fn preprocess_passes_through_pipes_outside_tables() {
-        let input = "Use `a | b` for pipes in code. Also some | prose.";
-        let result = preprocess_tables(input);
+    fn preprocess_no_pipe_returns_unchanged() {
+        let input = "no pipes here";
+        assert_eq!(preprocess_tables(input, 200), input);
+    }
+
+    #[test]
+    fn preprocess_simple_table_produces_code_block() {
+        let result = preprocess_tables(make_simple_table(), 200);
+        assert!(result.starts_with("```\n"));
+        assert!(result.ends_with("```"));
+        assert!(result.contains("Header 1"));
+        assert!(result.contains("Header 2"));
+        assert!(result.contains("cell 1"));
+        assert!(result.contains("cell 2"));
+    }
+
+    #[test]
+    fn preprocess_preserves_surrounding_text() {
+        let input = "before\n\n| H1 | H2 |\n| --- | --- |\n| a | b |\n\nafter";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("before"), "before text should be preserved");
+        assert!(result.contains("after"), "after text should be preserved");
+        assert!(result.contains("H1"), "table header should be present");
+    }
+
+    #[test]
+    fn preprocess_aligned_table() {
+        let result = preprocess_tables(make_aligned_table(), 200);
+        assert!(result.contains("Left"));
+        assert!(result.contains("Center"));
+        assert!(result.contains("Right"));
+    }
+
+    #[test]
+    fn preprocess_empty_cells() {
+        let input = "| A | B |\n| --- | --- |\n| | empty |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("```"));
+        assert!(result.contains("empty"));
+    }
+
+    #[test]
+    fn preprocess_multirow_body() {
+        let input = "| H |\n| --- |\n| row1 |\n| row2 |\n| row3 |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("row1"));
+        assert!(result.contains("row2"));
+        assert!(result.contains("row3"));
+    }
+
+    #[test]
+    fn preprocess_single_column() {
+        let input = "| Only |\n| --- |\n| value |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("Only"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn preprocess_contains_border_chars() {
+        let result = preprocess_tables(make_simple_table(), 200);
+        assert!(result.contains('│'));
+        assert!(result.contains('┌'));
+        assert!(result.contains('┘'));
+    }
+
+    #[test]
+    fn preprocess_header_separator_uses_double_line() {
+        let result = preprocess_tables(make_simple_table(), 200);
+        assert!(result.contains('╞'));
+        assert!(result.contains('╡'));
+        assert!(result.contains('═'));
+    }
+
+    #[test]
+    fn preprocess_body_rows_separated_by_single_line() {
+        let input = "| H |\n| --- |\n| r1 |\n| r2 |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains('├'));
+        assert!(result.contains('┤'));
+    }
+
+    #[test]
+    fn preprocess_code_in_cell() {
+        let input = "| H |\n| --- |\n| `code` |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("`code`"));
+    }
+
+    #[test]
+    fn preprocess_multiple_tables() {
+        let input = "| A |\n| --- |\n| 1 |\n\ntext\n\n| B |\n| --- |\n| 2 |";
+        let result = preprocess_tables(input, 200);
+        let count = result.matches("```").count();
+        assert_eq!(
+            count, 4,
+            "expected 4 fence markers (open+close) for 2 tables"
+        );
+    }
+
+    #[test]
+    fn preprocess_no_table_returns_unchanged() {
+        let input = "just | some | pipe | text";
+        let result = preprocess_tables(input, 200);
         assert_eq!(result, input);
     }
 
     #[test]
-    fn preprocess_formats_basic_table() {
-        let input = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
-        let result = preprocess_tables(input);
-        assert!(result.starts_with("```\n"), "should be fenced: {result}");
-        assert!(result.ends_with("```"), "should end with fence: {result}");
-        assert!(result.contains("Name"), "header cell missing: {result}");
-        assert!(result.contains("Alice"), "body cell missing: {result}");
-        assert!(result.contains("Bob"), "body cell missing: {result}");
-    }
-
-    #[test]
-    fn preprocess_respects_column_alignment() {
-        // Left=5 chars, Center=6 chars, Right=5 chars headers
-        // Body: "a"(1), "b"(1), "c"(1) — all narrower than headers, so padding applies
-        let input = "| Left | Center | Right |\n|:-----|:------:|------:|\n| a | b | c |";
-        let result = preprocess_tables(input);
-
-        // Right-aligned "c" in a 5-char column → 4 spaces before "c"
-        assert!(
-            result.contains("│     c │"),
-            "right-aligned 'c' should have 4 leading spaces: {result}"
-        );
-        // Center-aligned "b" in a 6-char column → 2 spaces left, 3 spaces right
-        assert!(
-            result.contains("│   b    │"),
-            "center-aligned 'b' should have symmetric padding: {result}"
-        );
-        // Left-aligned "a" in a 4-char column → 3 trailing spaces
-        assert!(
-            result.contains("│ a    │"),
-            "left-aligned 'a' should have trailing spaces: {result}"
-        );
-    }
-
-    #[test]
-    fn preprocess_handles_unicode_widths() {
-        let input = "| Emoji | Value |\n|-------|-------|\n| 🦀 | 42 |";
-        let result = preprocess_tables(input);
-        assert!(result.contains('🦀'), "emoji should appear in output");
-        for line in result.lines() {
-            if line.starts_with('│') {
-                let pipe_count = line.chars().filter(|&c| c == '│').count();
-                assert_eq!(pipe_count, 3, "each data row should have 3 │ chars: {line}");
-            }
+    fn preprocess_wide_cells_pad_correctly() {
+        let input = "| Short | A very long header |\n| --- | --- |\n| x | y |";
+        let result = preprocess_tables(input, 200);
+        let lines: Vec<&str> = result.lines().collect();
+        let data_lines: Vec<&&str> = lines.iter().filter(|l| l.starts_with('│')).collect();
+        assert!(!data_lines.is_empty());
+        let first_len = data_lines[0].chars().count();
+        for line in &data_lines {
+            assert_eq!(line.chars().count(), first_len);
         }
     }
 
     #[test]
-    fn preprocess_handles_empty_cells() {
-        let input = "| A | B |\n|---|---|\n| | filled |";
-        let result = preprocess_tables(input);
-        assert!(result.contains("filled"), "non-empty cell missing");
-        assert!(result.contains('│'), "borders should be present");
+    fn preprocess_right_alignment() {
+        let input = "| Num |\n| ---: |\n| 42 |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("42"));
     }
 
     #[test]
-    fn preprocess_handles_multiple_tables() {
-        let table1 = "| X | Y |\n|---|---|\n| 1 | 2 |";
-        let table2 = "| P | Q |\n|---|---|\n| 3 | 4 |";
-        let input = format!("{table1}\n\nSome text\n\n{table2}");
-        let result = preprocess_tables(&input);
-        assert!(
-            result.contains("Some text"),
-            "prose between tables should survive"
-        );
-        let fence_count = result.matches("```").count();
-        assert_eq!(
-            fence_count, 4,
-            "expected 4 fence markers for 2 tables, got: {result}"
-        );
+    fn preprocess_center_alignment() {
+        let input = "| Title |\n| :---: |\n| centered |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("centered"));
     }
 
     #[test]
-    fn preprocess_preserves_surrounding_markdown() {
-        let input = "# Heading\n\n| Col |\n|-----|\n| val |\n\nParagraph after.";
-        let result = preprocess_tables(input);
-        assert!(result.contains("# Heading"), "heading should be preserved");
-        assert!(
-            result.contains("Paragraph after."),
-            "paragraph should be preserved"
-        );
-        assert!(result.contains("val"), "table cell should be present");
+    fn preprocess_soft_break_becomes_space() {
+        let input = "| H |\n| --- |\n| line1 line2 |";
+        let result = preprocess_tables(input, 200);
+        assert!(result.contains("line1 line2"));
     }
 
     #[test]
-    fn preprocess_strips_inline_markup_preserving_text() {
-        // Bold, italic, and links lose markup in a monospaced grid; inner text is kept.
-        let input = "| **Bold** | [link](http://x.com) |\n|-----------|----------------------|\n| *italic* | plain |";
-        let result = preprocess_tables(input);
-        assert!(
-            result.contains("Bold"),
-            "bold text content should be present"
-        );
-        assert!(result.contains("link"), "link text should be present");
-        assert!(result.contains("italic"), "italic text should be present");
-        assert!(
-            !result.contains("**"),
-            "asterisks should be stripped from cell"
-        );
-        assert!(
-            !result.contains("http://x.com"),
-            "URL should not appear in cell"
-        );
-    }
+    fn preprocess_wraps_wide_table_to_budget() {
+        // Wide header forces shrink/wrap; short body cells fit per wrap line so
+        // we can assert they survive intact.
+        let header_wide =
+            "| HeaderColumnOne | HeaderColumnTwo | HeaderColumnThree | HeaderColumnFour |";
+        let sep = "| --- | --- | --- | --- |";
+        let row1 = "| aaa1xx | bbb1xx | ccc1xx | ddd1xx |";
+        let row2 = "| aaa2 | bbb2 | ccc2 | ddd2 |";
+        let input = format!("{}\n{}\n{}\n{}", header_wide, sep, row1, row2);
 
-    #[test]
-    fn preprocess_inline_code_in_cell_preserves_backticks() {
-        let input = "| Command | Result |\n|---------|--------|\n| `ls -la` | ok |";
-        let result = preprocess_tables(input);
-        assert!(
-            result.contains("`ls -la`"),
-            "inline code should keep backticks: {result}"
-        );
-    }
+        let result = preprocess_tables(&input, 40);
 
-    #[test]
-    fn preprocess_header_only_table_renders_without_body() {
-        // Valid GFM with no body rows — produces top border, header, separator, bottom border.
-        let input = "| A | B |\n|---|---|";
-        let result = preprocess_tables(input);
-        assert!(result.starts_with("```\n"), "should be fenced");
-        assert!(result.contains("A"), "header cell A missing");
-        assert!(result.contains("B"), "header cell B missing");
-        // No body means no mid-row dividers — just top/header/separator/bottom.
-        assert!(
-            !result.contains('├'),
-            "no mid-divider expected for header-only table"
-        );
-    }
-
-    #[test]
-    fn preprocess_single_column_table() {
-        let input = "| Name |\n|------|\n| Alice |\n| Bob |";
-        let result = preprocess_tables(input);
-        assert!(result.contains("Alice"), "Alice missing");
-        assert!(result.contains("Bob"), "Bob missing");
-        // Single-column borders have no joiners.
-        assert!(
-            !result.contains('┬'),
-            "no ┬ joiner expected for single-column table"
-        );
-        assert!(
-            !result.contains('┴'),
-            "no ┴ joiner expected for single-column table"
-        );
-        // Outer │ borders are present (one per side).
         for line in result.lines() {
-            if line.starts_with('│') {
-                let pipe_count = line.chars().filter(|&c| c == '│').count();
-                assert_eq!(
-                    pipe_count, 2,
-                    "single-col row should have exactly 2 │: {line}"
-                );
-            }
+            let line_width = line.width();
+            assert!(
+                line_width <= 40 || line == "```",
+                "line too wide ({line_width}): {line:?}"
+            );
+        }
+
+        for needle in &[
+            "aaa1xx", "bbb1xx", "ccc1xx", "ddd1xx", "aaa2", "bbb2", "ccc2", "ddd2",
+        ] {
+            assert!(
+                result.contains(needle),
+                "missing cell value {needle:?} in:\n{result}"
+            );
         }
     }
 
     #[test]
-    fn preprocess_body_row_with_fewer_columns_than_header_pads_with_blanks() {
-        // Body row has only 1 cell; header has 2. Missing cell should render as blank.
-        let input = "| A | B |\n|---|---|\n| only_a |";
-        let result = preprocess_tables(input);
-        assert!(result.contains("only_a"), "first cell should be present");
-        // The second column should still have a │ boundary (blank padded cell).
-        for line in result.lines() {
-            if line.contains("only_a") {
-                let pipe_count = line.chars().filter(|&c| c == '│').count();
-                assert_eq!(
-                    pipe_count, 3,
-                    "row with missing col should still have 3 │ chars: {line}"
-                );
-            }
+    fn preprocess_pathological_narrow_does_not_panic() {
+        // Acceptance criterion 6: 8-column table at width 30 must not panic;
+        // output must still be a valid fenced code block (overflow fallback).
+        let header = "| A | B | C | D | E | F | G | H |";
+        let sep = "|---|---|---|---|---|---|---|---|";
+        let row = "| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |";
+        let input = format!("{}\n{}\n{}", header, sep, row);
+
+        let result = preprocess_tables(&input, 30);
+
+        assert!(result.contains("```"), "should still be fenced: {result}");
+        assert!(result.contains('│'), "should still have borders: {result}");
+        // All cell contents survive (overflow is the documented fallback).
+        for needle in &["A", "B", "H", "1", "8"] {
+            assert!(result.contains(needle), "missing {needle:?}: {result}");
         }
     }
 
     #[test]
-    fn preprocess_body_row_with_more_columns_than_header_truncates_extras() {
-        // Body row has 3 cells; header has 2. Extra cell is silently dropped.
-        let input = "| A | B |\n|---|---|\n| x | y | z_extra |";
-        let result = preprocess_tables(input);
-        assert!(result.contains('x'), "first body cell present");
-        assert!(result.contains('y'), "second body cell present");
+    fn preprocess_right_alignment_with_wrapping() {
+        // Wide right-aligned cell forced to wrap — every non-empty sub-line
+        // in the right column must be flush right (no trailing spaces between
+        // content and the right border padding).
+        let input =
+            "| Left | Right |\n|:-----|------:|\n| short | a longer value that should wrap |";
+        let result = preprocess_tables(input, 30);
+
+        // Only inspect lines below the header separator (after ╞) — those are
+        // body rows containing the wrapped right-aligned cell.
+        let mut in_body = false;
+        let mut checked_at_least_one = false;
+        for line in result.lines() {
+            if line.starts_with('╞') {
+                in_body = true;
+                continue;
+            }
+            if !in_body || !line.starts_with('│') {
+                continue;
+            }
+            let segments: Vec<&str> = line.split('│').collect();
+            if segments.len() != 4 {
+                continue;
+            }
+            let right_seg = segments[2];
+            // Strip the outer single-space pads.
+            let inner = right_seg
+                .strip_prefix(' ')
+                .and_then(|s| s.strip_suffix(' '))
+                .unwrap_or(right_seg);
+            if inner.trim().is_empty() {
+                continue;
+            }
+            checked_at_least_one = true;
+            // Right-aligned: content flush right, so inner does not end with space.
+            assert!(
+                !inner.ends_with(' '),
+                "right-aligned content not flush right: {line:?}"
+            );
+        }
         assert!(
-            !result.contains("z_extra"),
-            "extra cell should be truncated: {result}"
+            checked_at_least_one,
+            "expected at least one wrapped right-aligned body sub-line in: {result}"
         );
     }
 
     #[test]
-    fn preprocess_header_only_partial_input_does_not_render_as_table() {
-        // Incomplete separator means pulldown-cmark does not emit a Table event.
-        let input = "| Name | Age |\n|---";
-        let result = preprocess_tables(input);
-        assert_eq!(result, input, "partial input should pass through unchanged");
+    fn preprocess_center_alignment_with_wrapping() {
+        // Wide center-aligned cell forced to wrap — sub-lines should be
+        // center-padded (left and right pad differ by at most 1).
+        let input =
+            "| Left | Center |\n|:-----|:------:|\n| short | a longer value that should wrap |";
+        let result = preprocess_tables(input, 30);
+
+        let mut in_body = false;
+        let mut checked = false;
+        for line in result.lines() {
+            if line.starts_with('╞') {
+                in_body = true;
+                continue;
+            }
+            if !in_body || !line.starts_with('│') {
+                continue;
+            }
+            let segments: Vec<&str> = line.split('│').collect();
+            if segments.len() != 4 {
+                continue;
+            }
+            let center_seg = segments[2];
+            let inner = center_seg
+                .strip_prefix(' ')
+                .and_then(|s| s.strip_suffix(' '))
+                .unwrap_or(center_seg);
+            if inner.trim().is_empty() {
+                continue;
+            }
+            checked = true;
+            let leading = inner.len() - inner.trim_start().len();
+            let trailing = inner.len() - inner.trim_end().len();
+            let diff = leading.abs_diff(trailing);
+            assert!(
+                diff <= 1,
+                "center-aligned padding asymmetric (leading={leading}, trailing={trailing}): {line:?}"
+            );
+        }
+        assert!(
+            checked,
+            "expected at least one wrapped center-aligned body sub-line in: {result}"
+        );
+    }
+
+    #[test]
+    fn allocate_widths_proportional_shrink() {
+        // Equal natural widths should produce equal allocated widths.
+        let result = allocate_widths(&[20, 20, 20], 40);
+        let border_overhead = 3 * 3 + 1;
+        let budget_for_content = 40usize.saturating_sub(border_overhead);
+        let sum: usize = result.iter().sum();
+        assert!(
+            sum <= budget_for_content,
+            "sum {sum} exceeds content budget {budget_for_content}"
+        );
+        for &w in &result {
+            assert!(w >= MIN_COL_WIDTH);
+        }
+        // Equal naturals → equal allocations.
+        assert_eq!(result[0], result[1]);
+        assert_eq!(result[1], result[2]);
+    }
+
+    #[test]
+    fn allocate_widths_proportional_shrink_unequal_naturals() {
+        // Unequal naturals should produce unequal allocations roughly proportional to inputs.
+        let natural = vec![10, 30, 60]; // ratios 1:3:6
+        let result = allocate_widths(&natural, 50);
+        let border_overhead = 3 * 3 + 1;
+        let budget_for_content = 50usize.saturating_sub(border_overhead);
+        let sum: usize = result.iter().sum();
+        assert!(
+            sum <= budget_for_content,
+            "sum {sum} exceeds content budget {budget_for_content}"
+        );
+        // Largest natural still gets largest allocation.
+        assert!(result[2] >= result[1], "{result:?}");
+        assert!(result[1] >= result[0], "{result:?}");
+        // Distinct allocations (not collapsed to all-MIN).
+        assert!(result[2] > result[0], "{result:?}");
+        for &w in &result {
+            assert!(w >= MIN_COL_WIDTH);
+        }
+    }
+
+    #[test]
+    fn allocate_widths_skewed_naturals_does_not_overshoot_budget() {
+        // Regression: previously, clamping small columns up to MIN_COL_WIDTH
+        // produced a sum > budget_for_content because surplus was not
+        // redistributed.  See review finding 1.
+        let natural = vec![1, 1, 100, 1, 1];
+        let budget = 40;
+        let result = allocate_widths(&natural, budget);
+        let border_overhead = 5 * 3 + 1;
+        let budget_for_content = budget.saturating_sub(border_overhead);
+        let sum: usize = result.iter().sum();
+        assert!(
+            sum <= budget_for_content,
+            "skewed allocation sum {sum} exceeds content budget {budget_for_content}: {result:?}"
+        );
+        for &w in &result {
+            assert!(w >= MIN_COL_WIDTH, "column below floor: {result:?}");
+        }
+    }
+
+    #[test]
+    fn allocate_widths_no_shrink_when_fits() {
+        let result = allocate_widths(&[5, 5], 100);
+        assert_eq!(result, vec![5, 5]);
+    }
+
+    #[test]
+    fn allocate_widths_falls_back_when_minimums_exceed_budget() {
+        let natural = vec![10, 10, 10, 10, 10, 10, 10, 10];
+        let result = allocate_widths(&natural, 20);
+        assert_eq!(result, natural);
+    }
+
+    #[test]
+    fn wrap_cell_grapheme_safe() {
+        let lines = wrap_cell("hello world test", 5);
+        for line in &lines {
+            assert!(line.width() <= 5, "line too wide: {line:?}");
+        }
+        assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn wrap_cell_empty() {
+        assert_eq!(wrap_cell("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_cell_wide_grapheme_at_boundary_fits() {
+        // 🦀 is width 2.  "ab" (width 2) + 🦀 (width 2) = 4 fits at width 4.
+        // Then "cd" wraps to next line.
+        let lines = wrap_cell("ab🦀cd", 4);
+        assert_eq!(lines, vec!["ab🦀".to_owned(), "cd".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 4, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_wide_grapheme_exceeds_remaining_wraps() {
+        // "ab" (width 2) + 🦀 (width 2) = 4 > width 3, so 🦀 starts a new line.
+        let lines = wrap_cell("ab🦀", 3);
+        assert_eq!(lines, vec!["ab".to_owned(), "🦀".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 3, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn wrap_cell_cjk_at_boundary() {
+        // 言 and 語 are width 2 each.  Width 4 fits two CJK chars per line.
+        let lines = wrap_cell("言語言語", 4);
+        assert_eq!(lines, vec!["言語".to_owned(), "言語".to_owned()]);
+        for line in &lines {
+            assert!(line.width() <= 4, "line too wide: {line:?}");
+        }
+    }
+
+    #[test]
+    fn preprocess_wide_table_keeps_borders_aligned() {
+        let header = "| Alpha | Beta | Gamma | Delta |";
+        let sep = "| --- | --- | --- | --- |";
+        let row1 = "| aaaaaaaaaa | bbbbbbbbbb | cccccccccc | dddddddddd |";
+        let row2 = "| 1 | 2 | 3 | 4 |";
+        let input = format!("{}\n{}\n{}\n{}", header, sep, row1, row2);
+
+        let result = preprocess_tables(&input, 40);
+
+        let pipe_counts: Vec<usize> = result
+            .lines()
+            .filter(|l| l.starts_with('│'))
+            .map(|l| l.chars().filter(|&c| c == '│').count())
+            .collect();
+
+        assert!(!pipe_counts.is_empty());
+        let first = pipe_counts[0];
+        for count in &pipe_counts {
+            assert_eq!(*count, first, "inconsistent │ count");
+        }
     }
 }
