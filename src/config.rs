@@ -420,9 +420,32 @@ fn toml_value_display(val: &toml::Value) -> String {
     match val {
         toml::Value::String(s) => s.clone(),
         toml::Value::Integer(i) => i.to_string(),
-        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Float(f) => format_float(*f),
         toml::Value::Boolean(b) => b.to_string(),
         other => other.to_string(),
+    }
+}
+
+fn format_float(f: f64) -> String {
+    // Round-trip through f32 to match the precision of the original source value,
+    // which is typically an f32 in Rust. This eliminates f64 representation
+    // artifacts like 0.800000011920929.
+    let as_f32 = f as f32;
+    let as_f64 = as_f32 as f64;
+    // Use enough decimal places to represent the f32 precisely, but trim
+    // trailing zeros for cleanliness.
+    let s = format!("{as_f64:.6}");
+    let trimmed = s.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    if trimmed.is_empty() {
+        "0".to_string()
+    } else {
+        // Ensure at least one decimal place for float identification
+        if !trimmed.contains('.') {
+            format!("{trimmed}.0")
+        } else {
+            trimmed.to_string()
+        }
     }
 }
 

@@ -370,11 +370,15 @@ impl Agent {
                     Err(e) => {
                         let error_str = e.to_string();
                         // Detect context overflow and attempt auto-compact + retry.
-                        let is_context_overflow = error_str.contains("400")
-                            || error_str.contains("context")
+                        let is_context_overflow = error_str.contains("context_length")
+                            || error_str.contains("context_length_exceeded")
+                            || error_str.contains("input too long")
                             || error_str.contains("too many tokens")
-                            || error_str.contains("max_tokens")
-                            || error_str.contains("request too large");
+                            || error_str.contains("max_context")
+                            || error_str.contains("request too large")
+                            || error_str.contains("token limit")
+                            || error_str.contains("input_tokens")
+                            || error_str.contains("context window");
                         if is_context_overflow {
                             if let Some(ref cc) = compaction_config {
                                 let _ = event_tx.unbounded_send(AgentEvent::Warn(

@@ -9,7 +9,7 @@ expression: terminal.backend()
 "│wc, tree                                                  │"
 "│  - tools.bash_denylist: rm, wget, sudo, chmod, chown     │"
 "│  - tools.compaction_keep_recent: 6                       │"
-"│  - tools.compaction_threshold: 0.800000011920929         │"
+"│  - tools.compaction_threshold: 0.8                       │"
 "│  - tools.confirmation: WriteOnly                         │"
 "│  - tools.max_tool_iterations: 25                         │"
 "│  - tools.sandbox_root: .                                 │"
