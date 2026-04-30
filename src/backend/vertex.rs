@@ -13,11 +13,12 @@ use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 /// Required protocol version string for Vertex AI's Anthropic API.
 const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 
-/// Stateful SSE parser that tracks which block indices are tool_use or thinking blocks.
+/// Stateful SSE parser that tracks which block indices are tool_use blocks.
 #[derive(Default)]
 pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
-    thinking_indices: HashSet<u64>,
+    /// Tracks which indices are thinking blocks so we can emit ThinkingSignature at stop.
+    thinking_signatures: HashMap<u64, String>,
     input_tokens: u32,
     /// Buffer for events when multiple events appear in a single SSE chunk
     pub(crate) event_buffer: Vec<StreamEvent>,
@@ -86,13 +87,19 @@ impl VertexSseParser {
                         let index = json["index"].as_u64().ok_or_else(|| {
                             anyhow::anyhow!("content_block_start missing 'index'")
                         })?;
-                        self.thinking_indices.insert(index);
+                        // Signature may be present in content_block_start for some API versions
+                        let sig = json["content_block"]["signature"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        self.thinking_signatures.insert(index, sig);
                     }
                     "redacted_thinking" => {
                         let index = json["index"].as_u64().ok_or_else(|| {
                             anyhow::anyhow!("content_block_start missing 'index'")
                         })?;
-                        self.thinking_indices.insert(index);
+                        // Redacted thinking doesn't need a signature — it carries opaque data
+                        self.thinking_signatures.insert(index, String::new());
                         if let Some(data) = json["content_block"]["data"].as_str() {
                             self.event_buffer
                                 .push(StreamEvent::ThinkingDelta(data.to_string()));
@@ -132,7 +139,9 @@ impl VertexSseParser {
                 if self.tool_use_indices.remove(&index) {
                     self.event_buffer.push(StreamEvent::ToolUseDone);
                 }
-                self.thinking_indices.remove(&index);
+                if let Some(sig) = self.thinking_signatures.remove(&index) {
+                    self.event_buffer.push(StreamEvent::ThinkingSignature(sig));
+                }
             }
             "message_delta" => {
                 let stop_reason = json["delta"]["stop_reason"]
@@ -765,19 +774,23 @@ mod tests {
     }
 
     #[test]
-    fn parser_content_block_stop_after_thinking_returns_none() {
+    fn parser_content_block_stop_after_thinking_emits_signature() {
         let mut parser = VertexSseParser::new();
         parser
-            .parse(r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#)
+            .parse(r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":"sig_test"}}"#)
             .expect("should parse thinking block_start");
         let result = parser
             .parse(r#"{"type":"content_block_stop","index":1}"#)
             .expect("should parse block_stop");
-        assert!(
-            result.is_none(),
-            "stopping a thinking block should return None, got {:?}",
-            result
-        );
+        match result {
+            Some(StreamEvent::ThinkingSignature(sig)) => {
+                assert_eq!(
+                    sig, "sig_test",
+                    "signature should match the one from content_block_start"
+                );
+            }
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        }
     }
 
     #[test]
@@ -789,7 +802,6 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
-                budget_tokens: 16384,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -806,7 +818,6 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
-                budget_tokens: 8192,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -822,7 +833,6 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
-                budget_tokens: 16384,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -853,7 +863,6 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: false,
-                budget_tokens: 8192,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");

@@ -34,16 +34,10 @@ pub struct ThinkingConfig {
     pub mode: ThinkingMode,
     #[serde(default = "default_thinking_enabled")]
     pub enabled: bool,
-    #[serde(default = "default_budget_tokens")]
-    pub budget_tokens: u32,
 }
 
 fn default_thinking_enabled() -> bool {
     true
-}
-
-fn default_budget_tokens() -> u32 {
-    8192
 }
 
 impl Default for ThinkingConfig {
@@ -51,7 +45,6 @@ impl Default for ThinkingConfig {
         Self {
             mode: ThinkingMode::Adaptive,
             enabled: true,
-            budget_tokens: 8192,
         }
     }
 }
@@ -292,6 +285,9 @@ pub struct RequestConfig {
 pub enum StreamEvent {
     TextDelta(String),
     ThinkingDelta(String),
+    /// Signature for the most recent thinking block, emitted at content_block_stop.
+    /// Used by Anthropic to validate thinking blocks on subsequent turns.
+    ThinkingSignature(String),
     ToolUseStart {
         id: String,
         name: String,
@@ -753,7 +749,6 @@ mod tests {
     fn thinking_config_defaults_are_correct() {
         let config = ThinkingConfig::default();
         assert_eq!(config.enabled, true);
-        assert_eq!(config.budget_tokens, 8192);
         assert_eq!(config.mode, ThinkingMode::Adaptive);
     }
 
@@ -797,7 +792,6 @@ mod tests {
         let config = ThinkingConfig {
             mode: ThinkingMode::Budget { tokens: 16384 },
             enabled: true,
-            budget_tokens: 16384,
         };
         let toml_str = toml::to_string(&config).expect("serialize to TOML");
         let deserialized: ThinkingConfig = toml::from_str(&toml_str).expect("parse from TOML");
