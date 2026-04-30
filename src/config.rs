@@ -47,6 +47,14 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
+fn default_compaction_threshold() -> f32 {
+    0.80
+}
+
+fn default_compaction_keep_recent() -> usize {
+    6
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
@@ -59,6 +67,15 @@ pub struct ToolsConfig {
     pub bash_allowlist: Vec<String>,
     #[serde(default = "default_bash_denylist")]
     pub bash_denylist: Vec<String>,
+    /// Model context window size in tokens. When `None`, compaction is disabled.
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    /// Fraction of context window that triggers automatic compaction.
+    #[serde(default = "default_compaction_threshold")]
+    pub compaction_threshold: f32,
+    /// Number of recent messages to keep verbatim during compaction.
+    #[serde(default = "default_compaction_keep_recent")]
+    pub compaction_keep_recent: usize,
 }
 
 impl Default for ToolsConfig {
@@ -69,6 +86,9 @@ impl Default for ToolsConfig {
             max_tool_iterations: default_max_tool_iterations(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
+            context_window_tokens: None,
+            compaction_threshold: default_compaction_threshold(),
+            compaction_keep_recent: default_compaction_keep_recent(),
         }
     }
 }
@@ -1398,5 +1418,32 @@ mod tests {
         assert!(msg.contains("gpt-oss:120b"), "should mention ollama model");
         assert!(msg.contains("ollama.com"), "should mention base_url");
         assert!(!msg.contains("secret-key"), "should not leak API key");
+    }
+
+    #[test]
+    fn tools_config_default_values() {
+        let config = ToolsConfig::default();
+        assert_eq!(config.context_window_tokens, None);
+        assert!(
+            (config.compaction_threshold - 0.80).abs() < 0.01,
+            "default compaction_threshold should be ~0.80"
+        );
+        assert_eq!(config.compaction_keep_recent, 6);
+    }
+
+    #[test]
+    fn tools_config_deserialization_with_compaction() {
+        let toml_str = r#"
+            context_window_tokens = 200000
+            compaction_threshold = 0.75
+            compaction_keep_recent = 4
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.context_window_tokens, Some(200000));
+        assert!(
+            (config.compaction_threshold - 0.75).abs() < 0.01,
+            "compaction_threshold should be 0.75"
+        );
+        assert_eq!(config.compaction_keep_recent, 4);
     }
 }

@@ -28,6 +28,17 @@ pub struct StatusLineInfo<'a> {
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
     pub subagent_usage: Option<&'a TokenUsage>,
+    /// When set, displays a context usage indicator in the status line.
+    pub context_usage: Option<ContextUsageInfo>,
+}
+
+/// Context window usage information for the status line.
+#[derive(Debug, Clone)]
+pub struct ContextUsageInfo {
+    /// Last reported input tokens from the API.
+    pub input_tokens: u32,
+    /// Configured context window size.
+    pub context_window_tokens: u32,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -153,6 +164,38 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     if include_subagent {
         left_spans.push(subagent_span.expect("checked above"));
     }
+
+    // Context usage indicator (e.g. "ctx: 120k/200k")
+    let ctx_span = info.context_usage.as_ref().map(|cu| {
+        let pct = cu.input_tokens as f32 / cu.context_window_tokens as f32;
+        let color = if pct >= 0.90 {
+            Color::Red
+        } else if pct >= 0.75 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let s = format!(
+            " ctx:{}/{} ",
+            format_token_count(cu.input_tokens as u64),
+            format_token_count(cu.context_window_tokens as u64)
+        );
+        Span::styled(s, Style::default().fg(color).bg(STATUS_BG))
+    });
+
+    let include_ctx = if let Some(ref span) = ctx_span {
+        let left_with = left_spans.iter().map(|s| s.width()).sum::<usize>()
+            + span.width()
+            + branch_span.width();
+        left_with + right_width <= total_width
+    } else {
+        false
+    };
+
+    if include_ctx {
+        left_spans.push(ctx_span.expect("checked above"));
+    }
+
     left_spans.push(branch_span);
 
     let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
@@ -213,6 +256,7 @@ mod tests {
             working_dir,
             usage,
             subagent_usage: None,
+            context_usage: None,
         }
     }
 
@@ -513,6 +557,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent_zero),
+            context_usage: None,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -536,6 +581,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_usage: None,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -570,6 +616,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_usage: None,
         };
         // Use a very narrow width where the subagent span won't fit
         let line = build_status_line(&info, 30);
@@ -604,6 +651,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_usage: None,
         };
 
         let backend = ratatui::backend::TestBackend::new(120, 1);
@@ -616,5 +664,166 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
+    }
+
+    #[test]
+    fn status_line_shows_context_usage_when_configured() {
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage {
+            input_tokens: 12500,
+            output_tokens: 3200,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            context_usage: Some(ContextUsageInfo {
+                input_tokens: 120_000,
+                context_window_tokens: 200_000,
+            }),
+        };
+
+        let backend = ratatui::backend::TestBackend::new(120, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 120, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains("120.0k"),
+            "should show input tokens in context usage"
+        );
+        assert!(
+            rendered.contains("200.0k"),
+            "should show context window size"
+        );
+    }
+
+    #[test]
+    fn status_line_hides_context_usage_when_not_configured() {
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage::default();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            context_usage: None,
+        };
+
+        let backend = ratatui::backend::TestBackend::new(80, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            !rendered.contains("ctx:"),
+            "should not show context usage when not configured"
+        );
+    }
+
+    #[test]
+    fn status_line_context_usage_high_pct_shows_red() {
+        let model = "test".to_string();
+        let dir = PathBuf::from("/tmp");
+        let usage = TokenUsage::default();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: None,
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            context_usage: Some(ContextUsageInfo {
+                input_tokens: 190_000,
+                context_window_tokens: 200_000,
+            }),
+        };
+
+        let line = build_status_line(&info, 120);
+        let ctx_span = line.spans.iter().find(|s| s.content.contains("ctx:"));
+        assert!(ctx_span.is_some(), "should have ctx span");
+        assert_eq!(
+            ctx_span.expect("checked").style.fg,
+            Some(Color::Red),
+            "high usage should be red"
+        );
+    }
+
+    #[test]
+    fn status_line_context_usage_medium_pct_shows_yellow() {
+        let model = "test".to_string();
+        let dir = PathBuf::from("/tmp");
+        let usage = TokenUsage::default();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: None,
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            context_usage: Some(ContextUsageInfo {
+                input_tokens: 160_000,
+                context_window_tokens: 200_000,
+            }),
+        };
+
+        let line = build_status_line(&info, 120);
+        let ctx_span = line.spans.iter().find(|s| s.content.contains("ctx:"));
+        assert!(ctx_span.is_some(), "should have ctx span");
+        assert_eq!(
+            ctx_span.expect("checked").style.fg,
+            Some(Color::Yellow),
+            "medium usage should be yellow"
+        );
+    }
+
+    #[test]
+    fn render_status_line_with_context_usage_snapshot() {
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage {
+            input_tokens: 12500,
+            output_tokens: 3200,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            context_usage: Some(ContextUsageInfo {
+                input_tokens: 120_000,
+                context_window_tokens: 200_000,
+            }),
+        };
+
+        let backend = ratatui::backend::TestBackend::new(120, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 120, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_status_line_with_context_usage", terminal.backend());
     }
 }

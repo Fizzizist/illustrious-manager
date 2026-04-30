@@ -90,7 +90,8 @@ const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +101,9 @@ CREATE TABLE IF NOT EXISTS task (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );";
+
+const MIGRATION_ADD_ACTIVE_COLUMN: &str =
+    "ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1";
 
 pub struct Session {
     pub id: String,
@@ -126,6 +130,14 @@ impl Session {
         conn.execute_batch(SCHEMA)
             .await
             .context("Failed to run schema DDL")?;
+
+        // Migrate existing DBs that lack the `active` column.
+        // ALTER TABLE … ADD COLUMN is a no-op if the column already exists in Turso,
+        // but Turso returns an error — so we swallow it.
+        let _ = conn
+            .execute(MIGRATION_ADD_ACTIVE_COLUMN, ())
+            .await
+            .context("Failed to add active column");
 
         Ok(Self {
             id: sess_id,
@@ -719,5 +731,164 @@ mod tests {
             .expect("reopen");
         let task_id = session.tasks().create("t", None).await.expect("create");
         assert_eq!(task_id, 1);
+    }
+
+    #[tokio::test]
+    async fn load_history_returns_only_active() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        let msg1 = Message::text(Role::User, "active msg".to_string());
+        session
+            .conversation()
+            .insert_message(&msg1)
+            .await
+            .expect("insert 1");
+
+        let msg2 = Message::text(Role::Assistant, "inactive msg".to_string());
+        let id2 = session
+            .conversation()
+            .insert_message_returning_id(&msg2)
+            .await
+            .expect("insert 2");
+
+        session
+            .conversation()
+            .deactivate_messages(&[id2])
+            .await
+            .expect("deactivate");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 1, "only active messages should be returned");
+        assert_eq!(
+            history[0].content[0],
+            crate::types::ContentBlock::Text("active msg".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn load_full_history_returns_all() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        let msg1 = Message::text(Role::User, "active msg".to_string());
+        session
+            .conversation()
+            .insert_message(&msg1)
+            .await
+            .expect("insert 1");
+
+        let msg2 = Message::text(Role::Assistant, "inactive msg".to_string());
+        let id2 = session
+            .conversation()
+            .insert_message_returning_id(&msg2)
+            .await
+            .expect("insert 2");
+
+        session
+            .conversation()
+            .deactivate_messages(&[id2])
+            .await
+            .expect("deactivate");
+
+        let full = session
+            .conversation()
+            .load_full_history()
+            .await
+            .expect("load full history");
+        assert_eq!(full.len(), 2, "full history should include inactive");
+        assert!(full[0].2, "first message should be active");
+        assert!(!full[1].2, "second message should be inactive");
+    }
+
+    #[tokio::test]
+    async fn deactivate_messages_marks_inactive() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        let msg = Message::text(Role::User, "to deactivate".to_string());
+        let id = session
+            .conversation()
+            .insert_message_returning_id(&msg)
+            .await
+            .expect("insert");
+
+        session
+            .conversation()
+            .deactivate_messages(&[id])
+            .await
+            .expect("deactivate");
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert!(
+            history.is_empty(),
+            "deactivated message should not appear in load_history"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_adds_active_column() {
+        let dir = TempDir::new().expect("temp dir");
+        let id = uuid::Uuid::now_v7().to_string();
+
+        {
+            let session = Session::new(Some(id.clone()), dir.path().to_path_buf())
+                .await
+                .expect("create");
+            session
+                .conversation()
+                .insert_message(&Message::text(Role::User, "hello".to_string()))
+                .await
+                .expect("insert");
+        }
+
+        // Reopen triggers the migration
+        let session = Session::new(Some(id), dir.path().to_path_buf())
+            .await
+            .expect("reopen");
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(
+            history.len(),
+            1,
+            "migration should preserve existing messages as active"
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivate_messages_with_empty_ids_is_noop() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        let msg = Message::text(Role::User, "hello".to_string());
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
+
+        session
+            .conversation()
+            .deactivate_messages(&[])
+            .await
+            .expect("empty deactivate should succeed");
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1, "message should still be active");
     }
 }

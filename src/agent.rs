@@ -3,6 +3,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendFactory, LlmBackend};
+use crate::compaction::{compute_compaction_plan, compute_truncation_plan};
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -15,6 +16,14 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::join_all;
+
+/// Configuration for automatic context compaction.
+#[derive(Clone)]
+pub struct CompactionConfig {
+    pub context_window_tokens: u32,
+    pub threshold: f32,
+    pub keep_recent: usize,
+}
 
 struct PendingToolCall {
     id: String,
@@ -33,6 +42,10 @@ pub struct Agent {
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
     session: Arc<TokioMutex<Session>>,
+    /// Last input token count reported by the API via Usage events.
+    last_input_tokens: Arc<Mutex<u32>>,
+    /// Compaction configuration. `None` means compaction is disabled.
+    compaction_config: Option<CompactionConfig>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -65,6 +78,8 @@ impl Agent {
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
+            last_input_tokens: Arc::new(Mutex::new(0)),
+            compaction_config: None,
         }
     }
 
@@ -76,6 +91,13 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        if let Some(window) = tool_config.context_window_tokens {
+            self.compaction_config = Some(CompactionConfig {
+                context_window_tokens: window,
+                threshold: tool_config.compaction_threshold,
+                keep_recent: tool_config.compaction_keep_recent,
+            });
+        }
         self
     }
 
@@ -206,6 +228,10 @@ impl Agent {
             *history = prefix;
             history.extend(new_history);
         }
+        *self
+            .last_input_tokens
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = 0;
         *self.session.lock().await = session;
     }
 
@@ -232,6 +258,28 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner()) += 1;
     }
 
+    /// Manually trigger compaction regardless of threshold.
+    ///
+    /// Returns the number of messages removed and kept, or an error if
+    /// compaction is not configured or fails.
+    pub async fn compact(&self) -> Result<(usize, usize)> {
+        let cc = self
+            .compaction_config
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Context compaction is not configured. Set context_window_tokens in [tools] to enable."))?;
+
+        let event_tx = mpsc::unbounded::<AgentEvent>().0;
+
+        execute_compaction(
+            &self.history,
+            &self.session,
+            &self.context_prefix_len,
+            &event_tx,
+            cc.keep_recent,
+        )
+        .await
+    }
+
     pub async fn send(
         &self,
         input: String,
@@ -253,6 +301,9 @@ impl Agent {
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
+        let last_input_tokens = Arc::clone(&self.last_input_tokens);
+        let context_prefix_len = Arc::clone(&self.context_prefix_len);
+        let compaction_config = self.compaction_config.clone();
 
         self.session
             .lock()
@@ -281,12 +332,107 @@ impl Agent {
                 }
                 iterations += 1;
 
+                // Check if compaction is needed before sending to the backend.
+                if let Some(ref cc) = compaction_config {
+                    let last_tokens = *last_input_tokens.lock().unwrap_or_else(|e| e.into_inner());
+                    let threshold_tokens = (cc.threshold * cc.context_window_tokens as f32) as u32;
+                    if last_tokens >= threshold_tokens {
+                        let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                            "context threshold exceeded, compacting history".to_string(),
+                        ));
+                        match execute_compaction(
+                            &history_arc,
+                            &session,
+                            &context_prefix_len,
+                            &event_tx,
+                            cc.keep_recent,
+                        )
+                        .await
+                        {
+                            Ok((removed, kept)) => {
+                                let _ = event_tx.unbounded_send(AgentEvent::Compaction {
+                                    messages_removed: removed,
+                                    messages_kept: kept,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
+                                    "compaction failed: {e}"
+                                )));
+                            }
+                        }
+                    }
+                }
+
                 let history_snapshot = lock(&history_arc).clone();
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
-                        break;
+                        let error_str = e.to_string();
+                        // Detect context overflow and attempt auto-compact + retry.
+                        let is_context_overflow = error_str.contains("400")
+                            || error_str.contains("context")
+                            || error_str.contains("too many tokens")
+                            || error_str.contains("max_tokens")
+                            || error_str.contains("request too large");
+                        if is_context_overflow {
+                            if let Some(ref cc) = compaction_config {
+                                let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                                    "context overflow detected, attempting auto-compaction"
+                                        .to_string(),
+                                ));
+                                match execute_compaction(
+                                    &history_arc,
+                                    &session,
+                                    &context_prefix_len,
+                                    &event_tx,
+                                    cc.keep_recent,
+                                )
+                                .await
+                                {
+                                    Ok((removed, kept)) => {
+                                        let _ = event_tx.unbounded_send(AgentEvent::Compaction {
+                                            messages_removed: removed,
+                                            messages_kept: kept,
+                                        });
+                                        // Retry once after compaction.
+                                        let history_snapshot = lock(&history_arc).clone();
+                                        match backend.send_message(&history_snapshot, &config).await
+                                        {
+                                            Ok(s) => s,
+                                            Err(retry_err) => {
+                                                record_error(
+                                                    &retry_err.to_string(),
+                                                    &history_arc,
+                                                    &session,
+                                                    &event_tx,
+                                                )
+                                                .await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(ce) => {
+                                        record_error(
+                                            &format!(
+                                                "context overflow and compaction failed: {ce}"
+                                            ),
+                                            &history_arc,
+                                            &session,
+                                            &event_tx,
+                                        )
+                                        .await;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                record_error(&error_str, &history_arc, &session, &event_tx).await;
+                                break;
+                            }
+                        } else {
+                            record_error(&error_str, &history_arc, &session, &event_tx).await;
+                            break;
+                        }
                     }
                 };
 
@@ -347,6 +493,8 @@ impl Agent {
                             output_tokens,
                             stop_reason,
                         })) => {
+                            *last_input_tokens.lock().unwrap_or_else(|e| e.into_inner()) =
+                                input_tokens;
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
@@ -456,6 +604,87 @@ impl Agent {
 
         Ok(Box::pin(event_rx))
     }
+}
+
+/// Execute compaction against the session DB and refresh in-memory history.
+///
+/// Returns the number of messages removed and kept on success.
+async fn execute_compaction(
+    history_arc: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    context_prefix_len: &Arc<Mutex<usize>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    keep_recent: usize,
+) -> Result<(usize, usize)> {
+    let prefix_len = *context_prefix_len.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Load full history with DB row IDs.
+    let full_history = {
+        let sess = session.lock().await;
+        sess.conversation().load_full_history().await?
+    };
+
+    // Only compact persisted messages (skip context prefix).
+    let persisted: Vec<(i64, Message)> = full_history
+        .iter()
+        .filter(|(_, _, active)| *active)
+        .map(|(id, msg, _)| (*id, msg.clone()))
+        .collect();
+
+    let plan = compute_compaction_plan(&persisted, 0, keep_recent).or_else(|| {
+        // Fallback to truncation if summarization plan fails.
+        let (ids, kept) = compute_truncation_plan(&persisted, 0, keep_recent)?;
+        let removed = ids.len();
+        Some(crate::compaction::CompactionPlan {
+            ids_to_deactivate: ids,
+            summary_message: Message::text(
+                Role::User,
+                format!(
+                    "[CONTEXT SUMMARY] Truncation fallback: {removed} older messages \
+                         removed, {kept} recent messages retained."
+                ),
+            ),
+            messages_kept: kept,
+        })
+    });
+
+    let plan = match plan {
+        Some(p) => p,
+        None => return Ok((0, 0)),
+    };
+
+    let messages_removed = plan.ids_to_deactivate.len();
+    let messages_kept = plan.messages_kept;
+
+    // Execute against DB.
+    {
+        let sess = session.lock().await;
+        sess.conversation()
+            .deactivate_messages(&plan.ids_to_deactivate)
+            .await?;
+        sess.conversation()
+            .insert_message(&plan.summary_message)
+            .await?;
+    }
+
+    // Refresh in-memory history: preserve prefix, reload from DB.
+    {
+        let new_db_history = {
+            let sess = session.lock().await;
+            sess.conversation().load_history().await?
+        };
+        let mut history = lock(history_arc);
+        let take = prefix_len.min(history.len());
+        let prefix: Vec<Message> = history.drain(..take).collect();
+        *history = prefix;
+        history.extend(new_db_history);
+    }
+
+    let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
+        "compaction complete: {messages_removed} removed, {messages_kept} kept"
+    )));
+
+    Ok((messages_removed, messages_kept))
 }
 
 async fn persist_partial(
@@ -805,6 +1034,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::Compaction { .. } => {}
         }
     }
 

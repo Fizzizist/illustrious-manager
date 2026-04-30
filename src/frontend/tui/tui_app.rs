@@ -65,6 +65,8 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
+    /// Configured context window size for the status line indicator.
+    pub context_window_tokens: Option<u32>,
     pending_g: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
@@ -115,6 +117,7 @@ impl App {
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
+            context_window_tokens: None,
             pending_g: false,
             tools,
         }
@@ -386,12 +389,21 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     app.input.render(frame, chunks[1]);
 
+    let context_usage = match (app.context_window_tokens, app.last_input_total) {
+        (Some(window), input) if input > 0 || window > 0 => Some(status_line::ContextUsageInfo {
+            input_tokens: input,
+            context_window_tokens: window,
+        }),
+        _ => None,
+    };
+
     let info = StatusLineInfo {
         model: &app.model,
         git_branch: app.git_branch.as_deref(),
         working_dir: &app.working_dir,
         usage: &app.usage,
         subagent_usage: Some(&app.subagent_usage),
+        context_usage,
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -552,6 +564,19 @@ pub fn handle_agent_event(
         AgentEvent::Warn(_) => {
             // Diagnostic only — written to the debug log via log_event; not shown in UI.
         }
+        AgentEvent::Compaction {
+            messages_removed,
+            messages_kept,
+        } => {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                format!(
+                    "Context compacted: {messages_removed} messages summarised, \
+                     {messages_kept} recent messages retained."
+                ),
+            ));
+            app.scroll_offset = 0;
+        }
     }
     Ok(())
 }
@@ -593,6 +618,7 @@ async fn run_app(
     app.model = agent.model();
     app.git_branch = status_line::detect_git_branch();
     app.working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    app.context_window_tokens = config.tools.context_window_tokens;
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);

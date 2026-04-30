@@ -190,12 +190,51 @@ impl SlashCommand for TasksCommand {
     }
 }
 
+/// Built-in `/compact` command — manually triggers context compaction.
+pub struct CompactCommand;
+
+impl SlashCommand for CompactCommand {
+    fn name(&self) -> &str {
+        "compact"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            match ctx.agent.compact().await {
+                Ok((removed, kept)) => {
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Info,
+                        format!(
+                            "Context compacted: {removed} messages removed, \
+                             {kept} recent messages retained."
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Error,
+                        format!("Compaction failed: {e}"),
+                    ));
+                }
+            }
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.register(Box::new(SessionsCommand));
     registry.register(Box::new(ModelCommand));
     registry.register(Box::new(TasksCommand));
+    registry.register(Box::new(CompactCommand));
     registry
 }
 
@@ -553,5 +592,45 @@ mod tests {
         // both pending with the same status, ordered by stable sort then DB insertion order (alpha inserted first)
         assert_eq!(picker.tasks()[0].title, "task alpha");
         assert_eq!(picker.tasks()[1].title, "task beta");
+    }
+
+    #[tokio::test]
+    async fn compact_command_without_config_shows_error() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session_arc = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                session_arc,
+            )
+            .await,
+        );
+
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = CompactCommand;
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Error && e.content.contains("not configured")),
+            "should show not-configured error"
+        );
     }
 }

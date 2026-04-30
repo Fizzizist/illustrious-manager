@@ -265,6 +265,12 @@ pub enum AgentEvent {
     /// A diagnostic warning from the agent, written to the debug log when
     /// `--debug` is active. Not displayed in the conversation UI.
     Warn(String),
+    /// Emitted after context compaction completes. Frontends can display a
+    /// brief notification to inform the user that older context was summarised.
+    Compaction {
+        messages_removed: usize,
+        messages_kept: usize,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

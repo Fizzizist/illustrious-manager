@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod backend;
+pub mod compaction;
 pub mod config;
 pub mod context_files;
 pub mod frontend;
