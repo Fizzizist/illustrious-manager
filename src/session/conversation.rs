@@ -54,7 +54,7 @@ impl<'a> ConversationRepo<'a> {
     }
 
     /// Load active conversation rows with their DB row IDs.
-    pub async fn load_active_history_with_ids(&self) -> Result<Vec<(i64, Message)>> {
+    pub async fn load_history_with_ids(&self) -> Result<Vec<(i64, Message)>> {
         let mut rows = self
             .session
             .conn
@@ -97,7 +97,7 @@ impl<'a> ConversationRepo<'a> {
 
     pub async fn load_history(&self) -> Result<Vec<Message>> {
         Ok(self
-            .load_active_history_with_ids()
+            .load_history_with_ids()
             .await?
             .into_iter()
             .map(|(_, msg)| msg)

@@ -625,7 +625,7 @@ async fn execute_compaction(
     // Load active history with DB row IDs.
     let persisted: Vec<(i64, Message)> = {
         let sess = session.lock().await;
-        sess.conversation().load_active_history_with_ids().await?
+        sess.conversation().load_history_with_ids().await?
     };
 
     let plan = compute_compaction_plan(&persisted, 0, keep_recent).or_else(|| {
