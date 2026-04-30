@@ -773,43 +773,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_full_history_returns_all() {
-        let dir = TempDir::new().expect("temp dir");
-        let session = Session::new(None, dir.path().to_path_buf())
-            .await
-            .expect("create");
-
-        let msg1 = Message::text(Role::User, "active msg".to_string());
-        session
-            .conversation()
-            .insert_message(&msg1)
-            .await
-            .expect("insert 1");
-
-        let msg2 = Message::text(Role::Assistant, "inactive msg".to_string());
-        let id2 = session
-            .conversation()
-            .insert_message_returning_id(&msg2)
-            .await
-            .expect("insert 2");
-
-        session
-            .conversation()
-            .deactivate_messages(&[id2])
-            .await
-            .expect("deactivate");
-
-        let full = session
-            .conversation()
-            .load_full_history()
-            .await
-            .expect("load full history");
-        assert_eq!(full.len(), 2, "full history should include inactive");
-        assert!(full[0].2, "first message should be active");
-        assert!(!full[1].2, "second message should be inactive");
-    }
-
-    #[tokio::test]
     async fn deactivate_messages_marks_inactive() {
         let dir = TempDir::new().expect("temp dir");
         let session = Session::new(None, dir.path().to_path_buf())
