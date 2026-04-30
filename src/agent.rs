@@ -622,18 +622,11 @@ async fn execute_compaction(
 ) -> Result<(usize, usize)> {
     let prefix_len = *context_prefix_len.lock().unwrap_or_else(|e| e.into_inner());
 
-    // Load full history with DB row IDs.
-    let full_history = {
+    // Load active history with DB row IDs.
+    let persisted: Vec<(i64, Message)> = {
         let sess = session.lock().await;
-        sess.conversation().load_full_history().await?
+        sess.conversation().load_active_history_with_ids().await?
     };
-
-    // Only compact persisted messages (skip context prefix).
-    let persisted: Vec<(i64, Message)> = full_history
-        .iter()
-        .filter(|(_, _, active)| *active)
-        .map(|(id, msg, _)| (*id, msg.clone()))
-        .collect();
 
     let plan = compute_compaction_plan(&persisted, 0, keep_recent).or_else(|| {
         // Fallback to truncation if summarization plan fails.

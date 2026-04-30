@@ -53,24 +53,29 @@ impl<'a> ConversationRepo<'a> {
         Ok(true)
     }
 
-    pub async fn load_history(&self) -> Result<Vec<Message>> {
+    /// Load active conversation rows with their DB row IDs.
+    pub async fn load_active_history_with_ids(&self) -> Result<Vec<(i64, Message)>> {
         let mut rows = self
             .session
             .conn
             .query(
-                "SELECT role, content FROM conversation WHERE active = 1 ORDER BY id ASC",
+                "SELECT id, role, content FROM conversation WHERE active = 1 ORDER BY id ASC",
                 (),
             )
             .await
             .context("Failed to query conversation history")?;
 
-        let mut messages = Vec::new();
+        let mut results = Vec::new();
         while let Some(row) = rows.next().await? {
-            let role_str = match row.get_value(0)? {
+            let id = match row.get_value(0)? {
+                turso::Value::Integer(n) => n,
+                other => bail!("Unexpected id type in DB: {:?}", other),
+            };
+            let role_str = match row.get_value(1)? {
                 turso::Value::Text(s) => s,
                 other => bail!("Unexpected role type in DB: {:?}", other),
             };
-            let content_str = match row.get_value(1)? {
+            let content_str = match row.get_value(2)? {
                 turso::Value::Text(s) => s,
                 other => bail!("Unexpected content type in DB: {:?}", other),
             };
@@ -84,10 +89,19 @@ impl<'a> ConversationRepo<'a> {
             let content: Vec<ContentBlock> =
                 serde_json::from_str(&content_str).context("Failed to deserialize content")?;
 
-            messages.push(Message { role, content });
+            results.push((id, Message { role, content }));
         }
 
-        Ok(messages)
+        Ok(results)
+    }
+
+    pub async fn load_history(&self) -> Result<Vec<Message>> {
+        Ok(self
+            .load_active_history_with_ids()
+            .await?
+            .into_iter()
+            .map(|(_, msg)| msg)
+            .collect())
     }
 
     /// Load all conversation rows including inactive (compacted) ones.
