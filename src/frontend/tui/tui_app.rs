@@ -2589,4 +2589,121 @@ mod tests {
             "ToolConfirmation state should clear pending_g"
         );
     }
+
+    // ── Thinking handler tests (Finding 7) ────────────────────────────────
+
+    #[test]
+    fn thinking_received_accumulates_into_current_thinking() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert!(app.current_thinking.is_empty());
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived("reasoning step 1".to_string()),
+            None,
+        )
+        .expect("handle event");
+        assert_eq!(app.current_thinking, "reasoning step 1");
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived(" reasoning step 2".to_string()),
+            None,
+        )
+        .expect("handle event");
+        assert_eq!(
+            app.current_thinking, "reasoning step 1 reasoning step 2",
+            "thinking should accumulate"
+        );
+    }
+
+    #[test]
+    fn thinking_received_then_response_complete_creates_thinking_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived("my thoughts".to_string()),
+            None,
+        )
+        .expect("handle thinking");
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ResponseComplete("my answer".to_string()),
+            None,
+        )
+        .expect("handle complete");
+
+        let thinking_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::Thinking)
+            .collect();
+        assert_eq!(thinking_entries.len(), 1, "should have one thinking entry");
+        assert_eq!(thinking_entries[0].content, "my thoughts");
+
+        let assistant_entries: Vec<_> = app
+            .conversation
+            .iter()
+            .filter(|e| e.role == ConversationRole::Assistant)
+            .collect();
+        assert_eq!(
+            assistant_entries.len(),
+            1,
+            "should have one assistant entry"
+        );
+        assert_eq!(assistant_entries[0].content, "my answer");
+
+        assert!(
+            app.current_thinking.is_empty(),
+            "current_thinking should be cleared after ResponseComplete"
+        );
+    }
+
+    #[test]
+    fn thinking_cleared_on_error_event() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived("partial thinking".to_string()),
+            None,
+        )
+        .expect("handle thinking");
+        assert!(!app.current_thinking.is_empty());
+
+        handle_agent_event(&mut app, AgentEvent::Error("error".to_string()), None)
+            .expect("handle error");
+
+        assert!(
+            app.current_thinking.is_empty(),
+            "current_thinking should be cleared on Error"
+        );
+    }
+
+    #[test]
+    fn thinking_cleared_on_interrupted_event() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived("thinking before interrupt".to_string()),
+            None,
+        )
+        .expect("handle thinking");
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+            None,
+        )
+        .expect("handle interrupted");
+
+        assert!(
+            app.current_thinking.is_empty(),
+            "current_thinking should be cleared on Interrupted"
+        );
+    }
 }

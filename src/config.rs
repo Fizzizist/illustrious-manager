@@ -149,8 +149,6 @@ model = "gpt-oss:120b"
 # enabled = true
 # Thinking mode: "budget" (fixed token count) or "adaptive" (model decides)
 # mode = { type = "adaptive" }
-# Default token budget when mode is "budget"
-# budget_tokens = 8192
 "#;
 
 /// A named model role binding a backend to a specific model string.
@@ -1448,13 +1446,11 @@ mod tests {
             project = "my-project"
             [thinking]
             enabled = true
-            budget_tokens = 16384
             mode = { type = "adaptive" }
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         let thinking = config.thinking.expect("thinking should be present");
         assert!(thinking.enabled);
-        assert_eq!(thinking.budget_tokens, 16384);
         assert_eq!(thinking.mode, crate::types::ThinkingMode::Adaptive);
     }
 

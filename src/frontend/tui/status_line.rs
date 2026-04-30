@@ -49,7 +49,8 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
                     name.len() + input.to_string().len()
                 }
                 crate::types::ContentBlock::ToolResult { content, .. } => content.len(),
-                crate::types::ContentBlock::Thinking { text, .. } => text.len(),
+                // Thinking is excluded from the context budget estimate
+                crate::types::ContentBlock::Thinking { .. } => 0,
                 crate::types::ContentBlock::RedactedThinking { .. } => 0,
             })
             .sum();
@@ -618,5 +619,39 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
+    }
+
+    #[test]
+    fn estimate_usage_excludes_thinking_blocks() {
+        use crate::types::{ContentBlock, Message, Role};
+
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "a very long thinking block that should not count toward tokens"
+                            .to_string(),
+                        signature: "sig".to_string(),
+                    },
+                    ContentBlock::Text("short".to_string()),
+                ],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::RedactedThinking {
+                    data: "opaque data blob".to_string(),
+                }],
+            },
+        ];
+
+        let (input, output) = estimate_usage_from_messages(&messages);
+
+        // Only "short" (5 chars / 4 ≈ 2 tokens) should count
+        assert_eq!(input, 0, "no user messages");
+        assert!(
+            output > 0 && output <= 2,
+            "only the Text block should count, not thinking; got output={output}"
+        );
     }
 }
