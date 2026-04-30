@@ -3,7 +3,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendFactory, LlmBackend};
-use crate::compaction::{compute_compaction_plan, compute_truncation_plan};
+use crate::compaction::execute_compaction;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -613,77 +613,6 @@ impl Agent {
 /// Execute compaction against the session DB and refresh in-memory history.
 ///
 /// Returns the number of messages removed and kept on success.
-async fn execute_compaction(
-    history_arc: &Arc<Mutex<Vec<Message>>>,
-    session: &Arc<TokioMutex<Session>>,
-    context_prefix_len: &Arc<Mutex<usize>>,
-    event_tx: &mpsc::UnboundedSender<AgentEvent>,
-    keep_recent: usize,
-) -> Result<(usize, usize)> {
-    let prefix_len = *context_prefix_len.lock().unwrap_or_else(|e| e.into_inner());
-
-    // Load active history with DB row IDs.
-    let persisted: Vec<(i64, Message)> = {
-        let sess = session.lock().await;
-        sess.conversation().load_history_with_ids().await?
-    };
-
-    let plan = compute_compaction_plan(&persisted, 0, keep_recent).or_else(|| {
-        // Fallback to truncation if summarization plan fails.
-        let (ids, kept) = compute_truncation_plan(&persisted, 0, keep_recent)?;
-        let removed = ids.len();
-        Some(crate::compaction::CompactionPlan {
-            ids_to_deactivate: ids,
-            summary_message: Message::text(
-                Role::User,
-                format!(
-                    "[CONTEXT SUMMARY] Truncation fallback: {removed} older messages \
-                         removed, {kept} recent messages retained."
-                ),
-            ),
-            messages_kept: kept,
-        })
-    });
-
-    let plan = match plan {
-        Some(p) => p,
-        None => return Ok((0, 0)),
-    };
-
-    let messages_removed = plan.ids_to_deactivate.len();
-    let messages_kept = plan.messages_kept;
-
-    // Execute against DB.
-    {
-        let sess = session.lock().await;
-        sess.conversation()
-            .deactivate_messages(&plan.ids_to_deactivate)
-            .await?;
-        sess.conversation()
-            .insert_message(&plan.summary_message)
-            .await?;
-    }
-
-    // Refresh in-memory history: preserve prefix, reload from DB.
-    {
-        let new_db_history = {
-            let sess = session.lock().await;
-            sess.conversation().load_history().await?
-        };
-        let mut history = lock(history_arc);
-        let take = prefix_len.min(history.len());
-        let prefix: Vec<Message> = history.drain(..take).collect();
-        *history = prefix;
-        history.extend(new_db_history);
-    }
-
-    let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
-        "compaction complete: {messages_removed} removed, {messages_kept} kept"
-    )));
-
-    Ok((messages_removed, messages_kept))
-}
-
 async fn persist_partial(
     text: &str,
     history: &Arc<Mutex<Vec<Message>>>,
