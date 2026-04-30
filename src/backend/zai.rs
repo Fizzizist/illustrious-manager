@@ -962,7 +962,6 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
-                budget_tokens: 8192,
             }),
         };
         let messages = vec![Message {
