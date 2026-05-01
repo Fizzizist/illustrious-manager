@@ -161,12 +161,6 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
-# Model context window size in tokens. When set, automatic compaction is enabled.
-# context_window_tokens = 200000
-# Fraction of context window that triggers compaction (default: 0.80)
-# compaction_threshold = 0.80
-# Number of recent messages to keep verbatim during compaction (default: 6)
-# compaction_keep_recent = 6
 # Compaction strategy: "summarize" (LLM-generated summary) or "truncate" (stub) (default: "summarize")
 # compaction_strategy = "summarize"
 
