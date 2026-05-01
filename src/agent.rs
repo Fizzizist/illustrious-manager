@@ -20,7 +20,7 @@ use futures::future::join_all;
 /// Configuration for automatic context compaction.
 #[derive(Clone)]
 pub struct CompactionConfig {
-    pub context_window_tokens: u32,
+    pub max_context_window_tokens: u32,
     pub threshold: f32,
     pub keep_recent: usize,
     pub strategy: crate::compaction::CompactionStrategy,
@@ -92,9 +92,9 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
-        if let Some(window) = tool_config.context_window_tokens {
+        if let Some(window) = tool_config.max_context_window_tokens {
             self.compaction_config = Some(CompactionConfig {
-                context_window_tokens: window,
+                max_context_window_tokens: window,
                 threshold: tool_config.compaction_threshold,
                 keep_recent: tool_config.compaction_keep_recent,
                 strategy: tool_config.compaction_strategy,
@@ -268,7 +268,7 @@ impl Agent {
         let cc = self
             .compaction_config
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Context compaction is not configured. Set context_window_tokens in [tools] to enable."))?;
+            .ok_or_else(|| anyhow::anyhow!("Context compaction is not configured. Set max_context_window_tokens in [tools] to enable."))?;
 
         let event_tx = mpsc::unbounded::<AgentEvent>().0;
 
@@ -350,7 +350,8 @@ impl Agent {
                 // Check if compaction is needed before sending to the backend.
                 if let Some(ref cc) = compaction_config {
                     let last_tokens = *last_input_tokens.lock().unwrap_or_else(|e| e.into_inner());
-                    let threshold_tokens = (cc.threshold * cc.context_window_tokens as f32) as u32;
+                    let threshold_tokens =
+                        (cc.threshold * cc.max_context_window_tokens as f32) as u32;
                     if last_tokens >= threshold_tokens {
                         let _ = event_tx.unbounded_send(AgentEvent::Warn(
                             "context threshold exceeded, compacting history".to_string(),

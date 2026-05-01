@@ -73,7 +73,7 @@ pub struct ToolsConfig {
     pub bash_denylist: Vec<String>,
     /// Model context window size in tokens. When `None`, compaction is disabled.
     #[serde(default)]
-    pub context_window_tokens: Option<u32>,
+    pub max_context_window_tokens: Option<u32>,
     /// Fraction of context window that triggers automatic compaction.
     #[serde(default = "default_compaction_threshold")]
     pub compaction_threshold: f32,
@@ -93,7 +93,7 @@ impl Default for ToolsConfig {
             max_tool_iterations: default_max_tool_iterations(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
-            context_window_tokens: None,
+            max_context_window_tokens: None,
             compaction_threshold: default_compaction_threshold(),
             compaction_keep_recent: default_compaction_keep_recent(),
             compaction_strategy: default_compaction_strategy(),
@@ -161,8 +161,12 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
-# Compaction strategy: "summarize" (LLM-generated summary) or "truncate" (stub) (default: "summarize")
-# compaction_strategy = "summarize"
+# Maximum context window in tokens. When set, automatic compaction is enabled.
+# max_context_window_tokens = 200000
+# Fraction of context window that triggers compaction (default: 0.80)
+# compaction_threshold = 0.80
+# Number of recent messages to keep verbatim during compaction (default: 6)
+# compaction_keep_recent = 6
 
 # Named model roles for multi-agent workflows.
 # When absent, a "default" role is synthesized from the top-level backend
@@ -1456,7 +1460,7 @@ mod tests {
     #[test]
     fn tools_config_default_values() {
         let config = ToolsConfig::default();
-        assert_eq!(config.context_window_tokens, None);
+        assert_eq!(config.max_context_window_tokens, None);
         assert!(
             (config.compaction_threshold - 0.80).abs() < 0.01,
             "default compaction_threshold should be ~0.80"
@@ -1471,13 +1475,13 @@ mod tests {
     #[test]
     fn tools_config_deserialization_with_compaction() {
         let toml_str = r#"
-            context_window_tokens = 200000
+            max_context_window_tokens = 200000
             compaction_threshold = 0.75
             compaction_keep_recent = 4
             compaction_strategy = "truncate"
         "#;
         let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
-        assert_eq!(config.context_window_tokens, Some(200000));
+        assert_eq!(config.max_context_window_tokens, Some(200000));
         assert!(
             (config.compaction_threshold - 0.75).abs() < 0.01,
             "compaction_threshold should be 0.75"

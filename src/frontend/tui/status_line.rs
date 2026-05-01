@@ -38,7 +38,7 @@ pub struct ContextUsageInfo {
     /// Last reported input tokens from the API.
     pub input_tokens: u32,
     /// Configured context window size.
-    pub context_window_tokens: u32,
+    pub max_context_window_tokens: u32,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -167,7 +167,7 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
 
     // Context usage indicator (e.g. "ctx: 120k/200k")
     let ctx_span = info.context_usage.as_ref().map(|cu| {
-        let pct = cu.input_tokens as f32 / cu.context_window_tokens as f32;
+        let pct = cu.input_tokens as f32 / cu.max_context_window_tokens as f32;
         let color = if pct >= 0.90 {
             Color::Red
         } else if pct >= 0.75 {
@@ -178,7 +178,7 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         let s = format!(
             " ctx:{}/{} ",
             format_token_count(cu.input_tokens as u64),
-            format_token_count(cu.context_window_tokens as u64)
+            format_token_count(cu.max_context_window_tokens as u64)
         );
         Span::styled(s, Style::default().fg(color).bg(STATUS_BG))
     });
@@ -684,7 +684,7 @@ mod tests {
             subagent_usage: None,
             context_usage: Some(ContextUsageInfo {
                 input_tokens: 120_000,
-                context_window_tokens: 200_000,
+                max_context_window_tokens: 200_000,
             }),
         };
 
@@ -752,7 +752,7 @@ mod tests {
             subagent_usage: None,
             context_usage: Some(ContextUsageInfo {
                 input_tokens: 190_000,
-                context_window_tokens: 200_000,
+                max_context_window_tokens: 200_000,
             }),
         };
 
@@ -779,7 +779,7 @@ mod tests {
             subagent_usage: None,
             context_usage: Some(ContextUsageInfo {
                 input_tokens: 160_000,
-                context_window_tokens: 200_000,
+                max_context_window_tokens: 200_000,
             }),
         };
 
@@ -811,7 +811,7 @@ mod tests {
             subagent_usage: None,
             context_usage: Some(ContextUsageInfo {
                 input_tokens: 120_000,
-                context_window_tokens: 200_000,
+                max_context_window_tokens: 200_000,
             }),
         };
 
