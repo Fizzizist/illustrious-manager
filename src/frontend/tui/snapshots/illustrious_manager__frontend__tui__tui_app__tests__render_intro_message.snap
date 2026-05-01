@@ -3,12 +3,12 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│  - backend: vertex                                       │"
 "│  - sessions_dir: /sessions                               │"
 "│  - tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"
 "│  - tools.bash_denylist: rm, wget, sudo, chmod, chown     │"
 "│  - tools.compaction_keep_recent: 6                       │"
+"│  - tools.compaction_strategy: summarize                  │"
 "│  - tools.compaction_threshold: 0.8                       │"
 "│  - tools.confirmation: WriteOnly                         │"
 "│  - tools.max_tool_iterations: 25                         │"

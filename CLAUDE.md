@@ -99,6 +99,10 @@ model = "gpt-oss:120b"
 # max_tool_iterations = 25
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
+# context_window_tokens = 200000      # Enables automatic compaction when set
+# compaction_threshold = 0.80          # Fraction of context window that triggers compaction
+# compaction_keep_recent = 6          # Number of recent messages to keep verbatim
+# compaction_strategy = "summarize"   # "summarize" (LLM summary) or "truncate" (stub)
 ```
 
 CLI flags (`--project`, `--region`, `--model`, `--session-id`) override config file values.

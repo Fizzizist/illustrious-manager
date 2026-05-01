@@ -23,6 +23,7 @@ pub struct CompactionConfig {
     pub context_window_tokens: u32,
     pub threshold: f32,
     pub keep_recent: usize,
+    pub strategy: crate::compaction::CompactionStrategy,
 }
 
 struct PendingToolCall {
@@ -96,6 +97,7 @@ impl Agent {
                 context_window_tokens: window,
                 threshold: tool_config.compaction_threshold,
                 keep_recent: tool_config.compaction_keep_recent,
+                strategy: tool_config.compaction_strategy,
             });
         }
         self
@@ -270,14 +272,27 @@ impl Agent {
 
         let event_tx = mpsc::unbounded::<AgentEvent>().0;
 
-        execute_compaction(
+        let summarize_ctx = crate::compaction::SummarizeContext {
+            backend: Arc::clone(&self.backend),
+            config: self
+                .config
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        };
+
+        let (removed, kept, _) = execute_compaction(
             &self.history,
             &self.session,
             &self.context_prefix_len,
             &event_tx,
             cc.keep_recent,
+            cc.strategy,
+            Some(&summarize_ctx),
         )
-        .await
+        .await?;
+
+        Ok((removed, kept))
     }
 
     pub async fn send(
@@ -340,16 +355,22 @@ impl Agent {
                         let _ = event_tx.unbounded_send(AgentEvent::Warn(
                             "context threshold exceeded, compacting history".to_string(),
                         ));
+                        let summarize_ctx = crate::compaction::SummarizeContext {
+                            backend: Arc::clone(&backend),
+                            config: config.clone(),
+                        };
                         match execute_compaction(
                             &history_arc,
                             &session,
                             &context_prefix_len,
                             &event_tx,
                             cc.keep_recent,
+                            cc.strategy,
+                            Some(&summarize_ctx),
                         )
                         .await
                         {
-                            Ok((removed, kept)) => {
+                            Ok((removed, kept, _strategy_used)) => {
                                 let _ = event_tx.unbounded_send(AgentEvent::Compaction {
                                     messages_removed: removed,
                                     messages_kept: kept,
@@ -391,10 +412,15 @@ impl Agent {
                                     &context_prefix_len,
                                     &event_tx,
                                     cc.keep_recent,
+                                    cc.strategy,
+                                    Some(&crate::compaction::SummarizeContext {
+                                        backend: Arc::clone(&backend),
+                                        config: config.clone(),
+                                    }),
                                 )
                                 .await
                                 {
-                                    Ok((removed, kept)) => {
+                                    Ok((removed, kept, _strategy_used)) => {
                                         let _ = event_tx.unbounded_send(AgentEvent::Compaction {
                                             messages_removed: removed,
                                             messages_kept: kept,

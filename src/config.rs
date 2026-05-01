@@ -55,6 +55,10 @@ fn default_compaction_keep_recent() -> usize {
     6
 }
 
+fn default_compaction_strategy() -> crate::compaction::CompactionStrategy {
+    crate::compaction::CompactionStrategy::default()
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
@@ -76,6 +80,9 @@ pub struct ToolsConfig {
     /// Number of recent messages to keep verbatim during compaction.
     #[serde(default = "default_compaction_keep_recent")]
     pub compaction_keep_recent: usize,
+    /// Compaction strategy: "summarize" (LLM) or "truncate" (stub).
+    #[serde(default = "default_compaction_strategy")]
+    pub compaction_strategy: crate::compaction::CompactionStrategy,
 }
 
 impl Default for ToolsConfig {
@@ -89,6 +96,7 @@ impl Default for ToolsConfig {
             context_window_tokens: None,
             compaction_threshold: default_compaction_threshold(),
             compaction_keep_recent: default_compaction_keep_recent(),
+            compaction_strategy: default_compaction_strategy(),
         }
     }
 }
@@ -159,6 +167,8 @@ model = "gpt-oss:120b"
 # compaction_threshold = 0.80
 # Number of recent messages to keep verbatim during compaction (default: 6)
 # compaction_keep_recent = 6
+# Compaction strategy: "summarize" (LLM-generated summary) or "truncate" (stub) (default: "summarize")
+# compaction_strategy = "summarize"
 
 # Named model roles for multi-agent workflows.
 # When absent, a "default" role is synthesized from the top-level backend
@@ -1458,6 +1468,10 @@ mod tests {
             "default compaction_threshold should be ~0.80"
         );
         assert_eq!(config.compaction_keep_recent, 6);
+        assert_eq!(
+            config.compaction_strategy,
+            crate::compaction::CompactionStrategy::Summarize
+        );
     }
 
     #[test]
@@ -1466,6 +1480,7 @@ mod tests {
             context_window_tokens = 200000
             compaction_threshold = 0.75
             compaction_keep_recent = 4
+            compaction_strategy = "truncate"
         "#;
         let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.context_window_tokens, Some(200000));
@@ -1474,5 +1489,9 @@ mod tests {
             "compaction_threshold should be 0.75"
         );
         assert_eq!(config.compaction_keep_recent, 4);
+        assert_eq!(
+            config.compaction_strategy,
+            crate::compaction::CompactionStrategy::Truncate
+        );
     }
 }
