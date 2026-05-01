@@ -3,7 +3,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::{BackendFactory, LlmBackend};
-use crate::compaction::execute_compaction;
+use crate::compaction::{CompactionStrategy, execute_compaction};
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -265,10 +265,11 @@ impl Agent {
     /// Returns the number of messages removed and kept, or an error if
     /// compaction is not configured or fails.
     pub async fn compact(&self) -> Result<(usize, usize)> {
-        let cc = self
+        let keep_recent = self
             .compaction_config
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Context compaction is not configured. Set max_context_window_tokens in [tools] to enable."))?;
+            .map(|cc| cc.keep_recent)
+            .unwrap_or(6);
 
         let event_tx = mpsc::unbounded::<AgentEvent>().0;
 
@@ -286,8 +287,8 @@ impl Agent {
             &self.session,
             &self.context_prefix_len,
             &event_tx,
-            cc.keep_recent,
-            cc.strategy,
+            keep_recent,
+            CompactionStrategy::Summarize,
             Some(&summarize_ctx),
         )
         .await?;

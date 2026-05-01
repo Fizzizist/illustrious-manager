@@ -595,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_command_without_config_shows_error() {
+    async fn compact_command_without_config_works_with_defaults() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let session = crate::session::Session::new(None, dir.path().to_path_buf())
             .await
@@ -625,12 +625,14 @@ mod tests {
         };
         let result = cmd.execute("", &mut ctx).await.expect("execute");
         assert_eq!(result, DispatchResult::Handled);
+        // Empty session — nothing to compact, should report 0 removed.
         assert!(
             ctx.app
                 .conversation
                 .iter()
-                .any(|e| e.role == ConversationRole::Error && e.content.contains("not configured")),
-            "should show not-configured error"
+                .any(|e| e.role == ConversationRole::Info
+                    && e.content.contains("0 messages removed")),
+            "should report 0 messages removed for empty session"
         );
     }
 }
