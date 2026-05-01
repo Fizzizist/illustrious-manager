@@ -157,15 +157,70 @@ pub fn compute_compaction_cut(
     Some((ids_to_deactivate, messages_kept))
 }
 
-/// Build a truncation-style summary message.
-pub fn truncation_summary_message(messages_removed: usize, messages_kept: usize) -> Message {
-    Message::text(
-        Role::User,
-        format!(
-            "[CONTEXT SUMMARY] Truncation: {messages_removed} older messages \
-             removed, {messages_kept} recent messages retained."
-        ),
-    )
+const EXCERPT_MAX_CHARS: usize = 200;
+const MAX_EXCERPTS: usize = 10;
+
+/// Extract a brief text excerpt from a message for truncation stub context.
+fn message_excerpt(msg: &Message) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let role = match msg.role {
+        Role::User => "User",
+        Role::Assistant => "Assistant",
+    };
+    for block in &msg.content {
+        match block {
+            ContentBlock::Text(t) => {
+                let truncated: String = t.chars().take(EXCERPT_MAX_CHARS).collect();
+                parts.push(format!("{role}: {truncated}"));
+            }
+            ContentBlock::ToolUse { name, .. } => {
+                parts.push(format!("{role}: [Called tool '{name}']"));
+            }
+            ContentBlock::ToolResult { is_error, .. } => {
+                let label = if *is_error { "ERROR" } else { "RESULT" };
+                parts.push(format!("{role}: [Tool {label}]"));
+            }
+        }
+    }
+    parts.join("; ")
+}
+
+/// Build a truncation-style summary message, optionally including the LLM error
+/// that caused the fallback and brief excerpts from the removed messages.
+pub fn truncation_summary_message(
+    messages_removed: usize,
+    messages_kept: usize,
+    error_reason: Option<&str>,
+    removed_messages: &[Message],
+) -> Message {
+    let mut body = format!(
+        "[CONTEXT SUMMARY] Truncation: {messages_removed} older messages \
+         removed, {messages_kept} recent messages retained."
+    );
+    if let Some(reason) = error_reason {
+        body.push_str(&format!(
+            "\n\nLLM summarization failed, falling back to truncation: {reason}"
+        ));
+    }
+    if !removed_messages.is_empty() {
+        let excerpt_count = removed_messages.len().min(MAX_EXCERPTS);
+        let mut excerpts: Vec<String> = removed_messages
+            .iter()
+            .take(MAX_EXCERPTS)
+            .map(|msg| format!("  - {}", message_excerpt(msg)))
+            .collect();
+        let truncated_count = removed_messages.len().saturating_sub(MAX_EXCERPTS);
+        if truncated_count > 0 {
+            excerpts.push(format!(
+                "  ... and {truncated_count} more message(s) omitted"
+            ));
+        }
+        body.push_str(&format!(
+            "\n\nBrief excerpts of removed messages (showing {excerpt_count} of {messages_removed}):\n{}",
+            excerpts.join("\n")
+        ));
+    }
+    Message::text(Role::User, body)
 }
 
 /// Build a summarization-style summary message wrapping LLM-generated text.
@@ -291,14 +346,24 @@ pub async fn execute_compaction(
                     "LLM summarization failed, falling back to truncation: {e}"
                 )));
                 (
-                    truncation_summary_message(messages_removed, messages_kept),
+                    truncation_summary_message(
+                        messages_removed,
+                        messages_kept,
+                        Some(&e.to_string()),
+                        &messages_to_summarize,
+                    ),
                     CompactionStrategy::Truncate,
                 )
             }
         }
     } else {
+        let truncated_msgs: Vec<Message> = persisted
+            .iter()
+            .filter(|(id, _)| ids_to_deactivate.contains(id))
+            .map(|(_, msg)| msg.clone())
+            .collect();
         (
-            truncation_summary_message(messages_removed, messages_kept),
+            truncation_summary_message(messages_removed, messages_kept, None, &truncated_msgs),
             CompactionStrategy::Truncate,
         )
     };
@@ -476,13 +541,77 @@ mod tests {
     }
 
     #[test]
-    fn truncation_summary_message_format() {
-        let msg = truncation_summary_message(5, 3);
+    fn truncation_summary_message_basic() {
+        let msg = truncation_summary_message(5, 3, None, &[]);
         match &msg.content[0] {
             ContentBlock::Text(t) => {
                 assert!(t.starts_with("[CONTEXT SUMMARY]"));
                 assert!(t.contains("5 older messages"));
                 assert!(t.contains("3 recent messages"));
+                assert!(!t.contains("LLM summarization failed"));
+                assert!(!t.contains("Brief excerpts"));
+            }
+            _ => panic!("expected text block"),
+        }
+    }
+
+    #[test]
+    fn truncation_summary_message_with_error_reason() {
+        let msg = truncation_summary_message(5, 3, Some("connection timed out"), &[]);
+        match &msg.content[0] {
+            ContentBlock::Text(t) => {
+                assert!(t.contains("LLM summarization failed"));
+                assert!(t.contains("connection timed out"));
+            }
+            _ => panic!("expected text block"),
+        }
+    }
+
+    #[test]
+    fn truncation_summary_message_includes_excerpts() {
+        let messages = vec![
+            Message::text(Role::User, "hello world".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+        ];
+        let msg = truncation_summary_message(2, 1, None, &messages);
+        match &msg.content[0] {
+            ContentBlock::Text(t) => {
+                assert!(t.contains("Brief excerpts"));
+                assert!(t.contains("User: hello world"));
+                assert!(t.contains("Assistant: hi there"));
+            }
+            _ => panic!("expected text block"),
+        }
+    }
+
+    #[test]
+    fn truncation_summary_message_truncates_long_excerpt() {
+        let long_text: String = "x".repeat(500);
+        let messages = vec![Message::text(Role::User, long_text.clone())];
+        let msg = truncation_summary_message(1, 1, None, &messages);
+        match &msg.content[0] {
+            ContentBlock::Text(t) => {
+                // The excerpt should be capped at EXCERPT_MAX_CHARS characters.
+                let excerpt_line = t
+                    .lines()
+                    .find(|l| l.starts_with("  - User:"))
+                    .expect("should have excerpt line");
+                // 200 chars of text + "  - User: " prefix
+                assert!(excerpt_line.len() < long_text.len() + 20);
+            }
+            _ => panic!("expected text block"),
+        }
+    }
+
+    #[test]
+    fn truncation_summary_message_limits_excerpt_count() {
+        let messages: Vec<Message> = (0..15)
+            .map(|i| Message::text(Role::User, format!("msg {i}")))
+            .collect();
+        let msg = truncation_summary_message(15, 1, None, &messages);
+        match &msg.content[0] {
+            ContentBlock::Text(t) => {
+                assert!(t.contains("5 more message(s) omitted"));
             }
             _ => panic!("expected text block"),
         }
