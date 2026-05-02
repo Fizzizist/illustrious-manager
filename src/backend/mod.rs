@@ -168,6 +168,7 @@ mod tests {
             model: "test-model".to_string(),
             max_tokens: 1024,
             tools: vec![],
+            thinking: None,
         };
 
         let mut stream = backend
@@ -219,6 +220,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             compaction: CompactionConfig::default(),
+            thinking: None,
         };
         let factory = super::BackendFactory::new(config);
 
@@ -266,6 +268,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             compaction: CompactionConfig::default(),
+            thinking: None,
         };
         let factory = super::BackendFactory::new(config);
 

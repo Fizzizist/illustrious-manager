@@ -279,6 +279,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             compaction: CompactionConfig::default(),
+            thinking: None,
         }
     }
 
@@ -330,6 +331,7 @@ mod tests {
                         model: "test".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -369,6 +371,7 @@ mod tests {
                         model: "test".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -407,6 +410,7 @@ mod tests {
                         model: "test".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -445,6 +449,7 @@ mod tests {
                         model: "claude-original".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -483,6 +488,7 @@ mod tests {
                         model: "claude-original".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -544,6 +550,7 @@ mod tests {
                         model: "test".to_string(),
                         max_tokens: 1024,
                         tools: vec![],
+                        thinking: None,
                     },
                     session,
                 )
@@ -591,6 +598,7 @@ mod tests {
                     model: "test".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 session_arc,
             )
@@ -634,6 +642,7 @@ mod tests {
                     model: "test".to_string(),
                     max_tokens: 1024,
                     tools: vec![],
+                    thinking: None,
                 },
                 session,
             )

@@ -45,6 +45,7 @@ async fn load_context_files_adds_messages_to_history() {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
+        thinking: None,
     };
     let agent = Agent::new(backend, config, test_session_arc().await).await;
 
@@ -97,6 +98,7 @@ async fn load_context_files_with_empty_vec_does_not_modify_history() {
         model: "test".to_string(),
         max_tokens: 100,
         tools: vec![],
+        thinking: None,
     };
     let agent = Agent::new(backend, config, test_session_arc().await).await;
 

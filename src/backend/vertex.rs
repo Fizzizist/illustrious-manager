@@ -17,6 +17,8 @@ const ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 #[derive(Default)]
 pub struct VertexSseParser {
     tool_use_indices: HashSet<u64>,
+    /// Tracks which indices are thinking blocks so we can emit ThinkingSignature at stop.
+    thinking_signatures: HashMap<u64, String>,
     input_tokens: u32,
     /// Buffer for events when multiple events appear in a single SSE chunk
     pub(crate) event_buffer: Vec<StreamEvent>,
@@ -60,40 +62,74 @@ impl VertexSseParser {
                 let block_type = json["content_block"]["type"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("content_block_start missing 'type'"))?;
-                if block_type == "tool_use" {
-                    let index = json["index"]
-                        .as_u64()
-                        .ok_or_else(|| anyhow::anyhow!("content_block_start missing 'index'"))?;
-                    self.tool_use_indices.insert(index);
-                    let id = json["content_block"]["id"]
-                        .as_str()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("tool_use content_block_start missing 'id'")
-                        })?
-                        .to_string();
-                    let name = json["content_block"]["name"]
-                        .as_str()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("tool_use content_block_start missing 'name'")
-                        })?
-                        .to_string();
-                    self.event_buffer
-                        .push(StreamEvent::ToolUseStart { id, name });
+                match block_type {
+                    "tool_use" => {
+                        let index = json["index"].as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("content_block_start missing 'index'")
+                        })?;
+                        self.tool_use_indices.insert(index);
+                        let id = json["content_block"]["id"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("tool_use content_block_start missing 'id'")
+                            })?
+                            .to_string();
+                        let name = json["content_block"]["name"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("tool_use content_block_start missing 'name'")
+                            })?
+                            .to_string();
+                        self.event_buffer
+                            .push(StreamEvent::ToolUseStart { id, name });
+                    }
+                    "thinking" => {
+                        let index = json["index"].as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("content_block_start missing 'index'")
+                        })?;
+                        // Signature may be present in content_block_start for some API versions
+                        let sig = json["content_block"]["signature"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        self.thinking_signatures.insert(index, sig);
+                    }
+                    "redacted_thinking" => {
+                        let index = json["index"].as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("content_block_start missing 'index'")
+                        })?;
+                        // Redacted thinking doesn't need a signature — it carries opaque data
+                        self.thinking_signatures.insert(index, String::new());
+                        if let Some(data) = json["content_block"]["data"].as_str() {
+                            self.event_buffer
+                                .push(StreamEvent::ThinkingDelta(data.to_string()));
+                        }
+                    }
+                    _ => {}
                 }
             }
             "content_block_delta" => {
                 let delta_type = json["delta"]["type"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("content_block_delta missing 'type'"))?;
-                if delta_type == "input_json_delta" {
-                    let chunk = json["delta"]["partial_json"]
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("input_json_delta missing 'partial_json'"))?
-                        .to_string();
-                    self.event_buffer.push(StreamEvent::ToolUseDelta(chunk));
-                } else {
-                    let text = json["delta"]["text"].as_str().unwrap_or("").to_string();
-                    self.event_buffer.push(StreamEvent::TextDelta(text));
+                match delta_type {
+                    "input_json_delta" => {
+                        let chunk = json["delta"]["partial_json"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("input_json_delta missing 'partial_json'")
+                            })?
+                            .to_string();
+                        self.event_buffer.push(StreamEvent::ToolUseDelta(chunk));
+                    }
+                    "thinking_delta" => {
+                        let text = json["delta"]["thinking"].as_str().unwrap_or("").to_string();
+                        self.event_buffer.push(StreamEvent::ThinkingDelta(text));
+                    }
+                    _ => {
+                        let text = json["delta"]["text"].as_str().unwrap_or("").to_string();
+                        self.event_buffer.push(StreamEvent::TextDelta(text));
+                    }
                 }
             }
             "content_block_stop" => {
@@ -102,6 +138,9 @@ impl VertexSseParser {
                     .ok_or_else(|| anyhow::anyhow!("content_block_stop missing 'index'"))?;
                 if self.tool_use_indices.remove(&index) {
                     self.event_buffer.push(StreamEvent::ToolUseDone);
+                }
+                if let Some(sig) = self.thinking_signatures.remove(&index) {
+                    self.event_buffer.push(StreamEvent::ThinkingSignature(sig));
                 }
             }
             "message_delta" => {
@@ -282,12 +321,19 @@ impl LlmBackend for VertexBackend {
 
         let url = self.endpoint(&config.model);
         let body = build_request_body(messages, config)?;
+        let thinking_enabled = config.thinking.as_ref().is_some_and(|tc| tc.enabled);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
             .bearer_auth(&token_str)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        if thinking_enabled {
+            request = request.header("anthropic-beta", "interleaved-thinking-2025-05-14");
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
@@ -324,12 +370,37 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
         })
         .collect();
 
+    let mut max_tokens = config.max_tokens as u64;
+
+    let thinking_json = config.thinking.as_ref().and_then(|tc| {
+        if !tc.enabled {
+            return None;
+        }
+        match &tc.mode {
+            crate::types::ThinkingMode::Budget { tokens } => {
+                let budget = *tokens as u64;
+                max_tokens += budget;
+                Some(serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": budget
+                }))
+            }
+            crate::types::ThinkingMode::Adaptive => Some(serde_json::json!({
+                "type": "adaptive"
+            })),
+        }
+    });
+
     let mut body = serde_json::json!({
         "anthropic_version": ANTHROPIC_VERSION,
-        "max_tokens": config.max_tokens,
+        "max_tokens": max_tokens,
         "stream": true,
         "messages": messages_json,
     });
+
+    if let Some(thinking) = thinking_json {
+        body["thinking"] = thinking;
+    }
 
     if !config.tools.is_empty() {
         body["tools"] =
@@ -360,6 +431,7 @@ mod tests {
             model: "claude-test".to_string(),
             max_tokens: 32768,
             tools: vec![],
+            thinking: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["max_tokens"], 32768);
@@ -372,6 +444,7 @@ mod tests {
             model: "claude-test".to_string(),
             max_tokens: 8192,
             tools: vec![],
+            thinking: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -390,6 +463,7 @@ mod tests {
                 description: "Run a bash command".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
             }],
+            thinking: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -408,6 +482,7 @@ mod tests {
                 description: "Run a bash command".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
+            thinking: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["tool_choice"]["type"], "auto");
@@ -420,6 +495,7 @@ mod tests {
             model: "claude-test".to_string(),
             max_tokens: 8192,
             tools: vec![],
+            thinking: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -642,5 +718,157 @@ mod tests {
 
         let event4 = parser.parse("").expect("fourth parse");
         assert!(event4.is_none(), "buffer should be empty after 3 events");
+    }
+
+    #[test]
+    fn parser_thinking_delta_returns_thinking_delta() {
+        let mut parser = VertexSseParser::new();
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"thinking_delta","thinking":"Let me reason about this"}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        match result {
+            Some(StreamEvent::ThinkingDelta(text)) => {
+                assert_eq!(text, "Let me reason about this");
+            }
+            other => panic!("expected ThinkingDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parser_thinking_block_start_does_not_emit_event() {
+        let mut parser = VertexSseParser::new();
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        assert!(
+            result.is_none(),
+            "thinking content_block_start should return None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn parser_redacted_thinking_block_start_captures_data() {
+        let mut parser = VertexSseParser::new();
+        let data = r#"{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"aGVsbG8gd29ybGQ="}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        match result {
+            Some(StreamEvent::ThinkingDelta(data)) => {
+                assert_eq!(data, "aGVsbG8gd29ybGQ=");
+            }
+            other => panic!(
+                "expected ThinkingDelta for redacted_thinking, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn parser_redacted_thinking_block_start_without_data_does_not_emit() {
+        let mut parser = VertexSseParser::new();
+        let data = r#"{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking"}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        assert!(
+            result.is_none(),
+            "redacted_thinking without data should return None, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn parser_content_block_stop_after_thinking_emits_signature() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":"sig_test"}}"#)
+            .expect("should parse thinking block_start");
+        let result = parser
+            .parse(r#"{"type":"content_block_stop","index":1}"#)
+            .expect("should parse block_stop");
+        match result {
+            Some(StreamEvent::ThinkingSignature(sig)) => {
+                assert_eq!(
+                    sig, "sig_test",
+                    "signature should match the one from content_block_start"
+                );
+            }
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_request_body_with_budget_thinking_includes_thinking_params() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
+                enabled: true,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 16384);
+    }
+
+    #[test]
+    fn build_request_body_with_adaptive_thinking_includes_thinking_params() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: true,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn build_request_body_with_thinking_adjusts_max_tokens() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
+                enabled: true,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["max_tokens"], 24576);
+    }
+
+    #[test]
+    fn build_request_body_without_thinking_has_no_thinking_field() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must not be in the request body when None"
+        );
+    }
+
+    #[test]
+    fn build_request_body_with_disabled_thinking_has_no_thinking_field() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: false,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must not be in the request body when disabled"
+        );
     }
 }

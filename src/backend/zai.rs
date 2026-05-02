@@ -81,6 +81,14 @@ impl ZaiSseParser {
             }
         }
 
+        if let Some(reasoning) = json["choices"][0]["delta"]["reasoning_content"].as_str()
+            && !reasoning.is_empty()
+        {
+            self.event_buffer
+                .push(StreamEvent::ThinkingDelta(reasoning.to_string()));
+            return Ok(());
+        }
+
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
             && !content.is_empty()
         {
@@ -214,6 +222,10 @@ impl ZaiBackend {
                                         }
                                     }));
                                 }
+                                ContentBlock::Thinking { .. }
+                                | ContentBlock::RedactedThinking { .. } => {
+                                    // Skip — z.ai doesn't support thinking blocks in message history
+                                }
                                 _ => {}
                             }
                         }
@@ -231,6 +243,11 @@ impl ZaiBackend {
                                 .map(|block| match block {
                                     ContentBlock::Text(text) => {
                                         serde_json::json!({"type": "text", "text": text})
+                                    }
+                                    ContentBlock::Thinking { .. }
+                                    | ContentBlock::RedactedThinking { .. } => {
+                                        // Skip — z.ai doesn't support thinking blocks in message history
+                                        serde_json::Value::Null
                                     }
                                     other => serde_json::to_value(other)
                                         .unwrap_or(serde_json::Value::Null),
@@ -268,6 +285,12 @@ impl ZaiBackend {
                 .collect();
             body["tools"] = serde_json::json!(tools_json);
             body["parallel_tool_calls"] = serde_json::json!(true);
+        }
+
+        if let Some(ref thinking_config) = config.thinking
+            && thinking_config.enabled
+        {
+            body["enable_thinking"] = serde_json::json!(true);
         }
 
         body
@@ -340,6 +363,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -360,6 +384,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![
             Message {
@@ -394,6 +419,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -490,6 +516,7 @@ mod tests {
                     }),
                 },
             ],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -534,6 +561,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -564,6 +592,7 @@ mod tests {
                 description: "Run bash".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
+            thinking: None,
         };
         let messages = vec![];
 
@@ -781,6 +810,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![
             Message {
@@ -827,6 +857,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -852,6 +883,7 @@ mod tests {
             model: "glm-5-turbo".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![
             Message {
@@ -885,5 +917,85 @@ mod tests {
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[2]["tool_call_id"], "tool_0");
         assert_eq!(msgs[2]["content"], "file1.txt");
+    }
+
+    #[test]
+    fn parse_sse_data_extracts_reasoning_content_as_thinking_delta() {
+        let mut parser = ZaiSseParser::new();
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"Let me think about this step by step."}}]}"#;
+        let result = parser.parse(data);
+        assert!(
+            result.is_ok(),
+            "Should successfully parse reasoning_content SSE data"
+        );
+        let event = result.unwrap();
+        assert!(event.is_some(), "Should return Some(event)");
+        assert!(
+            matches!(event, Some(StreamEvent::ThinkingDelta(_))),
+            "Should be ThinkingDelta, got: {:?}",
+            event
+        );
+        if let Some(StreamEvent::ThinkingDelta(text)) = event {
+            assert_eq!(text, "Let me think about this step by step.");
+        }
+    }
+
+    #[test]
+    fn parse_sse_data_reasoning_content_empty_produces_no_event() {
+        let mut parser = ZaiSseParser::new();
+        let data = r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#;
+        let result = parser.parse(data);
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_none(),
+            "Empty reasoning_content should produce no event"
+        );
+    }
+
+    #[test]
+    fn build_request_body_with_thinking_enabled_adds_enable_thinking() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                enabled: true,
+                mode: crate::types::ThinkingMode::Adaptive,
+            }),
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text("Hello".to_string())],
+        }];
+
+        let body = backend.build_request_body(&messages, &config);
+
+        assert_eq!(
+            body["enable_thinking"], true,
+            "enable_thinking should be true when thinking is enabled"
+        );
+    }
+
+    #[test]
+    fn build_request_body_without_thinking_has_no_enable_thinking() {
+        let backend = ZaiBackend::new("test-key".to_string()).unwrap();
+        let config = RequestConfig {
+            model: "glm-5-turbo".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: None,
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text("Hello".to_string())],
+        }];
+
+        let body = backend.build_request_body(&messages, &config);
+
+        assert!(
+            body.get("enable_thinking").is_none(),
+            "enable_thinking should not be present when thinking is None"
+        );
     }
 }

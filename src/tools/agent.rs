@@ -413,6 +413,7 @@ mod tests {
             sessions_dir: dir_path.clone(),
             models: BTreeMap::new(),
             compaction: CompactionConfig::default(),
+            thinking: None,
         });
 
         // Spawner that wires ImmediateTextBackend bypassing real auth.
