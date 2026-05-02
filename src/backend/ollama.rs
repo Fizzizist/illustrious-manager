@@ -33,6 +33,12 @@ impl OllamaParser {
             events.push(StreamEvent::TextDelta(content.to_string()));
         }
 
+        if let Some(thinking) = json["message"]["thinking"].as_str()
+            && !thinking.is_empty()
+        {
+            events.push(StreamEvent::ThinkingDelta(thinking.to_string()));
+        }
+
         if let Some(tool_calls) = json["message"]["tool_calls"].as_array() {
             for (idx, tool_call) in tool_calls.iter().enumerate() {
                 let function = &tool_call["function"];
@@ -186,6 +192,8 @@ impl OllamaBackend {
                                         }
                                     }));
                                 }
+                                ContentBlock::Thinking { .. }
+                                | ContentBlock::RedactedThinking { .. } => {}
                                 _ => {}
                             }
                         }
@@ -202,6 +210,8 @@ impl OllamaBackend {
                             .iter()
                             .filter_map(|block| match block {
                                 ContentBlock::Text(text) => Some(text.as_str()),
+                                ContentBlock::Thinking { .. }
+                                | ContentBlock::RedactedThinking { .. } => None,
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -223,6 +233,12 @@ impl OllamaBackend {
                 "num_predict": config.max_tokens
             }
         });
+
+        if let Some(ref thinking_config) = config.thinking
+            && thinking_config.enabled
+        {
+            body["options"]["thinking"] = serde_json::json!(true);
+        }
 
         if !config.tools.is_empty() {
             let tools_json: Vec<serde_json::Value> = config
@@ -396,6 +412,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -431,6 +448,7 @@ mod tests {
                     "required": ["command"]
                 }),
             }],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -459,6 +477,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -490,6 +509,7 @@ mod tests {
                 description: "Run bash".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
+            thinking: None,
         };
         let body = backend.build_request_body(&[], &config);
         assert!(
@@ -510,6 +530,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::Assistant,
@@ -549,6 +570,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -579,6 +601,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
             tools: vec![],
+            thinking: None,
         };
         let messages = vec![
             Message {
@@ -700,5 +723,85 @@ mod tests {
         assert!(matches!(&events[1], StreamEvent::ToolUseStart { .. }));
         assert!(matches!(&events[2], StreamEvent::ToolUseDelta(_)));
         assert!(matches!(&events[3], StreamEvent::ToolUseDone));
+    }
+
+    #[test]
+    fn parser_thinking_field_produces_thinking_delta() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"content":"","thinking":"Let me reason about this..."}}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], StreamEvent::ThinkingDelta(t) if t == "Let me reason about this...")
+        );
+    }
+
+    #[test]
+    fn parser_thinking_field_empty_produces_no_thinking_delta() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"content":"","thinking":""}}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn request_body_with_thinking_adds_thinking_option() {
+        let backend = OllamaBackend::new(&OllamaConfig {
+            api_key: "test-key".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "https://ollama.com/api/chat".to_string(),
+        })
+        .unwrap();
+        let config = RequestConfig {
+            model: "gpt-oss:120b".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig::default()),
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text("Hello".to_string())],
+        }];
+
+        let body = backend.build_request_body(&messages, &config);
+        assert_eq!(body["options"]["thinking"], true);
+    }
+
+    #[test]
+    fn request_body_without_thinking_has_no_thinking_option() {
+        let backend = OllamaBackend::new(&OllamaConfig {
+            api_key: "test-key".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "https://ollama.com/api/chat".to_string(),
+        })
+        .unwrap();
+        let config = RequestConfig {
+            model: "gpt-oss:120b".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: None,
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text("Hello".to_string())],
+        }];
+
+        let body = backend.build_request_body(&messages, &config);
+        assert!(
+            body["options"].get("thinking").is_none(),
+            "should not include thinking option when config.thinking is None"
+        );
+    }
+
+    #[test]
+    fn parser_chunk_with_both_thinking_and_content() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"message":{"content":"Here is the answer","thinking":"Let me work through this step by step..."}}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Here is the answer"));
+        assert!(
+            matches!(&events[1], StreamEvent::ThinkingDelta(t) if t == "Let me work through this step by step...")
+        );
     }
 }

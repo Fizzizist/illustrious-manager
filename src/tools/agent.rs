@@ -412,6 +412,7 @@ mod tests {
             },
             sessions_dir: dir_path.clone(),
             models: BTreeMap::new(),
+            thinking: None,
         });
 
         // Spawner that wires ImmediateTextBackend bypassing real auth.

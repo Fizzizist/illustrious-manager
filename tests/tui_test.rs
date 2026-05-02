@@ -185,6 +185,7 @@ async fn user_message_appears_immediately() {
         model: "test-model".to_string(),
         max_tokens: 1024,
         tools: vec![],
+        thinking: None,
     };
 
     let call_count = Arc::new(AtomicUsize::new(0));
