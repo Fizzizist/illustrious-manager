@@ -79,6 +79,14 @@ impl Agent {
         self
     }
 
+    pub fn with_thinking(self, thinking: Option<crate::types::ThinkingConfig>) -> Self {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .thinking = thinking;
+        self
+    }
+
     pub fn with_context_files(self) -> Result<Self> {
         let files = discover_context_files_from_env()?;
         self.load_context_files(files);
@@ -291,6 +299,8 @@ impl Agent {
                 };
 
                 let mut text_accumulated = String::new();
+                let mut thinking_accumulated = String::new();
+                let mut thinking_signature = String::new();
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
                 let mut stream = backend_stream;
@@ -318,12 +328,35 @@ impl Agent {
                                 &event_tx,
                             )
                             .await;
+                            if !thinking_accumulated.is_empty() {
+                                let thinking_msg = Message {
+                                    role: Role::Assistant,
+                                    content: vec![ContentBlock::Thinking {
+                                        text: thinking_accumulated.clone(),
+                                        signature: thinking_signature.clone(),
+                                    }],
+                                };
+                                lock(&history_arc).push(thinking_msg.clone());
+                                let _ = session
+                                    .lock()
+                                    .await
+                                    .conversation()
+                                    .insert_message(&thinking_msg)
+                                    .await;
+                            }
                             break 'outer;
                         }
                         None => break,
                         Some(Ok(StreamEvent::TextDelta(text))) => {
                             text_accumulated.push_str(&text);
                             let _ = event_tx.unbounded_send(AgentEvent::TokenReceived(text));
+                        }
+                        Some(Ok(StreamEvent::ThinkingDelta(text))) => {
+                            thinking_accumulated.push_str(&text);
+                            let _ = event_tx.unbounded_send(AgentEvent::ThinkingReceived(text));
+                        }
+                        Some(Ok(StreamEvent::ThinkingSignature(sig))) => {
+                            thinking_signature = sig;
                         }
                         Some(Ok(StreamEvent::ToolUseStart { id, name })) => {
                             current_tool = Some(PendingToolCall {
@@ -358,6 +391,22 @@ impl Agent {
                             if !text_accumulated.is_empty() {
                                 persist_partial(&text_accumulated, &history_arc, &session).await;
                             }
+                            if !thinking_accumulated.is_empty() {
+                                let thinking_msg = Message {
+                                    role: Role::Assistant,
+                                    content: vec![ContentBlock::Thinking {
+                                        text: thinking_accumulated.clone(),
+                                        signature: thinking_signature.clone(),
+                                    }],
+                                };
+                                lock(&history_arc).push(thinking_msg.clone());
+                                let _ = session
+                                    .lock()
+                                    .await
+                                    .conversation()
+                                    .insert_message(&thinking_msg)
+                                    .await;
+                            }
                             record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
                             break 'outer;
                         }
@@ -366,6 +415,12 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     let mut content = vec![];
+                    if !thinking_accumulated.is_empty() {
+                        content.push(ContentBlock::Thinking {
+                            text: thinking_accumulated.clone(),
+                            signature: thinking_signature.clone(),
+                        });
+                    }
                     if !text_accumulated.is_empty() {
                         content.push(ContentBlock::Text(text_accumulated.clone()));
                     }
@@ -403,9 +458,13 @@ impl Agent {
                 }
 
                 let text_for_cancel = text_accumulated.clone();
+                let thinking_for_cancel = thinking_accumulated.clone();
+                let signature_for_cancel = thinking_signature.clone();
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
+                    thinking_accumulated,
+                    thinking_signature.clone(),
                     &tools,
                     &confirmation_mode,
                     &mut confirmation_rx,
@@ -425,6 +484,23 @@ impl Agent {
                         &event_tx,
                     )
                     .await;
+                    // Also persist thinking if any
+                    if !thinking_for_cancel.is_empty() {
+                        let thinking_msg = Message {
+                            role: Role::Assistant,
+                            content: vec![ContentBlock::Thinking {
+                                text: thinking_for_cancel,
+                                signature: signature_for_cancel,
+                            }],
+                        };
+                        lock(&history_arc).push(thinking_msg.clone());
+                        let _ = session
+                            .lock()
+                            .await
+                            .conversation()
+                            .insert_message(&thinking_msg)
+                            .await;
+                    }
                     break;
                 }
 
@@ -508,9 +584,12 @@ async fn record_error(
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     tool_calls: Vec<PendingToolCall>,
     text_prefix: String,
+    thinking_prefix: String,
+    thinking_signature: String,
     tools: &ToolRegistry,
     confirmation_mode: &ConfirmationMode,
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
@@ -518,6 +597,12 @@ async fn execute_tool_calls(
     cancel_token: Option<CancellationToken>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
+    if !thinking_prefix.is_empty() {
+        assistant_content.push(ContentBlock::Thinking {
+            text: thinking_prefix,
+            signature: thinking_signature,
+        });
+    }
     if !text_prefix.is_empty() {
         assistant_content.push(ContentBlock::Text(text_prefix));
     }
@@ -805,6 +890,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::ThinkingReceived(_) => {}
         }
     }
 
@@ -916,7 +1002,7 @@ impl AgentSpawner {
 
         let agent =
             match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
-                Ok(a) => a,
+                Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
                 Err(e) => {
                     return HeadlessOutcome {
                         text: String::new(),
@@ -975,6 +1061,7 @@ pub async fn spawn_agent_with_selection(
         model: selection.model,
         max_tokens: DEFAULT_MAX_TOKENS,
         tools: tools.definitions(),
+        thinking: None,
     };
     Ok(Agent::new(selection.backend, request_config, session)
         .await
@@ -1032,6 +1119,23 @@ mod tests {
     fn text_response(text: &str) -> Vec<Result<StreamEvent>> {
         vec![
             Ok(StreamEvent::TextDelta(text.to_string())),
+            Ok(StreamEvent::Done),
+        ]
+    }
+
+    fn thinking_then_text_response(thinking: &str, text: &str) -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
+            Ok(StreamEvent::ThinkingSignature("sig_abc123".to_string())),
+            Ok(StreamEvent::TextDelta(text.to_string())),
+            Ok(StreamEvent::Done),
+        ]
+    }
+
+    fn thinking_only_response(thinking: &str) -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
+            Ok(StreamEvent::ThinkingSignature("sig_def456".to_string())),
             Ok(StreamEvent::Done),
         ]
     }
@@ -1105,6 +1209,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         if let Some(t) = tool {
@@ -1211,6 +1316,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1255,6 +1361,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1300,6 +1407,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1349,6 +1457,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1405,6 +1514,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1706,6 +1816,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1777,6 +1888,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1824,6 +1936,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -1861,6 +1974,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -1899,6 +2013,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -1947,6 +2062,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -2000,6 +2116,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2026,6 +2143,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2055,6 +2173,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2187,6 +2306,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2348,6 +2468,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2490,6 +2611,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2618,6 +2740,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "hi".to_string()).await;
@@ -2643,6 +2766,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2686,6 +2810,7 @@ mod tests {
             model: "test".to_string(),
             max_tokens: 100,
             tools: vec![],
+            thinking: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "fail".to_string()).await;
@@ -3090,5 +3215,262 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
             "expected Interrupted; got: {events:?}"
         );
+    }
+
+    // ── Thinking accumulation tests (Finding 6) ──────────────────────────
+
+    #[tokio::test]
+    async fn thinking_delta_emits_thinking_received_and_accumulates() {
+        let backend = SequencedBackend::new(vec![thinking_then_text_response(
+            "reasoning about the problem",
+            "final answer",
+        )]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("think".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ThinkingReceived(t) if t == "reasoning about the problem")),
+            "expected ThinkingReceived with reasoning text"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "final answer")),
+            "expected TokenReceived with final answer"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_persisted_in_history_with_signature() {
+        let backend = SequencedBackend::new(vec![thinking_then_text_response(
+            "my reasoning",
+            "my answer",
+        )]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("think".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let assistant_msg = history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("should have assistant message");
+
+        let thinking_block = assistant_msg
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Thinking { .. }))
+            .expect("should have thinking block");
+        if let ContentBlock::Thinking { text, signature } = thinking_block {
+            assert_eq!(text, "my reasoning");
+            assert_eq!(
+                signature, "sig_abc123",
+                "signature should be captured from stream"
+            );
+        }
+
+        let text_block = assistant_msg
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Text(_)))
+            .expect("should have text block");
+        if let ContentBlock::Text(text) = text_block {
+            assert_eq!(text, "my answer");
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_only_response_persisted_in_history() {
+        let backend = SequencedBackend::new(vec![thinking_only_response("just thinking")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("think".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let assistant_msg = history
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("should have assistant message");
+
+        assert!(
+            assistant_msg
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Thinking { .. })),
+            "should have thinking block"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_persisted_on_stream_error() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::ThinkingDelta("partial thinking".to_string())),
+            Ok(StreamEvent::ThinkingSignature("sig_err".to_string())),
+            Err(anyhow::anyhow!("stream error")),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("think".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let has_thinking = history.iter().any(|m| {
+            m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Thinking { text, signature } if text == "partial thinking" && signature == "sig_err"))
+        });
+        assert!(
+            has_thinking,
+            "thinking should be persisted even on stream error; history: {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_persisted_on_pre_tool_cancellation() {
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        // Backend emits thinking then blocks until cancelled
+        struct ThinkCancelBackend {
+            token: CancellationToken,
+        }
+        #[async_trait]
+        impl LlmBackend for ThinkCancelBackend {
+            async fn send_message(
+                &self,
+                _: &[Message],
+                _: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                let token = self.token.clone();
+                let events: Vec<Result<StreamEvent>> = vec![
+                    Ok(StreamEvent::ThinkingDelta(
+                        "thinking before cancel".to_string(),
+                    )),
+                    Ok(StreamEvent::ThinkingSignature("sig_cancel".to_string())),
+                ];
+                Ok(Box::pin(futures::stream::unfold(
+                    (events.into_iter(), token, false),
+                    |(mut iter, token, done)| async move {
+                        if done {
+                            return None;
+                        }
+                        if let Some(item) = iter.next() {
+                            return Some((item, (iter, token, false)));
+                        }
+                        token.cancelled().await;
+                        None
+                    },
+                )))
+            }
+        }
+
+        let agent = agent_with_mode(
+            ThinkCancelBackend {
+                token: cancel_clone,
+            },
+            None,
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            cancel.cancel();
+        });
+
+        let stream = agent
+            .send("think".to_string(), None, Some(CancellationToken::new()))
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let has_thinking = history.iter().any(|m| {
+            m.role == Role::Assistant
+                && m.content.iter().any(|b| matches!(b, ContentBlock::Thinking { text, .. } if text == "thinking before cancel"))
+        });
+        assert!(
+            has_thinking,
+            "thinking should be persisted on pre-tool cancellation; history: {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_with_tool_call_includes_signature_in_assistant_message() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ThinkingDelta("let me think".to_string())),
+                Ok(StreamEvent::ThinkingSignature("sig_tool".to_string())),
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("run".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let history = agent.history();
+        let assistant_with_tool = history
+            .iter()
+            .find(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+            })
+            .expect("should have assistant message with tool use");
+
+        let thinking = assistant_with_tool
+            .content
+            .iter()
+            .find(|b| matches!(b, ContentBlock::Thinking { .. }));
+        assert!(
+            thinking.is_some(),
+            "thinking block should be in assistant message with tool use"
+        );
+        if let ContentBlock::Thinking { text, signature } = thinking.expect("checked above") {
+            assert_eq!(text, "let me think");
+            assert_eq!(signature, "sig_tool");
+        }
     }
 }
