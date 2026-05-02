@@ -203,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn backend_factory_errors_for_unknown_role() {
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig};
+        use crate::config::{AppConfig, CompactionConfig, ToolsConfig, VertexConfig};
         use std::collections::BTreeMap;
 
         let config = AppConfig {
@@ -218,6 +218,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            compaction: CompactionConfig::default(),
         };
         let factory = super::BackendFactory::new(config);
 
@@ -234,7 +235,7 @@ mod tests {
 
     #[tokio::test]
     async fn backend_factory_caches_vertex_auth_provider_per_project_region() {
-        use crate::config::{AppConfig, ModelRole, ToolsConfig, VertexConfig};
+        use crate::config::{AppConfig, CompactionConfig, ModelRole, ToolsConfig, VertexConfig};
         use std::collections::BTreeMap;
 
         let mut models = BTreeMap::new();
@@ -264,6 +265,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
+            compaction: CompactionConfig::default(),
         };
         let factory = super::BackendFactory::new(config);
 

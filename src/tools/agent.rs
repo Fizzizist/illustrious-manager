@@ -367,7 +367,7 @@ mod tests {
     async fn agent_tool_creates_new_session_db() {
         use crate::agent::spawn_agent_with_selection;
         use crate::backend::BackendSelection;
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig};
+        use crate::config::{AppConfig, CompactionConfig, ToolsConfig, VertexConfig};
         use crate::session::Session;
         use crate::tools::ToolRegistry;
         use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
@@ -412,6 +412,7 @@ mod tests {
             },
             sessions_dir: dir_path.clone(),
             models: BTreeMap::new(),
+            compaction: CompactionConfig::default(),
         });
 
         // Spawner that wires ImmediateTextBackend bypassing real auth.

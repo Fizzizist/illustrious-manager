@@ -190,19 +190,78 @@ impl SlashCommand for TasksCommand {
     }
 }
 
+/// Built-in `/compact` command — manually triggers context compaction.
+pub struct CompactCommand;
+
+impl SlashCommand for CompactCommand {
+    fn name(&self) -> &str {
+        "compact"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            if ctx.app.state != AppState::Input {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Error,
+                    "Cannot compact while not in Input state.".to_string(),
+                ));
+                return Ok(DispatchResult::Handled);
+            }
+
+            ctx.app.set_state(AppState::Compacting);
+            ctx.app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                "Compacting context...".to_string(),
+            ));
+
+            match ctx.agent.compact_stored().await {
+                Ok(entries_compacted) => {
+                    if entries_compacted == 0 {
+                        ctx.app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Info,
+                            "Nothing to compact — history is too short.".to_string(),
+                        ));
+                    } else {
+                        ctx.app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Info,
+                            format!("Compacted {entries_compacted} entries."),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Error,
+                        format!("Compaction failed: {e}"),
+                    ));
+                }
+            }
+
+            ctx.app.set_state(AppState::Input);
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
     registry.register(Box::new(SessionsCommand));
     registry.register(Box::new(ModelCommand));
     registry.register(Box::new(TasksCommand));
+    registry.register(Box::new(CompactCommand));
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppConfig, ToolsConfig, VertexConfig};
+    use crate::config::{AppConfig, CompactionConfig, ToolsConfig, VertexConfig};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -219,6 +278,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
+            compaction: CompactionConfig::default(),
         }
     }
 
@@ -553,5 +613,92 @@ mod tests {
         // both pending with the same status, ordered by stable sort then DB insertion order (alpha inserted first)
         assert_eq!(picker.tasks()[0].title, "task alpha");
         assert_eq!(picker.tasks()[1].title, "task beta");
+    }
+
+    #[tokio::test]
+    async fn compact_command_in_input_state_is_handled() {
+        let registry = default_registry();
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                },
+                session,
+            )
+            .await,
+        );
+
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+        };
+        let result = registry
+            .dispatch("/compact", &mut ctx)
+            .await
+            .expect("dispatch");
+        assert_eq!(result, DispatchResult::Handled);
+        // Compaction should fail since no backend factory is configured,
+        // but the command itself should be handled (not passthrough)
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.content.contains("Compaction") || e.content.contains("compact")),
+            "should have a compaction-related message in conversation"
+        );
+    }
+
+    #[test]
+    fn parse_command_recognizes_compact() {
+        let parsed = parse_command("/compact").expect("should parse");
+        assert_eq!(parsed.name, "compact");
+        assert_eq!(parsed.args, "");
+    }
+
+    #[test]
+    fn compaction_config_default_values() {
+        let config = crate::config::CompactionConfig::default();
+        assert_eq!(config.max_context_window_length, None);
+        assert_eq!(config.compaction_retain_count, 10);
+        assert_eq!(config.compaction_threshold_percent, 80);
+        assert_eq!(config.compaction_role, "default");
+    }
+
+    #[test]
+    fn compaction_config_deserializes_with_max() {
+        let toml_str = r#"
+            max_context_window_length = 200000
+            compaction_retain_count = 5
+            compaction_threshold_percent = 70
+            compaction_role = "thinking"
+        "#;
+        let config: crate::config::CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_length, Some(200000));
+        assert_eq!(config.compaction_retain_count, 5);
+        assert_eq!(config.compaction_threshold_percent, 70);
+        assert_eq!(config.compaction_role, "thinking");
+    }
+
+    #[test]
+    fn compaction_config_deserializes_with_defaults() {
+        let toml_str = "";
+        let config: crate::config::CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_length, None);
+        assert_eq!(config.compaction_retain_count, 10);
+        assert_eq!(config.compaction_threshold_percent, 80);
+        assert_eq!(config.compaction_role, "default");
     }
 }

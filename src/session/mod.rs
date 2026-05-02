@@ -90,7 +90,8 @@ const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +101,9 @@ CREATE TABLE IF NOT EXISTS task (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );";
+
+const MIGRATIONS: &[&str] =
+    &["ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1"];
 
 pub struct Session {
     pub id: String,
@@ -126,6 +130,18 @@ impl Session {
         conn.execute_batch(SCHEMA)
             .await
             .context("Failed to run schema DDL")?;
+
+        for migration in MIGRATIONS {
+            match conn.execute(migration, ()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("duplicate column name") {
+                        return Err(e).context("Failed to run schema migration");
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             id: sess_id,

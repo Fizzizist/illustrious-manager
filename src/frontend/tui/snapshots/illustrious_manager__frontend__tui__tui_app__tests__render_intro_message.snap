@@ -3,9 +3,9 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│  # Illustrious Manager                                   │"
-"│                                                          │"
-"│  - backend: vertex                                       │"
+"│  - compaction.compaction_retain_count: 10                │"
+"│  - compaction.compaction_role: default                   │"
+"│  - compaction.compaction_threshold_percent: 80           │"
 "│  - sessions_dir: /sessions                               │"
 "│  - tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"

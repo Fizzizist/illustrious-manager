@@ -779,7 +779,9 @@ mod tests {
 
     #[test]
     fn render_intro_entry() {
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+        use crate::config::{
+            AppConfig, CompactionConfig, ToolsConfig, VertexConfig, generate_intro_message,
+        };
 
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -793,6 +795,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
+            compaction: CompactionConfig::default(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,

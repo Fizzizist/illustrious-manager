@@ -137,6 +137,7 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::Interrupted { .. } => {
                 writeln!(writer, "\n*(interrupted)*")?;
                 break;
@@ -197,6 +198,7 @@ async fn collect_response<R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;
                 result_text = partial_text;

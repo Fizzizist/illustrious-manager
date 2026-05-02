@@ -42,6 +42,7 @@ pub enum AppState {
     },
     SessionPicker,
     TasksPicker,
+    Compacting,
 }
 
 pub struct App {
@@ -65,6 +66,9 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
+    pub context_length: u32,
+    pub max_context_window_length: Option<u32>,
+    pub compaction_threshold_percent: u8,
     pending_g: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
@@ -93,6 +97,10 @@ impl App {
                 self.input.set_mode(InputMode::TasksPicker);
                 self.pending_g = false;
             }
+            AppState::Compacting => {
+                self.input.set_mode(InputMode::Compacting);
+                self.pending_g = false;
+            }
         }
     }
 
@@ -115,6 +123,9 @@ impl App {
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
+            context_length: 0,
+            max_context_window_length: None,
+            compaction_threshold_percent: 80,
             pending_g: false,
             tools,
         }
@@ -334,6 +345,7 @@ impl App {
         self.usage = TokenUsage::default();
         self.subagent_usage = TokenUsage::default();
         self.last_input_total = 0;
+        self.context_length = 0;
         self.tasks_picker = None;
         self.session_picker = None;
         self.pending_g = false;
@@ -392,6 +404,8 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         working_dir: &app.working_dir,
         usage: &app.usage,
         subagent_usage: Some(&app.subagent_usage),
+        context_length: app.context_length,
+        max_context_window_length: app.max_context_window_length,
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -520,6 +534,7 @@ pub fn handle_agent_event(
             output_tokens,
             ..
         } => {
+            app.context_length = input_tokens;
             let new_input = input_tokens.saturating_sub(app.last_input_total);
             app.last_input_total = input_tokens;
             app.usage.add(new_input, output_tokens);
@@ -551,6 +566,18 @@ pub fn handle_agent_event(
         }
         AgentEvent::Warn(_) => {
             // Diagnostic only — written to the debug log via log_event; not shown in UI.
+        }
+        AgentEvent::CompactionComplete { entries_compacted } => {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                format!("Compacted {entries_compacted} entries"),
+            ));
+            app.current_response.clear();
+            app.confirmation_tx = None;
+            app.cancel_token = None;
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
+            app.git_branch = status_line::detect_git_branch();
         }
     }
     Ok(())
@@ -593,6 +620,8 @@ async fn run_app(
     app.model = agent.model();
     app.git_branch = status_line::detect_git_branch();
     app.working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    app.max_context_window_length = config.compaction.max_context_window_length;
+    app.compaction_threshold_percent = config.compaction.compaction_threshold_percent;
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
@@ -617,6 +646,46 @@ async fn run_app(
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+
+                // Auto-compaction: after a response completes, check if the
+                // context window exceeds the configured threshold.
+                if app.state == AppState::Input
+                    && let Some(max_len) = app.max_context_window_length
+                    && max_len > 0
+                    && app.context_length > 0
+                {
+                    let threshold =
+                        max_len * u32::from(app.compaction_threshold_percent) / 100;
+                    if app.context_length >= threshold {
+                        app.set_state(AppState::Compacting);
+                        app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Info,
+                            "Auto-compacting context...".to_string(),
+                        ));
+                        match agent.compact_stored().await {
+                            Ok(n) => {
+                                if n == 0 {
+                                    app.conversation.push(ConversationEntry::new(
+                                        ConversationRole::Info,
+                                        "Nothing to compact — history is too short.".to_string(),
+                                    ));
+                                } else {
+                                    app.conversation.push(ConversationEntry::new(
+                                        ConversationRole::Info,
+                                        format!("Auto-compacted {n} entries."),
+                                    ));
+                                }
+                            }
+                            Err(e) => {
+                                app.conversation.push(ConversationEntry::new(
+                                    ConversationRole::Error,
+                                    format!("Auto-compaction failed: {e}"),
+                                ));
+                            }
+                        }
+                        app.set_state(AppState::Input);
+                    }
+                }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
                 if let Event::Paste(text) = &terminal_event {
@@ -1973,7 +2042,9 @@ mod tests {
 
     #[test]
     fn render_intro_message_snapshot() {
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+        use crate::config::{
+            AppConfig, CompactionConfig, ToolsConfig, VertexConfig, generate_intro_message,
+        };
 
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -1987,6 +2058,7 @@ mod tests {
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
+            compaction: CompactionConfig::default(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2559,6 +2631,76 @@ mod tests {
         assert!(
             !app.pending_g,
             "ToolConfirmation state should clear pending_g"
+        );
+
+        app.pending_g = true;
+        app.set_state(AppState::Compacting);
+        assert!(!app.pending_g, "Compacting state should clear pending_g");
+    }
+
+    #[test]
+    fn set_state_compacting_sets_input_mode() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+        assert_eq!(app.state, AppState::Compacting);
+        assert_eq!(app.input.mode(), &InputMode::Compacting);
+    }
+
+    #[test]
+    fn compacting_state_height_returns_min() {
+        let mut input = crate::frontend::tui::input_area::InputArea::new();
+        input.set_mode(crate::frontend::tui::input_area::InputMode::Compacting);
+        assert_eq!(
+            input.height_for_width(60, 24),
+            3,
+            "Compacting mode should return MIN_HEIGHT"
+        );
+    }
+
+    #[test]
+    fn context_length_updated_on_usage_event() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert_eq!(app.context_length, 0);
+
+        let event = AgentEvent::Usage {
+            input_tokens: 500,
+            output_tokens: 100,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event, None).expect("handle");
+        assert_eq!(app.context_length, 500);
+
+        let event2 = AgentEvent::Usage {
+            input_tokens: 800,
+            output_tokens: 150,
+            stop_reason: "end_turn".to_string(),
+        };
+        handle_agent_event(&mut app, event2, None).expect("handle");
+        assert_eq!(app.context_length, 800);
+    }
+
+    #[test]
+    fn reset_for_session_switch_resets_context_length() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.context_length = 50000;
+        app.reset_for_session_switch();
+        assert_eq!(app.context_length, 0);
+    }
+
+    #[test]
+    fn compaction_complete_event_adds_info_entry_and_returns_to_input() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+        let event = AgentEvent::CompactionComplete {
+            entries_compacted: 15,
+        };
+        handle_agent_event(&mut app, event, None).expect("handle");
+        assert_eq!(app.state, AppState::Input);
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("Compacted 15 entries")),
+            "should have compaction info entry"
         );
     }
 }

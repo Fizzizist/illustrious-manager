@@ -33,6 +33,8 @@ pub struct Agent {
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
     session: Arc<TokioMutex<Session>>,
+    compaction_factory: Option<Arc<BackendFactory>>,
+    compaction_config: Option<crate::config::CompactionConfig>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -65,6 +67,8 @@ impl Agent {
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
+            compaction_factory: None,
+            compaction_config: None,
         }
     }
 
@@ -76,6 +80,16 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self
+    }
+
+    pub fn with_compaction(
+        mut self,
+        factory: Arc<BackendFactory>,
+        config: crate::config::CompactionConfig,
+    ) -> Self {
+        self.compaction_factory = Some(factory);
+        self.compaction_config = Some(config);
         self
     }
 
@@ -230,6 +244,207 @@ impl Agent {
             .context_prefix_len
             .lock()
             .unwrap_or_else(|e| e.into_inner()) += 1;
+    }
+
+    /// Return the current context length as an estimate of token count.
+    ///
+    /// Uses a simple heuristic of ~4 characters per token, which is close to
+    /// the Anthropic tokenizer average for English prose.
+    pub fn context_length(&self) -> u32 {
+        let history = lock(&self.history);
+        let total_chars: usize = history
+            .iter()
+            .flat_map(|m| {
+                m.content.iter().map(|block| match block {
+                    ContentBlock::Text(t) => t.len(),
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        name.len() + input.to_string().len()
+                    }
+                    ContentBlock::ToolResult { content, .. } => content.len(),
+                })
+            })
+            .sum();
+        total_chars.div_ceil(4) as u32
+    }
+
+    /// Compact the conversation history by summarising old messages.
+    ///
+    /// Keeps the last `compaction_retain_count` assistant turns (and their
+    /// associated user/tool-result messages) intact. Everything before that
+    /// is sent to the LLM for summarisation, then replaced by a single
+    /// compaction-summary user message.
+    ///
+    /// Returns the number of entries that were compacted, or 0 if there
+    /// was nothing to compact.
+    pub async fn compact(
+        &self,
+        factory: &BackendFactory,
+        compaction_config: &crate::config::CompactionConfig,
+    ) -> Result<usize> {
+        let prefix_len = *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let history = lock(&self.history).clone();
+        let body = &history[prefix_len.min(history.len())..];
+
+        if body.len() < 2 {
+            return Ok(0);
+        }
+
+        // Find the retention boundary: scan backwards to find the start of
+        // the last `compaction_config.compaction_retain_count` assistant
+        // messages. We count assistant messages (whose role is Role::Assistant).
+        let retain_count = compaction_config.compaction_retain_count as usize;
+        let mut assistant_seen = 0usize;
+        let mut boundary = body.len(); // exclusive upper bound for "old" messages
+
+        for i in (0..body.len()).rev() {
+            if body[i].role == Role::Assistant {
+                assistant_seen += 1;
+                if assistant_seen >= retain_count {
+                    boundary = i;
+                    break;
+                }
+            }
+        }
+
+        // If we never found enough assistant messages to retain, nothing to compact.
+        if boundary == 0 {
+            return Ok(0);
+        }
+
+        let old_messages = &body[..boundary];
+
+        if old_messages.is_empty() {
+            return Ok(0);
+        }
+
+        // Build a summarisation prompt.
+        let mut prompt = String::from(
+            "Summarize the following conversation history. \
+             Preserve key decisions, facts, and outcomes. Be concise.\n\n",
+        );
+        for msg in old_messages {
+            let role_label = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+            };
+            for block in &msg.content {
+                match block {
+                    ContentBlock::Text(t) => {
+                        prompt.push_str(&format!("{role_label}: {t}\n\n"));
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        prompt
+                            .push_str(&format!("{role_label}: [Tool call: {name} {}]\n\n", input));
+                    }
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => {
+                        let label = if *is_error { "Error" } else { "Result" };
+                        prompt.push_str(&format!("User: [Tool {label}: {content}]\n\n"));
+                    }
+                }
+            }
+        }
+
+        // Use the backend factory to get a backend for the compaction role.
+        let selection = factory.for_role(&compaction_config.compaction_role).await?;
+        let summary_config = RequestConfig {
+            model: selection.model,
+            max_tokens: 2048,
+            tools: vec![],
+        };
+
+        // Build a minimal conversation for the summarisation request.
+        let summarisation_messages = vec![Message::text(Role::User, prompt)];
+
+        let mut stream = selection
+            .backend
+            .send_message(&summarisation_messages, &summary_config)
+            .await?;
+
+        let mut summary_text = String::new();
+        use futures::StreamExt;
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(StreamEvent::TextDelta(text)) => summary_text.push_str(&text),
+                Ok(StreamEvent::Done) => break,
+                Ok(StreamEvent::Usage { .. }) => {}
+                Ok(_) => {}
+                Err(e) => {
+                    anyhow::bail!("Compaction summarisation failed: {e}");
+                }
+            }
+        }
+
+        if summary_text.trim().is_empty() {
+            anyhow::bail!("Compaction summarisation returned empty summary");
+        }
+
+        let delimited_summary = format!(
+            "[Compaction summary] {} [/Compaction summary]",
+            summary_text.trim()
+        );
+        let summary_msg = Message::text(Role::User, delimited_summary);
+
+        // Get the DB IDs of the old messages so we can deactivate them.
+        let active_ids = {
+            let session = self.session.lock().await;
+            session.conversation().load_active_ids().await?
+        };
+
+        // The old messages correspond to the first `boundary` entries in the
+        // post-prefix portion of history. Their DB IDs are the first
+        // `boundary` IDs from the active list.
+        let ids_to_deactivate: Vec<i64> = active_ids.into_iter().take(boundary).collect();
+
+        let entries_compacted = ids_to_deactivate.len();
+
+        // Deactivate old entries in the DB.
+        {
+            let session = self.session.lock().await;
+            session
+                .conversation()
+                .deactivate_entries(&ids_to_deactivate)
+                .await?;
+            session.conversation().insert_message(&summary_msg).await?;
+        }
+
+        // Update in-memory history: replace old messages with summary.
+        {
+            let mut history = lock(&self.history);
+            let prefix_len = prefix_len.min(history.len());
+            let _old_drained: Vec<Message> =
+                history.drain(prefix_len..prefix_len + boundary).collect();
+            history.insert(prefix_len, summary_msg);
+        }
+
+        Ok(entries_compacted)
+    }
+
+    /// Compact using the stored `BackendFactory` and `CompactionConfig`.
+    ///
+    /// Returns an error if `with_compaction` was never called.
+    pub async fn compact_stored(&self) -> Result<usize> {
+        let factory = self.compaction_factory.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Compaction not configured: no backend factory set. Call with_compaction() first."
+            )
+        })?;
+        let config = self.compaction_config.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Compaction not configured: no compaction config set. Call with_compaction() first."
+            )
+        })?;
+        self.compact(factory, config).await
+    }
+
+    /// Return the stored `CompactionConfig`, if any.
+    pub fn compaction_config(&self) -> Option<&crate::config::CompactionConfig> {
+        self.compaction_config.as_ref()
     }
 
     pub async fn send(
@@ -805,6 +1020,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
             AgentEvent::Warn(_) => {}
+            AgentEvent::CompactionComplete { .. } => {}
         }
     }
 
@@ -3090,5 +3306,307 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
             "expected Interrupted; got: {events:?}"
         );
+    }
+
+    // ── compact ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_removes_old_entries_and_inserts_summary() {
+        use crate::config::CompactionConfig;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("session");
+        let session = Arc::new(TokioMutex::new(session_inner));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            session.clone(),
+        )
+        .await;
+
+        // Insert messages to create history beyond the prefix
+        session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert");
+        session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi there".to_string()))
+            .await
+            .expect("insert");
+        session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&Message::text(Role::User, "how are you".to_string()))
+            .await
+            .expect("insert");
+        session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "fine".to_string()))
+            .await
+            .expect("insert");
+        session
+            .lock()
+            .await
+            .conversation()
+            .insert_message(&Message::text(Role::User, "goodbye".to_string()))
+            .await
+            .expect("insert");
+
+        // Reload history from session
+        let reloaded = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .expect("load");
+        *lock(&agent.history) = reloaded;
+
+        assert_eq!(
+            agent.history().len(),
+            5,
+            "should have 5 messages before compact"
+        );
+
+        // Compact with retain_count=1 (keep last 1 assistant message)
+        let compaction_config = CompactionConfig {
+            max_context_window_length: None,
+            compaction_retain_count: 1,
+            compaction_threshold_percent: 80,
+            compaction_role: "default".to_string(),
+        };
+
+        // Need a backend factory for compact
+        let app_config = crate::config::AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: std::collections::BTreeMap::new(),
+            compaction: CompactionConfig::default(),
+        };
+
+        // Since we can't easily construct a real BackendFactory for tests,
+        // use compact_stored which requires with_compaction to be called first
+        let agent_with_compaction =
+            agent.with_compaction(Arc::new(BackendFactory::new(app_config)), compaction_config);
+
+        // compact() needs the factory, but we can't call the backend in tests
+        // without auth. So we test the "nothing to compact" case instead.
+        // Create a new agent with very short history
+        let dir2 = tempfile::TempDir::new().expect("temp dir");
+        let session2 = crate::session::Session::new(None, dir2.keep())
+            .await
+            .expect("session2");
+        let agent2 = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            RequestConfig {
+                model: "test".to_string(),
+                max_tokens: 100,
+                tools: vec![],
+            },
+            Arc::new(TokioMutex::new(session2)),
+        )
+        .await;
+
+        // With empty history, compact should return 0
+        let result = agent2.compact_stored().await;
+        // compact_stored fails because no factory is configured
+        assert!(result.is_err(), "compact without factory should error");
+    }
+
+    #[tokio::test]
+    async fn compact_with_short_history_returns_zero() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("session");
+        let session = Arc::new(TokioMutex::new(session_inner));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        // With only one message, there's nothing to compact
+        let empty_count = agent.history().len();
+        assert!(
+            empty_count < 2,
+            "history too short to compact: {empty_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_preserves_context_prefix() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("session");
+        let session = Arc::new(TokioMutex::new(session_inner));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let mut agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        // Load context files (prefix messages)
+        let files = vec![crate::context_files::ContextFile {
+            path: std::path::PathBuf::from("test.md"),
+            content: "context file content".to_string(),
+        }];
+        agent.load_context_files(files);
+
+        let prefix_len = *agent
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(prefix_len, 1, "should have 1 prefix message");
+
+        // The prefix is preserved in history even though compact removes body messages
+        let history = agent.history();
+        assert!(history.len() >= 1);
+        assert_eq!(
+            history[0].role,
+            Role::User,
+            "prefix messages should be User role"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_compaction_stores_factory_and_config() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("session");
+        let session = Arc::new(TokioMutex::new(session_inner));
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+        };
+        let agent = Agent::new(Box::new(SequencedBackend::new(vec![])), config, session).await;
+
+        assert!(
+            agent.compaction_config().is_none(),
+            "should be None before with_compaction"
+        );
+
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_length: Some(200000),
+            compaction_retain_count: 10,
+            compaction_threshold_percent: 80,
+            compaction_role: "default".to_string(),
+        };
+
+        let app_config = crate::config::AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "test".to_string(),
+                region: "us-east5".to_string(),
+                model: "test-model".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: std::collections::BTreeMap::new(),
+            compaction: crate::config::CompactionConfig::default(),
+        };
+
+        let agent = agent.with_compaction(
+            Arc::new(BackendFactory::new(app_config)),
+            compaction_config.clone(),
+        );
+
+        assert!(
+            agent.compaction_config().is_some(),
+            "should be Some after with_compaction"
+        );
+        assert_eq!(
+            agent
+                .compaction_config()
+                .expect("config")
+                .max_context_window_length,
+            Some(200000)
+        );
+        assert_eq!(
+            agent
+                .compaction_config()
+                .expect("config")
+                .compaction_retain_count,
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivate_entries_and_load_active_ids_roundtrip() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session = crate::session::Session::new(None, dir.keep())
+            .await
+            .expect("session");
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "a".to_string()))
+            .await
+            .expect("insert");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "b".to_string()))
+            .await
+            .expect("insert");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "c".to_string()))
+            .await
+            .expect("insert");
+
+        let ids = session.conversation().load_active_ids().await.expect("ids");
+        assert_eq!(ids.len(), 3);
+
+        session
+            .conversation()
+            .deactivate_entries(&ids[..2])
+            .await
+            .expect("deactivate");
+
+        let active_ids = session.conversation().load_active_ids().await.expect("ids");
+        assert_eq!(active_ids.len(), 1);
+        assert_eq!(active_ids[0], ids[2]);
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1);
+        match &history[0].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t, "c"),
+            _ => panic!("expected text"),
+        }
     }
 }

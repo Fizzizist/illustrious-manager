@@ -28,6 +28,8 @@ pub struct StatusLineInfo<'a> {
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
     pub subagent_usage: Option<&'a TokenUsage>,
+    pub context_length: u32,
+    pub max_context_window_length: Option<u32>,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -103,6 +105,18 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     let branch_str = info.git_branch.unwrap_or("no git");
     let dir_str = compact_path(info.working_dir);
 
+    let context_str = if let Some(max) = info.max_context_window_length {
+        format!(
+            " ctx:{}/{}",
+            format_token_count(info.context_length as u64),
+            format_token_count(max as u64)
+        )
+    } else if info.context_length > 0 {
+        format!(" ctx:{}", format_token_count(info.context_length as u64))
+    } else {
+        String::new()
+    };
+
     let subagent_span: Option<Span<'static>> = info.subagent_usage.and_then(|su| {
         if su.input_tokens + su.output_tokens > 0 {
             let s = format!(
@@ -120,7 +134,7 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     });
 
     let parent_span = Span::styled(
-        format!(" {usage_str} "),
+        format!(" {usage_str}{context_str} "),
         Style::default().fg(Color::White).bg(STATUS_BG),
     );
     let branch_span = Span::styled(
@@ -213,6 +227,8 @@ mod tests {
             working_dir,
             usage,
             subagent_usage: None,
+            context_length: 0,
+            max_context_window_length: None,
         }
     }
 
@@ -513,6 +529,8 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent_zero),
+            context_length: 0,
+            max_context_window_length: None,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -536,6 +554,8 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_length: 0,
+            max_context_window_length: None,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -570,6 +590,8 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_length: 0,
+            max_context_window_length: None,
         };
         // Use a very narrow width where the subagent span won't fit
         let line = build_status_line(&info, 30);
@@ -604,6 +626,8 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            context_length: 0,
+            max_context_window_length: None,
         };
 
         let backend = ratatui::backend::TestBackend::new(120, 1);
@@ -616,5 +640,57 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
+    }
+
+    #[test]
+    fn build_status_line_shows_context_with_max() {
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
+        let info = StatusLineInfo {
+            context_length: 25000,
+            max_context_window_length: Some(200000),
+            ..info
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("25.0k"), "should show context length");
+        assert!(text.contains("200.0k"), "should show max context window");
+        assert!(text.contains("ctx:"), "should show ctx label");
+    }
+
+    #[test]
+    fn build_status_line_shows_context_without_max() {
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
+        let info = StatusLineInfo {
+            context_length: 5000,
+            max_context_window_length: None,
+            ..info
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("5.0k"), "should show context length");
+        assert!(text.contains("ctx:"), "should show ctx label");
+        assert!(
+            !text.contains("200.0k"),
+            "should not show max when not configured"
+        );
+    }
+
+    #[test]
+    fn build_status_line_hides_context_when_zero() {
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
+        let info = StatusLineInfo {
+            context_length: 0,
+            max_context_window_length: None,
+            ..info
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains("ctx:"),
+            "should not show ctx when context_length is 0 and no max configured"
+        );
     }
 }
