@@ -153,12 +153,6 @@ model = "gpt-oss:120b"
 # [models.implement]
 # backend = "vertex"
 # model = "claude-sonnet-4-20250514"
-
-# [thinking]
-# Whether extended thinking is enabled
-# enabled = true
-# Thinking mode: "budget" (fixed token count) or "adaptive" (model decides)
-# mode = { type = "adaptive" }
 "#;
 
 /// A named model role binding a backend to a specific model string.
