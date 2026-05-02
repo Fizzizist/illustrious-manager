@@ -206,21 +206,28 @@ impl SlashCommand for CompactCommand {
     {
         Box::pin(async move {
             ctx.app.input.clear();
+            // Show an indicator immediately so the user knows compaction is in progress.
+            ctx.app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                "Compacting context…".to_string(),
+            ));
             match ctx.agent.compact().await {
                 Ok((removed, kept)) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Info,
-                        format!(
+                    // Replace the "compacting…" indicator with the result.
+                    if let Some(last) = ctx.app.conversation.last_mut() {
+                        last.content = format!(
                             "Context compacted: {removed} messages removed, \
                              {kept} recent messages retained."
-                        ),
-                    ));
+                        );
+                        last.role = ConversationRole::Info;
+                    }
                 }
                 Err(e) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Error,
-                        format!("Compaction failed: {e}"),
-                    ));
+                    // Replace the indicator with the error.
+                    if let Some(last) = ctx.app.conversation.last_mut() {
+                        last.content = format!("Compaction failed: {e}");
+                        last.role = ConversationRole::Error;
+                    }
                 }
             }
             Ok(DispatchResult::Handled)
