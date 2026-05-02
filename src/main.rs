@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
         )
         .await?
         .with_thinking(app_config.thinking.clone())
+        .with_compaction(Arc::clone(&factory), app_config.compaction.clone())
         // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
         // because initial history is set from the input session
         .with_skills(&skills)
