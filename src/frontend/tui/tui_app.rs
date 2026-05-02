@@ -589,18 +589,6 @@ pub fn handle_agent_event(
         AgentEvent::Warn(_) => {
             // Diagnostic only — written to the debug log via log_event; not shown in UI.
         }
-        AgentEvent::CompactionComplete { entries_compacted } => {
-            app.conversation.push(ConversationEntry::new(
-                ConversationRole::Info,
-                format!("Compacted {entries_compacted} entries"),
-            ));
-            app.current_response.clear();
-            app.confirmation_tx = None;
-            app.cancel_token = None;
-            app.set_state(AppState::Input);
-            app.scroll_offset = 0;
-            app.git_branch = status_line::detect_git_branch();
-        }
         AgentEvent::ThinkingReceived(text) => {
             app.current_thinking.push_str(&text);
         }
@@ -2715,23 +2703,6 @@ mod tests {
         app.context_length = 50000;
         app.reset_for_session_switch();
         assert_eq!(app.context_length, 0);
-    }
-
-    #[test]
-    fn compaction_complete_event_adds_info_entry_and_returns_to_input() {
-        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        app.set_state(AppState::Compacting);
-        let event = AgentEvent::CompactionComplete {
-            entries_compacted: 15,
-        };
-        handle_agent_event(&mut app, event, None).expect("handle");
-        assert_eq!(app.state, AppState::Input);
-        assert!(
-            app.conversation
-                .iter()
-                .any(|e| e.content.contains("Compacted 15 entries")),
-            "should have compaction info entry"
-        );
     }
 
     // ── Thinking handler tests (Finding 7) ────────────────────────────────

@@ -137,7 +137,6 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
-            AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::ThinkingReceived(text) => {
                 if logger.is_some() {
                     write!(writer, "// {}", text)?;
@@ -204,7 +203,6 @@ async fn collect_response<R: BufRead>(
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
-            AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;

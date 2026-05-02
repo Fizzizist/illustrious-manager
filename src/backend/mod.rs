@@ -34,6 +34,11 @@ pub struct BackendSelection {
 pub struct BackendFactory {
     config: AppConfig,
     vertex_auth_cache: vertex::VertexAuthCache,
+    /// Pre-built selections for testing. When `for_role` is called with a
+    /// role present in this map, the injected selection is returned directly,
+    /// bypassing real backend construction and auth.
+    #[cfg(test)]
+    injected: std::sync::Mutex<std::collections::HashMap<String, BackendSelection>>,
 }
 
 impl BackendFactory {
@@ -41,11 +46,22 @@ impl BackendFactory {
         Self {
             config,
             vertex_auth_cache: vertex::VertexAuthCache::new(),
+            #[cfg(test)]
+            injected: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
     /// Construct a `BackendSelection` for the named role.
     pub async fn for_role(&self, role: &str) -> Result<BackendSelection> {
+        // In tests, return an injected selection if one was registered for this role.
+        #[cfg(test)]
+        {
+            let mut injected = self.injected.lock().unwrap();
+            if injected.contains_key(role) {
+                return Ok(injected.remove(role).expect("just checked"));
+            }
+        }
+
         let resolved = self.config.resolve_role(role)?;
         match resolved.backend_name.as_str() {
             "vertex" => {
@@ -93,15 +109,12 @@ impl BackendFactory {
 
     /// Inject a pre-built `BackendSelection` for testing without real auth.
     ///
-    /// Seeds the Vertex auth cache with a fake provider so that `for_role`
-    /// returns a backend built from the supplied `selection` when the role
-    /// is `"vertex"`.  Only intended for use in tests.
+    /// Registers the selection under the given role name so that `for_role`
+    /// returns it directly, bypassing real backend construction and auth.
+    /// Only intended for use in tests.
     #[cfg(test)]
-    pub async fn with_injected_selection(
-        config: AppConfig,
-        selection: BackendSelection,
-    ) -> (Self, BackendSelection) {
-        (Self::new(config), selection)
+    pub fn inject_role(&self, role: impl Into<String>, selection: BackendSelection) {
+        self.injected.lock().unwrap().insert(role.into(), selection);
     }
 
     /// Build a `BackendSelection` directly from a boxed backend and model string,
