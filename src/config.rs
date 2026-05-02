@@ -134,6 +134,16 @@ model = "gpt-oss:120b"
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 
+# Extended thinking configuration for models that support it (Vertex AI / Anthropic).
+# [thinking]
+# Whether thinking is enabled (default: true)
+# enabled = true
+# Thinking mode: "budget" (fixed token count) or "adaptive" (model decides)
+# For budget mode, set the token budget in the mode field:
+#   mode = { type = "budget", tokens = 8192 }
+# For adaptive mode:
+#   mode = { type = "adaptive" }
+
 # Named model roles for multi-agent workflows.
 # When absent, a "default" role is synthesized from the top-level backend
 # and the matching [vertex]/[zai]/[ollama] model field above.
