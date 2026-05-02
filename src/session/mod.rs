@@ -78,6 +78,22 @@ async fn read_first_user_message_from_path(db_path: &std::path::Path) -> Result<
         .await
         .with_context(|| format!("Failed to open session DB at {}", db_path.display()))?;
     let conn = db.connect()?;
+
+    // Ensure the active column exists (sessions created before the compaction
+    // feature lack this column). This must run before any query that
+    // references `active`.
+    for migration in MIGRATIONS {
+        match conn.execute(migration, ()).await {
+            Ok(_) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(e).context("Failed to run schema migration");
+                }
+            }
+        }
+    }
+
     let session = Session {
         id: String::new(),
         conn,
@@ -735,5 +751,62 @@ mod tests {
             .expect("reopen");
         let task_id = session.tasks().create("t", None).await.expect("create");
         assert_eq!(task_id, 1);
+    }
+
+    #[tokio::test]
+    async fn list_sessions_reads_message_from_old_db_without_active_column() {
+        let dir = TempDir::new().expect("temp dir");
+        let id = uuid::Uuid::now_v7().to_string();
+        let db_path = dir.path().join(format!("{id}.db"));
+
+        // Create a DB with the old schema (no active column) and insert a message
+        {
+            let db = Builder::new_local(db_path.to_string_lossy().as_ref())
+                .build()
+                .await
+                .expect("build");
+            let conn = db.connect().expect("connect");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation (\
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                    role TEXT NOT NULL, \
+                    content TEXT NOT NULL\
+                )",
+            )
+            .await
+            .expect("create old schema");
+
+            let content_json =
+                serde_json::to_string(&vec![ContentBlock::Text("old session message".to_string())])
+                    .expect("serialize");
+            conn.execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [
+                    turso::Value::Text("user".to_string()),
+                    turso::Value::Text(content_json),
+                ],
+            )
+            .await
+            .expect("insert");
+            conn.query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                .await
+                .expect("checkpoint");
+            // Drain checkpoint results
+            {
+                let mut rows = conn
+                    .query("PRAGMA wal_checkpoint(TRUNCATE)", ())
+                    .await
+                    .expect("checkpoint");
+                while rows.next().await.expect("row").is_some() {}
+            }
+        }
+
+        // list_sessions should migrate the old DB and read the first user message
+        let summaries = list_sessions(dir.path()).await.expect("list sessions");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].first_user_message, "old session message",
+            "old sessions without active column should still show their first message"
+        );
     }
 }
