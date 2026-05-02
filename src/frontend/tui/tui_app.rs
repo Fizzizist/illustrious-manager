@@ -356,7 +356,7 @@ impl App {
         }
         let mut conv_area = ConversationArea::new(
             &mut self.conversation,
-            &self.current_thinking,
+            !self.current_thinking.is_empty(),
             &self.current_response,
             0,
             self.viewport_height,
@@ -390,7 +390,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     app.text_width = text_width;
     let mut conv_area = ConversationArea::new(
         &mut app.conversation,
-        &app.current_thinking,
+        !app.current_thinking.is_empty(),
         &app.current_response,
         app.scroll_offset,
         chunks[0].height.saturating_sub(2),
