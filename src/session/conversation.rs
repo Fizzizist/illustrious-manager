@@ -99,6 +99,35 @@ impl<'a> ConversationRepo<'a> {
         Ok(())
     }
 
+    /// Atomically deactivate all active entries and insert a summary message.
+    /// Wrapped in a transaction so that a crash between the two operations
+    /// cannot leave the database with zero active rows and no summary.
+    pub async fn compact(&self, summary: &Message) -> Result<()> {
+        self.session
+            .conn
+            .execute("BEGIN TRANSACTION", ())
+            .await
+            .context("Failed to begin compaction transaction")?;
+
+        if let Err(e) = self.deactivate_all().await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        if let Err(e) = self.insert_message(summary).await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        self.session
+            .conn
+            .execute("COMMIT", ())
+            .await
+            .context("Failed to commit compaction transaction")?;
+
+        Ok(())
+    }
+
     pub async fn read_first_user_message(&self) -> Result<String> {
         let mut rows = self
             .session
@@ -130,7 +159,7 @@ impl<'a> ConversationRepo<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{Message, Role};
+    use crate::types::{ContentBlock, Message, Role};
     use tempfile::TempDir;
 
     async fn create_test_session() -> (TempDir, super::super::Session) {
@@ -379,5 +408,62 @@ mod tests {
             msg, "first",
             "should return the absolute first user message, not filtered by active"
         );
+    }
+
+    #[tokio::test]
+    async fn compact_deactivates_all_and_inserts_summary_atomically() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "message one".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "response one".to_string()))
+            .await
+            .expect("insert 2");
+
+        let summary = Message::text(
+            Role::User,
+            "[Compacted] Summary of conversation".to_string(),
+        );
+        session
+            .conversation()
+            .compact(&summary)
+            .await
+            .expect("compact should succeed");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 1, "only the summary should be active");
+        assert_eq!(history[0].role, Role::User);
+        match &history[0].content[0] {
+            ContentBlock::Text(t) => assert!(t.contains("[Compacted]")),
+            other => panic!("expected text block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_on_empty_succeeds_with_just_summary() {
+        let (_dir, session) = create_test_session().await;
+
+        let summary = Message::text(Role::User, "[Compacted] Empty".to_string());
+        session
+            .conversation()
+            .compact(&summary)
+            .await
+            .expect("compact on empty should succeed");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 1, "summary should be the only active entry");
     }
 }
