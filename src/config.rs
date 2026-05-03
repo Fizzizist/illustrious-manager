@@ -153,6 +153,13 @@ model = "gpt-oss:120b"
 # [models.implement]
 # backend = "vertex"
 # model = "claude-sonnet-4-20250514"
+# [models.compaction]
+# backend = "vertex"
+# model = "claude-sonnet-4-20250514"
+
+# Role name used for compaction sub-agents. Defaults to "compaction".
+# If the role isn't defined in [models], falls back to "default".
+# compaction_role = "compaction"
 "#;
 
 /// A named model role binding a backend to a specific model string.
@@ -188,6 +195,14 @@ pub struct AppConfig {
     pub models: BTreeMap<String, ModelRole>,
     #[serde(default)]
     pub thinking: Option<crate::types::ThinkingConfig>,
+    /// Role name used for compaction sub-agents. Defaults to `"compaction"`.
+    /// If the role isn't defined in `[models]`, falls back to `"default"`.
+    #[serde(default = "default_compaction_role")]
+    pub compaction_role: String,
+}
+
+fn default_compaction_role() -> String {
+    "compaction".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -616,6 +631,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -637,6 +653,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -657,6 +674,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -681,6 +699,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -705,6 +724,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -725,6 +745,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -746,6 +767,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
@@ -775,6 +797,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
@@ -802,6 +825,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
@@ -825,6 +849,7 @@ mod tests {
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(
@@ -848,6 +873,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
@@ -902,6 +928,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         config.normalize_back_compat();
         assert!(
@@ -949,6 +976,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         config.normalize_back_compat();
         assert_eq!(
@@ -1001,6 +1029,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let resolved = config.resolve_role("fast").expect("should resolve");
         assert_eq!(resolved.backend_name, "vertex");
@@ -1022,6 +1051,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = config.resolve_role("nonexistent");
         assert!(result.is_err());
@@ -1051,6 +1081,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1087,6 +1118,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1112,6 +1144,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1137,6 +1170,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1162,6 +1196,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1186,6 +1221,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1210,6 +1246,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
@@ -1242,6 +1279,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         config.normalize_back_compat();
 
@@ -1274,6 +1312,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         config.normalize_back_compat();
 
@@ -1304,6 +1343,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         config.normalize_back_compat();
 
@@ -1338,6 +1378,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1375,6 +1416,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok(), "ollama role with valid config should pass");
@@ -1432,6 +1474,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
@@ -1501,5 +1544,28 @@ mod tests {
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         let thinking = config.thinking.expect("thinking should be present");
         assert_eq!(thinking.mode, crate::types::ThinkingMode::Adaptive);
+    }
+
+    #[test]
+    fn compaction_role_defaults_to_compaction() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.compaction_role, "compaction");
+    }
+
+    #[test]
+    fn compaction_role_overrides_from_toml() {
+        let toml_str = r#"
+            backend = "vertex"
+            compaction_role = "fast"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.compaction_role, "fast");
     }
 }

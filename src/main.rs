@@ -151,7 +151,8 @@ async fn main() -> Result<()> {
     let mut registry =
         build_tool_registry(Arc::clone(&session_arc), &app_config.tools, &skills, None)?;
 
-    build_agent_spawner_and_register(&mut registry, &factory, &app_config_arc, &skills)?;
+    let spawner =
+        build_agent_spawner_and_register(&mut registry, &factory, &app_config_arc, &skills)?;
 
     let agent = Arc::new(
         spawn_agent(
@@ -166,7 +167,8 @@ async fn main() -> Result<()> {
         // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
         // because initial history is set from the input session
         .with_skills(&skills)
-        .with_context_files()?,
+        .with_context_files()?
+        .with_compaction_spawner(spawner),
     );
 
     let mut logger = if cli.debug {
@@ -274,7 +276,7 @@ fn build_agent_spawner_and_register(
     factory: &Arc<BackendFactory>,
     app_config: &Arc<config::AppConfig>,
     skills: &HashMap<String, PathBuf>,
-) -> Result<()> {
+) -> Result<Arc<agent::AgentSpawner>> {
     let factory_clone = Arc::clone(factory);
     let app_config_clone = Arc::clone(app_config);
     let skills_clone = skills.clone();
@@ -304,8 +306,11 @@ fn build_agent_spawner_and_register(
         .ok()
         .expect("spawner_cell set exactly once at startup");
 
-    registry.register(Box::new(AgentTool::new(spawner, available_roles)))?;
-    Ok(())
+    registry.register(Box::new(AgentTool::new(
+        Arc::clone(&spawner),
+        available_roles,
+    )))?;
+    Ok(spawner)
 }
 
 fn create_log_path() -> Result<PathBuf> {

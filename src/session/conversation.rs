@@ -90,6 +90,15 @@ impl<'a> ConversationRepo<'a> {
         Ok(messages)
     }
 
+    pub async fn deactivate_all(&self) -> Result<()> {
+        self.session
+            .conn
+            .execute("UPDATE conversation SET active = 0 WHERE active = 1", ())
+            .await
+            .context("Failed to deactivate all conversation entries")?;
+        Ok(())
+    }
+
     pub async fn read_first_user_message(&self) -> Result<String> {
         let mut rows = self
             .session
@@ -244,6 +253,100 @@ mod tests {
             !empty,
             "is_empty should return false because the row still exists regardless of active"
         );
+    }
+
+    #[tokio::test]
+    async fn deactivate_all_sets_all_active_rows_to_zero() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "one".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "two".to_string()))
+            .await
+            .expect("insert 2");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "three".to_string()))
+            .await
+            .expect("insert 3");
+
+        session
+            .conversation()
+            .deactivate_all()
+            .await
+            .expect("deactivate_all");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert!(
+            history.is_empty(),
+            "all entries should be inactive after deactivate_all"
+        );
+    }
+
+    #[tokio::test]
+    async fn deactivate_all_noops_on_empty_table() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .deactivate_all()
+            .await
+            .expect("deactivate_all on empty should not error");
+    }
+
+    #[tokio::test]
+    async fn deactivate_all_does_not_affect_already_inactive_rows() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "active".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(
+                Role::Assistant,
+                "will deactivate".to_string(),
+            ))
+            .await
+            .expect("insert 2");
+        session
+            .conn
+            .execute("UPDATE conversation SET active = 0 WHERE id = 2", ())
+            .await
+            .expect("manual deactivate");
+
+        session
+            .conversation()
+            .deactivate_all()
+            .await
+            .expect("deactivate_all");
+
+        let mut rows = session
+            .conn
+            .query("SELECT active FROM conversation ORDER BY id ASC", ())
+            .await
+            .expect("query");
+        let row1 = rows.next().await.expect("row 1").expect("row 1 present");
+        match row1.get_value(0).expect("val 1") {
+            turso::Value::Integer(n) => assert_eq!(n, 0, "row 1 should now be inactive"),
+            other => panic!("expected integer, got {:?}", other),
+        }
+        let row2 = rows.next().await.expect("row 2").expect("row 2 present");
+        match row2.get_value(0).expect("val 2") {
+            turso::Value::Integer(n) => assert_eq!(n, 0, "row 2 should remain inactive"),
+            other => panic!("expected integer, got {:?}", other),
+        }
     }
 
     #[tokio::test]
