@@ -49,6 +49,83 @@ impl<'a> InputArea<'a> {
         input
     }
 
+    fn handle_motion(&mut self, event: KeyEvent) -> bool {
+        match event {
+            KeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Back);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Forward);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Down);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Up);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('w'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::WordForward);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('b'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::WordBack);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('e'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::WordEnd);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('0'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::Head);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('$'),
+                ..
+            } => {
+                self.textarea.move_cursor(CursorMove::End);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn input(&mut self, event: crossterm::event::KeyEvent) -> bool {
         match self.mode {
             InputMode::Insert => match event {
@@ -58,7 +135,6 @@ impl<'a> InputArea<'a> {
                     self.set_mode(InputMode::Normal);
                     true
                 }
-                // todo get past working. Figure out how `ratatui-textarea` is getting data from clipboard
                 _ => self.textarea.input(event),
             },
             InputMode::Normal => match event {
@@ -89,45 +165,6 @@ impl<'a> InputArea<'a> {
                     true
                 }
                 KeyEvent {
-                    code: KeyCode::Char('w'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordForward);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('b'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordBack);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('e'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordEnd);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('0'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Head);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('$'),
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::End);
-                    true
-                }
-                KeyEvent {
                     code: KeyCode::Char('v'),
                     modifiers: KeyModifiers::NONE,
                     ..
@@ -144,112 +181,9 @@ impl<'a> InputArea<'a> {
                     self.textarea.paste();
                     true
                 }
-                KeyEvent {
-                    code: KeyCode::Char('h'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Back);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('l'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Forward);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('j'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Down);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('k'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Up);
-                    true
-                }
-                _ => false,
+                other => self.handle_motion(other),
             },
             InputMode::Visual => match event {
-                KeyEvent {
-                    code: KeyCode::Char('h'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Back);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('l'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Forward);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('w'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordForward);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('b'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordBack);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('e'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::WordEnd);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('0'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Head);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('$'),
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::End);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('j'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Down);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('k'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Up);
-                    true
-                }
                 KeyEvent {
                     code: KeyCode::Char('d'),
                     modifiers: KeyModifiers::NONE,
@@ -291,7 +225,7 @@ impl<'a> InputArea<'a> {
                     self.set_mode(InputMode::Normal);
                     true
                 }
-                _ => false,
+                other => self.handle_motion(other),
             },
             _ => false,
         }
