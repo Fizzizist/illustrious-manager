@@ -180,16 +180,12 @@ impl Agent {
     /// headless sub-agent, then replace it with the summary while preserving the
     /// context prefix (skills, CLAUDE.md, etc.).
     ///
-    /// Returns `(summary_text, is_error)`. On success `is_error` is false; on
-    /// failure the summary text contains the error message and `is_error` is true.
-    pub async fn compact(&self) -> (String, bool) {
+    /// Returns the summary text on success, or an error message on failure.
+    pub async fn compact(&self) -> Result<String, String> {
         let spawner = match &self.compaction_spawner {
             Some(s) => Arc::clone(s),
             None => {
-                return (
-                    "Compaction not available: no spawner configured.".to_string(),
-                    true,
-                );
+                return Err("Compaction not available: no spawner configured.".to_string());
             }
         };
 
@@ -240,10 +236,7 @@ impl Agent {
                 }
             }
             if parts.is_empty() {
-                return (
-                    "Nothing to compact: the conversation is empty.".to_string(),
-                    false,
-                );
+                return Ok("Nothing to compact: the conversation is empty.".to_string());
             }
             format!(
                 "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation. Do not include meta-commentary — output only the summary.\n\n{}",
@@ -259,12 +252,12 @@ impl Agent {
             let msg = outcome
                 .error_message
                 .unwrap_or_else(|| "Compaction failed with an unknown error.".to_string());
-            return (msg, true);
+            return Err(msg);
         }
 
         let summary = outcome.text;
         if summary.trim().is_empty() {
-            return ("Compaction produced an empty summary.".to_string(), true);
+            return Err("Compaction produced an empty summary.".to_string());
         }
 
         let summary_msg = Message::text(Role::User, format!("[Compacted] {summary}"));
@@ -272,7 +265,7 @@ impl Agent {
         let session = self.session.lock().await;
 
         if let Err(e) = session.conversation().compact(&summary_msg).await {
-            return (format!("Compaction failed: {e}"), true);
+            return Err(format!("Compaction failed: {e}"));
         }
 
         drop(session);
@@ -290,7 +283,7 @@ impl Agent {
         lock(&self.history).extend(prefix);
         lock(&self.history).push(summary_msg.clone());
 
-        (summary, false)
+        Ok(summary)
     }
 
     /// Return a snapshot of all tasks in the current session.
@@ -3617,11 +3610,15 @@ mod tests {
         let session = test_session_arc().await;
         let agent = Agent::new(Box::new(backend), config, session).await;
 
-        let (summary, is_error) = agent.compact().await;
-        assert!(is_error, "compact without spawner should return error");
+        let result = agent.compact().await;
         assert!(
-            summary.contains("no spawner"),
-            "error message should mention missing spawner, got: {summary}"
+            result.is_err(),
+            "compact without spawner should return error"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("no spawner"),
+            "error message should mention missing spawner, got: {msg}"
         );
     }
 
