@@ -128,28 +128,7 @@ impl Session {
             .await
             .context("Failed to run schema DDL")?;
 
-        {
-            let mut rows = conn
-                .query("PRAGMA table_info(conversation)", ())
-                .await
-                .context("Failed to query conversation table info")?;
-            let mut has_active = false;
-            while let Some(row) = rows.next().await? {
-                if let turso::Value::Text(name) = row.get_value(1)?
-                    && name == "active"
-                {
-                    has_active = true;
-                    break;
-                }
-            }
-            if !has_active {
-                conn.execute_batch(
-                    "ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
-                )
-                .await
-                .context("Failed to add active column to conversation table")?;
-            }
-        }
+        migrate_active_column(&conn).await?;
 
         Ok(Self {
             id: sess_id,
@@ -194,6 +173,28 @@ impl Session {
         }
         Ok(())
     }
+}
+
+async fn migrate_active_column(conn: &Connection) -> Result<()> {
+    let mut rows = conn
+        .query("PRAGMA table_info(conversation)", ())
+        .await
+        .context("Failed to query conversation table info")?;
+    let mut has_active = false;
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)?
+            && name == "active"
+        {
+            has_active = true;
+            break;
+        }
+    }
+    if !has_active {
+        conn.execute_batch("ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            .await
+            .context("Failed to add active column to conversation table")?;
+    }
+    Ok(())
 }
 
 fn generate_uuidv7() -> String {
