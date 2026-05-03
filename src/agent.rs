@@ -33,6 +33,9 @@ pub struct Agent {
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
     session: Arc<TokioMutex<Session>>,
+    /// Spawner for creating compaction sub-agents. Set after construction via
+    /// `with_compaction_spawner()`.
+    compaction_spawner: Option<Arc<AgentSpawner>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -65,6 +68,7 @@ impl Agent {
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
+            compaction_spawner: None,
         }
     }
 
@@ -122,6 +126,13 @@ impl Agent {
         self
     }
 
+    pub fn with_compaction_spawner(self, spawner: Arc<AgentSpawner>) -> Self {
+        Self {
+            compaction_spawner: Some(spawner),
+            ..self
+        }
+    }
+
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
     }
@@ -163,6 +174,114 @@ impl Agent {
             .conversation()
             .load_history()
             .await
+    }
+
+    /// Run context compaction: summarise the active conversation history using a
+    /// headless sub-agent, then replace it with the summary while preserving the
+    /// context prefix (skills, CLAUDE.md, etc.).
+    ///
+    /// Returns `(summary_text, is_error)`. On success `is_error` is false; on
+    /// failure the summary text contains the error message and `is_error` is true.
+    pub async fn compact(&self) -> (String, bool) {
+        let spawner = match &self.compaction_spawner {
+            Some(s) => Arc::clone(s),
+            None => {
+                return (
+                    "Compaction not available: no spawner configured.".to_string(),
+                    true,
+                );
+            }
+        };
+
+        let compaction_role = spawner.app_config.compaction_role.clone();
+
+        let role = if spawner.app_config.models.contains_key(&compaction_role) {
+            compaction_role
+        } else {
+            "default".to_string()
+        };
+
+        let prompt = {
+            let history = lock(&self.history);
+            let prefix_len = *self
+                .context_prefix_len
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let persisted = &history[prefix_len.min(history.len())..];
+            let mut parts = Vec::new();
+            for msg in persisted {
+                let role_label = match msg.role {
+                    Role::User => "User",
+                    Role::Assistant => "Assistant",
+                };
+                for block in &msg.content {
+                    if let ContentBlock::Text(text) = block {
+                        parts.push(format!("{role_label}: {text}"));
+                    }
+                }
+            }
+            if parts.is_empty() {
+                return (
+                    "Nothing to compact: the conversation is empty.".to_string(),
+                    false,
+                );
+            }
+            format!(
+                "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation. Do not include meta-commentary — output only the summary.\n\n{}",
+                parts.join("\n\n")
+            )
+        };
+
+        let outcome = spawner
+            .spawn(&role, ConfirmationMode::Never, Some(&[]), prompt)
+            .await;
+
+        if outcome.is_error {
+            let msg = outcome
+                .error_message
+                .unwrap_or_else(|| "Compaction failed with an unknown error.".to_string());
+            return (msg, true);
+        }
+
+        let summary = outcome.text;
+        if summary.trim().is_empty() {
+            return ("Compaction produced an empty summary.".to_string(), true);
+        }
+
+        let summary_msg = Message::text(Role::User, format!("[Compacted] {summary}"));
+
+        let session = self.session.lock().await;
+
+        if let Err(e) = session.conversation().deactivate_all().await {
+            return (
+                format!("Compaction failed: could not deactivate old entries: {e}"),
+                true,
+            );
+        }
+
+        if let Err(e) = session.conversation().insert_message(&summary_msg).await {
+            return (
+                format!("Compaction partially failed: could not insert summary: {e}"),
+                true,
+            );
+        }
+
+        drop(session);
+
+        let prefix_len = *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prefix: Vec<Message> = {
+            let history = lock(&self.history);
+            let take = prefix_len.min(history.len());
+            history[..take].to_vec()
+        };
+        lock(&self.history).clear();
+        lock(&self.history).extend(prefix);
+        lock(&self.history).push(summary_msg.clone());
+
+        (summary, false)
     }
 
     /// Return a snapshot of all tasks in the current session.
@@ -891,6 +1010,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::Interrupted { .. } => {}
             AgentEvent::Warn(_) => {}
             AgentEvent::ThinkingReceived(_) => {}
+            AgentEvent::CompactionComplete { .. } => {}
         }
     }
 
@@ -3472,5 +3592,27 @@ mod tests {
             assert_eq!(text, "let me think");
             assert_eq!(signature, "sig_tool");
         }
+    }
+
+    // ── Compaction tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_without_spawner_returns_error() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let session = test_session_arc().await;
+        let agent = Agent::new(Box::new(backend), config, session).await;
+
+        let (summary, is_error) = agent.compact().await;
+        assert!(is_error, "compact without spawner should return error");
+        assert!(
+            summary.contains("no spawner"),
+            "error message should mention missing spawner, got: {summary}"
+        );
     }
 }

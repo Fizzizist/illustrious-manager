@@ -220,6 +220,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let factory = super::BackendFactory::new(config);
 
@@ -267,6 +268,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let factory = super::BackendFactory::new(config);
 

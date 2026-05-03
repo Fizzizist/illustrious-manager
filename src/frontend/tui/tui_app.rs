@@ -42,6 +42,7 @@ pub enum AppState {
     },
     SessionPicker,
     TasksPicker,
+    Compacting,
 }
 
 pub struct App {
@@ -92,6 +93,10 @@ impl App {
             }
             AppState::TasksPicker => {
                 self.input.set_mode(InputMode::TasksPicker);
+                self.pending_g = false;
+            }
+            AppState::Compacting => {
+                self.input.set_mode(InputMode::Compacting);
                 self.pending_g = false;
             }
         }
@@ -577,6 +582,18 @@ pub fn handle_agent_event(
         AgentEvent::ThinkingReceived(text) => {
             app.current_thinking.push_str(&text);
         }
+        AgentEvent::CompactionComplete { summary, is_error } => {
+            let role = if is_error {
+                ConversationRole::Error
+            } else {
+                ConversationRole::Info
+            };
+            app.conversation.push(ConversationEntry::new(role, summary));
+            app.confirmation_tx = None;
+            app.cancel_token = None;
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
+        }
     }
     Ok(())
 }
@@ -668,6 +685,7 @@ async fn run_app(
                                             app: &mut app,
                                             agent: agent.clone(),
                                             config,
+                                            event_tx: &event_tx,
                                         };
                                         let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
                                         if dispatch == DispatchResult::Passthrough {
@@ -821,6 +839,16 @@ async fn run_app(
                                     app.confirmation_tx = None;
                                     app.set_state(AppState::Input);
                                 }
+                            }
+                        }
+                        AppState::Compacting => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key
+                            {
+                                break;
                             }
                         },
                         _ => {
@@ -2015,6 +2043,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2589,6 +2618,65 @@ mod tests {
         assert!(
             !app.pending_g,
             "ToolConfirmation state should clear pending_g"
+        );
+
+        app.pending_g = true;
+        app.set_state(AppState::Compacting);
+        assert!(!app.pending_g, "Compacting state should clear pending_g");
+    }
+
+    #[test]
+    fn compacting_state_sets_compacting_input_mode() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+        assert_eq!(app.input.mode(), &InputMode::Compacting);
+    }
+
+    #[test]
+    fn compaction_complete_event_returns_to_input_state() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::CompactionComplete {
+                summary: "Conversation compacted successfully.".to_string(),
+                is_error: false,
+            },
+            None,
+        )
+        .expect("handle event");
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("compacted")),
+            "conversation should contain compaction result"
+        );
+    }
+
+    #[test]
+    fn compaction_complete_error_event_shows_error() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::CompactionComplete {
+                summary: "Compaction failed: no spawner configured.".to_string(),
+                is_error: true,
+            },
+            None,
+        )
+        .expect("handle event");
+
+        assert_eq!(app.state, AppState::Input);
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Error && e.content.contains("no spawner")),
+            "conversation should contain compaction error"
         );
     }
 

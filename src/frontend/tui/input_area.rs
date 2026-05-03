@@ -9,6 +9,7 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
+const COMPACTING_TITLE: &str = "Compacting...";
 const SESSIONS_TITLE: &str = " Sessions ";
 const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
@@ -25,6 +26,7 @@ pub enum InputMode {
         name: String,
         input: serde_json::Value,
     },
+    Compacting,
 }
 
 pub struct InputArea<'a> {
@@ -169,6 +171,9 @@ impl<'a> InputArea<'a> {
                 Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
             }
             InputMode::TasksPicker => Block::default().borders(Borders::ALL).title(TASKS_TITLE),
+            InputMode::Compacting => Block::default()
+                .borders(Borders::ALL)
+                .title(COMPACTING_TITLE),
             InputMode::ToolConfirmation { name, .. } => Block::default()
                 .borders(Borders::ALL)
                 .title(format!("Allow '{name}'? [y/n]")),
@@ -187,7 +192,10 @@ impl<'a> InputArea<'a> {
                     .max(MIN_HEIGHT)
                     .min(max_height)
             }
-            InputMode::Streaming | InputMode::SessionPicker | InputMode::TasksPicker => MIN_HEIGHT,
+            InputMode::Streaming
+            | InputMode::SessionPicker
+            | InputMode::TasksPicker
+            | InputMode::Compacting => MIN_HEIGHT,
             InputMode::Insert => self.text_height_for_width(width, max_height),
             InputMode::Normal => self.text_height_for_width(width, max_height),
         }
@@ -698,5 +706,29 @@ mod tests {
             "e",
             "e in Insert mode should insert literal 'e'"
         );
+    }
+
+    #[test]
+    fn compacting_mode_shows_compacting_title() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Compacting);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_compacting", terminal.backend());
+    }
+
+    #[test]
+    fn compacting_mode_height_is_min() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Compacting);
+        assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 }
