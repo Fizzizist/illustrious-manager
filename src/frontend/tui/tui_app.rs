@@ -669,6 +669,12 @@ async fn run_app(
                             "Nothing to compact — history is too short.".to_string(),
                         ));
                     } else {
+                        // Reload the conversation from the agent's updated history
+                        // so deactivated entries are removed from the display.
+                        if let Ok(history) = agent.session_history().await {
+                            app.conversation.clear();
+                            app.load_history(&history);
+                        }
                         app.conversation.push(ConversationEntry::new(
                             ConversationRole::Info,
                             format!("Compacted {n} entries."),
