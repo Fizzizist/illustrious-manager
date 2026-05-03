@@ -656,6 +656,38 @@ async fn run_app(
     loop {
         app.viewport_height = terminal.size()?.height.saturating_sub(5);
         terminal.draw(|frame| render_app(&mut app, frame))?;
+
+        // If a previous iteration set Compacting state (e.g. /compact command),
+        // we've now drawn the "Compacting..." message. Perform the actual
+        // compaction here so the user sees the status message while waiting.
+        if app.state == AppState::Compacting {
+            match agent.compact_stored().await {
+                Ok(n) => {
+                    if n == 0 {
+                        app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Info,
+                            "Nothing to compact — history is too short.".to_string(),
+                        ));
+                    } else {
+                        app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Info,
+                            format!("Compacted {n} entries."),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Error,
+                        format!("Compaction failed: {e}"),
+                    ));
+                }
+            }
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
+            app.git_branch = status_line::detect_git_branch();
+            terminal.draw(|frame| render_app(&mut app, frame))?;
+        }
+
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
                 handle_agent_event(&mut app, agent_event, logger.as_mut())?;
@@ -675,28 +707,8 @@ async fn run_app(
                             ConversationRole::Info,
                             "Auto-compacting context...".to_string(),
                         ));
-                        match agent.compact_stored().await {
-                            Ok(n) => {
-                                if n == 0 {
-                                    app.conversation.push(ConversationEntry::new(
-                                        ConversationRole::Info,
-                                        "Nothing to compact — history is too short.".to_string(),
-                                    ));
-                                } else {
-                                    app.conversation.push(ConversationEntry::new(
-                                        ConversationRole::Info,
-                                        format!("Auto-compacted {n} entries."),
-                                    ));
-                                }
-                            }
-                            Err(e) => {
-                                app.conversation.push(ConversationEntry::new(
-                                    ConversationRole::Error,
-                                    format!("Auto-compaction failed: {e}"),
-                                ));
-                            }
-                        }
-                        app.set_state(AppState::Input);
+                        // The actual compaction happens at the top of the loop
+                        // after redraw, so the user sees the status message.
                     }
                 }
             }

@@ -220,29 +220,10 @@ impl SlashCommand for CompactCommand {
                 "Compacting context...".to_string(),
             ));
 
-            match ctx.agent.compact_stored().await {
-                Ok(entries_compacted) => {
-                    if entries_compacted == 0 {
-                        ctx.app.conversation.push(ConversationEntry::new(
-                            ConversationRole::Info,
-                            "Nothing to compact — history is too short.".to_string(),
-                        ));
-                    } else {
-                        ctx.app.conversation.push(ConversationEntry::new(
-                            ConversationRole::Info,
-                            format!("Compacted {entries_compacted} entries."),
-                        ));
-                    }
-                }
-                Err(e) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Error,
-                        format!("Compaction failed: {e}"),
-                    ));
-                }
-            }
-
-            ctx.app.set_state(AppState::Input);
+            // Do NOT await compact_stored() here — the TUI event loop
+            // needs to redraw the "Compacting..." message first. The main
+            // loop in run_app will detect AppState::Compacting, force a
+            // redraw, then await the compaction.
             Ok(DispatchResult::Handled)
         })
     }
@@ -624,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compact_command_in_input_state_is_handled() {
+    async fn compact_command_in_input_state_sets_compacting_state() {
         let registry = default_registry();
         let config = make_config();
         let tools = Arc::new(crate::tools::ToolRegistry::new());
@@ -659,14 +640,15 @@ mod tests {
             .await
             .expect("dispatch");
         assert_eq!(result, DispatchResult::Handled);
-        // Compaction should fail since no backend factory is configured,
-        // but the command itself should be handled (not passthrough)
+        // The command sets Compacting state and pushes a status message.
+        // The actual compaction result is handled in the main TUI loop.
+        assert_eq!(ctx.app.state, AppState::Compacting);
         assert!(
             ctx.app
                 .conversation
                 .iter()
-                .any(|e| e.content.contains("Compaction") || e.content.contains("compact")),
-            "should have a compaction-related message in conversation"
+                .any(|e| e.content.contains("Compacting")),
+            "should have a 'Compacting' message in conversation"
         );
     }
 
