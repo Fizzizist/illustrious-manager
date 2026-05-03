@@ -182,7 +182,11 @@ impl SlashCommand for CompactCommand {
             ctx.app.set_state(AppState::Compacting);
             let agent = Arc::clone(&ctx.agent);
             let handle = tokio::spawn(async move {
-                let (summary, is_error) = agent.compact().await;
+                let result = agent.compact().await;
+                let (summary, is_error) = match result {
+                    Ok(s) => (s, false),
+                    Err(e) => (e, true),
+                };
                 let _ = event_tx
                     .send(AgentEvent::CompactionComplete { summary, is_error })
                     .await;
