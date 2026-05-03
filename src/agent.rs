@@ -215,8 +215,27 @@ impl Agent {
                     Role::Assistant => "Assistant",
                 };
                 for block in &msg.content {
-                    if let ContentBlock::Text(text) = block {
-                        parts.push(format!("{role_label}: {text}"));
+                    match block {
+                        ContentBlock::Text(text) => {
+                            parts.push(format!("{role_label}: {text}"));
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            parts.push(format!(
+                                "{role_label}: [Called tool {name} with input {input}]"
+                            ));
+                        }
+                        ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } => {
+                            let label = if *is_error { "error" } else { "result" };
+                            parts.push(format!("{role_label}: [Tool {label}: {content}]"));
+                        }
+                        ContentBlock::Thinking { text, .. } => {
+                            parts.push(format!("{role_label}: [Thinking: {text}]"));
+                        }
+                        ContentBlock::RedactedThinking { .. } => {
+                            parts.push(format!("{role_label}: [Redacted thinking]"));
+                        }
                     }
                 }
             }
@@ -252,18 +271,8 @@ impl Agent {
 
         let session = self.session.lock().await;
 
-        if let Err(e) = session.conversation().deactivate_all().await {
-            return (
-                format!("Compaction failed: could not deactivate old entries: {e}"),
-                true,
-            );
-        }
-
-        if let Err(e) = session.conversation().insert_message(&summary_msg).await {
-            return (
-                format!("Compaction partially failed: could not insert summary: {e}"),
-                true,
-            );
+        if let Err(e) = session.conversation().compact(&summary_msg).await {
+            return (format!("Compaction failed: {e}"), true);
         }
 
         drop(session);
@@ -3613,6 +3622,72 @@ mod tests {
         assert!(
             summary.contains("no spawner"),
             "error message should mention missing spawner, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn compaction_role_falls_back_to_default_when_not_in_models() {
+        use crate::config::AppConfig;
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: std::collections::BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let role = if config.models.contains_key(&config.compaction_role) {
+            config.compaction_role.clone()
+        } else {
+            "default".to_string()
+        };
+        assert_eq!(
+            role, "default",
+            "should fall back to default when compaction role not in models"
+        );
+    }
+
+    #[test]
+    fn compaction_role_uses_configured_role_when_in_models() {
+        use crate::config::{AppConfig, ModelRole};
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "compaction".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let role = if config.models.contains_key(&config.compaction_role) {
+            config.compaction_role.clone()
+        } else {
+            "default".to_string()
+        };
+        assert_eq!(
+            role, "compaction",
+            "should use compaction role when defined in models"
         );
     }
 }
