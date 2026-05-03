@@ -130,6 +130,7 @@ impl<'a> ConversationRepo<'a> {
     }
 
     pub async fn read_first_user_message(&self) -> Result<String> {
+        // Try active entries first (respects compaction's soft-delete).
         let mut rows = self
             .session
             .conn
@@ -139,6 +140,32 @@ impl<'a> ConversationRepo<'a> {
             )
             .await
             .context("Failed to query first user message")?;
+
+        if let Some(row) = rows.next().await? {
+            let content_str = match row.get_value(0)? {
+                turso::Value::Text(s) => s,
+                _ => return Ok(String::new()),
+            };
+            let blocks: Vec<ContentBlock> = serde_json::from_str(&content_str)
+                .context("Failed to deserialize content blocks")?;
+            for block in blocks {
+                if let ContentBlock::Text(text) = block {
+                    return Ok(text);
+                }
+            }
+        }
+
+        // Fallback: if no active user message found (e.g. all were deactivated
+        // by a failed compaction), try any user message regardless of active status.
+        let mut rows = self
+            .session
+            .conn
+            .query(
+                "SELECT content FROM conversation WHERE role = 'user' ORDER BY id ASC LIMIT 1",
+                (),
+            )
+            .await
+            .context("Failed to query first user message (fallback)")?;
 
         if let Some(row) = rows.next().await? {
             let content_str = match row.get_value(0)? {

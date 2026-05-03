@@ -414,14 +414,16 @@ impl Agent {
 
         let entries_compacted = ids_to_deactivate.len();
 
-        // Deactivate old entries in the DB.
+        // Insert the summary first, then deactivate old entries. This order
+        // ensures that if deactivation fails, we have an extra message
+        // (harmless) rather than losing messages (data loss).
         {
             let session = self.session.lock().await;
+            session.conversation().insert_message(&summary_msg).await?;
             session
                 .conversation()
                 .deactivate_entries(&ids_to_deactivate)
                 .await?;
-            session.conversation().insert_message(&summary_msg).await?;
         }
 
         // Update in-memory history: replace old messages with summary.

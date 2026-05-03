@@ -809,4 +809,67 @@ mod tests {
             "old sessions without active column should still show their first message"
         );
     }
+
+    #[tokio::test]
+    async fn list_sessions_shows_compaction_summary_after_deactivation() {
+        let dir = TempDir::new().expect("temp dir");
+
+        // Create a session with several messages, then deactivate the first
+        // user message (simulating compaction) and insert a summary.
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+
+        session
+            .conversation()
+            .insert_message(&Message::text(
+                Role::User,
+                "original first message".to_string(),
+            ))
+            .await
+            .expect("insert");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "response".to_string()))
+            .await
+            .expect("insert");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "follow up".to_string()))
+            .await
+            .expect("insert");
+
+        // Deactivate the first user message (simulating compaction)
+        let ids = session.conversation().load_active_ids().await.expect("ids");
+        session
+            .conversation()
+            .deactivate_entries(&ids[..1])
+            .await
+            .expect("deactivate");
+
+        // Insert a compaction summary (simulating what compact() does)
+        session
+            .conversation()
+            .insert_message(&Message::text(
+                Role::User,
+                "[Compaction summary] discussed original topic [/Compaction summary]".to_string(),
+            ))
+            .await
+            .expect("insert summary");
+
+        // Do NOT checkpoint — list_sessions opens the DB separately and
+        // should still see the compaction summary via WAL.
+        // session.checkpoint().await.expect("checkpoint");
+
+        // list_sessions should show the compaction summary as the first user message
+        let summaries = list_sessions(dir.path()).await.expect("list sessions");
+        assert_eq!(summaries.len(), 1);
+        // The first active user message should be "follow up" (the second user message),
+        // since the compaction summary has a higher ID.
+        assert!(
+            summaries[0].first_user_message.contains("follow up"),
+            "compacted session should show the first active user message, got: {}",
+            summaries[0].first_user_message,
+        );
+    }
 }
