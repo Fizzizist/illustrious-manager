@@ -90,7 +90,8 @@ const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +127,8 @@ impl Session {
         conn.execute_batch(SCHEMA)
             .await
             .context("Failed to run schema DDL")?;
+
+        migrate_active_column(&conn).await?;
 
         Ok(Self {
             id: sess_id,
@@ -170,6 +173,28 @@ impl Session {
         }
         Ok(())
     }
+}
+
+async fn migrate_active_column(conn: &Connection) -> Result<()> {
+    let mut rows = conn
+        .query("PRAGMA table_info(conversation)", ())
+        .await
+        .context("Failed to query conversation table info")?;
+    let mut has_active = false;
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)?
+            && name == "active"
+        {
+            has_active = true;
+            break;
+        }
+    }
+    if !has_active {
+        conn.execute_batch("ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+            .await
+            .context("Failed to add active column to conversation table")?;
+    }
+    Ok(())
 }
 
 fn generate_uuidv7() -> String {
@@ -719,5 +744,44 @@ mod tests {
             .expect("reopen");
         let task_id = session.tasks().create("t", None).await.expect("create");
         assert_eq!(task_id, 1);
+    }
+
+    #[tokio::test]
+    async fn active_column_is_added_on_reopen_of_existing_db() {
+        let dir = TempDir::new().expect("temp dir");
+        let id = uuid::Uuid::now_v7().to_string();
+        let db_path = dir.path().join(format!("{id}.db"));
+
+        {
+            let db = Builder::new_local(db_path.to_string_lossy().as_ref())
+                .build()
+                .await
+                .expect("build");
+            let conn = db.connect().expect("connect");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL
+                )",
+            )
+            .await
+            .expect("create old schema");
+            conn.execute(
+                "INSERT INTO conversation (role, content) VALUES (?1, ?2)",
+                [
+                    turso::Value::Text("user".to_string()),
+                    turso::Value::Text("[{\"type\":\"text\",\"text\":\"hello\"}]".to_string()),
+                ],
+            )
+            .await
+            .expect("insert");
+        }
+
+        let session = Session::new(Some(id), dir.path().to_path_buf())
+            .await
+            .expect("reopen with migration");
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1);
     }
 }
