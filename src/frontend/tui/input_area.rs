@@ -274,10 +274,15 @@ impl<'a> InputArea<'a> {
                     ..
                 } => {
                     let saved = self.textarea.yank_text();
-                    self.textarea.cut();
-                    self.textarea.set_yank_text(saved);
-                    self.textarea.paste();
-                    self.set_mode(InputMode::Normal);
+                    if saved.is_empty() {
+                        self.textarea.cancel_selection();
+                        self.set_mode(InputMode::Normal);
+                    } else {
+                        self.textarea.cut();
+                        self.textarea.set_yank_text(saved);
+                        self.textarea.paste();
+                        self.set_mode(InputMode::Normal);
+                    }
                     true
                 }
                 KeyEvent {
@@ -1057,20 +1062,20 @@ mod tests {
     #[test]
     fn visual_mode_p_replaces_selection() {
         let mut input = InputArea::new();
-        input.set_text("hello world");
+        input.set_text("hello world foo");
         input.set_mode(InputMode::Normal);
         input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('l'));
+        input.input(char_key('w'));
         input.input(char_key('d'));
         assert_eq!(input.mode(), &InputMode::Normal);
-        assert_eq!(input.text(), "llo world");
+        assert_eq!(input.text(), "world foo");
+        assert_eq!(input.cursor().1, 0, "cursor should be at start after cut");
 
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('$'));
+        input.input(char_key('w'));
+        assert_eq!(input.cursor().1, 6, "w should move to start of 'foo'");
         input.input(char_key('v'));
-        input.input(char_key('l'));
+        input.input(char_key('w'));
         let consumed = input.input(char_key('p'));
         assert!(consumed, "p should be consumed in Visual mode");
         assert_eq!(
@@ -1078,10 +1083,10 @@ mod tests {
             &InputMode::Normal,
             "p should return to Normal mode"
         );
-        assert!(
-            input.text().contains("he"),
-            "p should paste register content, got '{}'",
-            input.text()
+        assert_eq!(
+            input.text(),
+            "world hello ",
+            "p should replace selection with register content"
         );
     }
 
@@ -1286,6 +1291,75 @@ mod tests {
             input.text(),
             "hello",
             "p with empty register should not change text"
+        );
+    }
+
+    #[test]
+    fn visual_d_then_normal_p_pastes_deleted_text() {
+        let mut input = InputArea::new();
+        input.set_text("hello world");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.input(char_key('v'));
+        input.input(char_key('l'));
+        input.input(char_key('l'));
+        input.input(char_key('d'));
+        assert_eq!(input.mode(), &InputMode::Normal);
+        assert_eq!(input.text(), "llo world");
+
+        input.input(char_key('$'));
+        let consumed = input.input(char_key('p'));
+        assert!(consumed, "p should be consumed in Normal mode");
+        assert_eq!(
+            input.text(),
+            "llo worldhe",
+            "p should paste the deleted text at cursor position"
+        );
+    }
+
+    #[test]
+    fn visual_c_then_normal_p_pastes_deleted_text() {
+        let mut input = InputArea::new();
+        input.set_text("abc def ghi");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.input(char_key('v'));
+        input.input(char_key('w'));
+        input.input(char_key('c'));
+        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.text(), "def ghi");
+
+        input.set_mode(InputMode::Normal);
+        input.input(char_key('$'));
+        let consumed = input.input(char_key('p'));
+        assert!(consumed, "p should be consumed in Normal mode");
+        assert_eq!(
+            input.text(),
+            "def ghiabc ",
+            "p should paste the cut text at cursor position"
+        );
+    }
+
+    #[test]
+    fn visual_p_with_empty_yank_cancels_without_data_loss() {
+        let mut input = InputArea::new();
+        input.set_text("hello world");
+        input.set_mode(InputMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.input(char_key('v'));
+        input.input(char_key('l'));
+        input.input(char_key('l'));
+        let consumed = input.input(char_key('p'));
+        assert!(consumed, "p should be consumed in Visual mode");
+        assert_eq!(
+            input.mode(),
+            &InputMode::Normal,
+            "p with empty yank should return to Normal"
+        );
+        assert_eq!(
+            input.text(),
+            "hello world",
+            "p with empty yank should not delete text"
         );
     }
 }
