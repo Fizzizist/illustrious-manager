@@ -4,7 +4,9 @@ use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
 use crate::frontend::tui::{ConversationEntry, ConversationRole, SessionPicker};
 use crate::session::list_sessions;
+use crate::types::AgentEvent;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Result of dispatching a slash command.
 #[derive(Debug, PartialEq, Eq)]
@@ -38,6 +40,7 @@ pub struct CommandContext<'a> {
     pub app: &'a mut App,
     pub agent: Arc<Agent>,
     pub config: &'a AppConfig,
+    pub event_tx: &'a mpsc::Sender<AgentEvent>,
 }
 
 /// Trait implemented by every registered slash command.
@@ -159,6 +162,41 @@ impl SlashCommand for ModelCommand {
 /// Built-in `/tasks` command — opens the tasks picker overlay.
 pub struct TasksCommand;
 
+/// Built-in `/compact` command — triggers context compaction.
+pub struct CompactCommand;
+
+impl SlashCommand for CompactCommand {
+    fn name(&self) -> &str {
+        "compact"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        let event_tx = ctx.event_tx.clone();
+        Box::pin(async move {
+            ctx.app.input.clear();
+            ctx.app.set_state(AppState::Compacting);
+            let agent = Arc::clone(&ctx.agent);
+            let handle = tokio::spawn(async move {
+                let result = agent.compact().await;
+                let (summary, is_error) = match result {
+                    Ok(s) => (s, false),
+                    Err(e) => (e, true),
+                };
+                let _ = event_tx
+                    .send(AgentEvent::CompactionComplete { summary, is_error })
+                    .await;
+            });
+            ctx.app.compaction_task = Some(handle);
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 impl SlashCommand for TasksCommand {
     fn name(&self) -> &str {
         "tasks"
@@ -196,6 +234,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(SessionsCommand));
     registry.register(Box::new(ModelCommand));
     registry.register(Box::new(TasksCommand));
+    registry.register(Box::new(CompactCommand));
     registry
 }
 
@@ -220,6 +259,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         }
     }
 
@@ -277,10 +317,12 @@ mod tests {
                 )
                 .await,
             );
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent,
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = registry
                 .dispatch("/code-review 42", &mut ctx)
@@ -317,10 +359,12 @@ mod tests {
                 )
                 .await,
             );
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent,
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = registry
                 .dispatch("hello there", &mut ctx)
@@ -357,10 +401,12 @@ mod tests {
                 .await,
             );
             let cmd = SessionsCommand;
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent,
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -396,10 +442,12 @@ mod tests {
                 .await,
             );
             let cmd = ModelCommand;
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent: Arc::clone(&agent),
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = cmd.execute("claude-new", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -435,10 +483,12 @@ mod tests {
                 .await,
             );
             let cmd = ModelCommand;
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent: Arc::clone(&agent),
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -497,10 +547,12 @@ mod tests {
                 .await,
             );
             let cmd = TasksCommand;
+            let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
             let mut ctx = CommandContext {
                 app: &mut app,
                 agent,
                 config: &config,
+                event_tx: &event_tx,
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -549,10 +601,12 @@ mod tests {
         let tools = Arc::new(crate::tools::ToolRegistry::new());
         let mut app = App::new(Arc::clone(&tools));
         let cmd = TasksCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
         let mut ctx = CommandContext {
             app: &mut app,
             agent,
             config: &config,
+            event_tx: &event_tx,
         };
         let result = cmd.execute("", &mut ctx).await.expect("execute");
         assert_eq!(result, DispatchResult::Handled);
@@ -561,5 +615,55 @@ mod tests {
         // both pending with the same status, ordered by stable sort then DB insertion order (alpha inserted first)
         assert_eq!(picker.tasks()[0].title, "task alpha");
         assert_eq!(picker.tasks()[1].title, "task beta");
+    }
+
+    #[tokio::test]
+    async fn compact_command_transitions_to_compacting_state() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = CompactCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(ctx.app.state, AppState::Compacting);
+    }
+
+    #[test]
+    fn parse_command_recognizes_compact() {
+        let parsed = parse_command("/compact").expect("should parse");
+        assert_eq!(parsed.name, "compact");
+        assert_eq!(parsed.args, "");
+    }
+
+    #[test]
+    fn parse_command_compact_with_args() {
+        let parsed = parse_command("/compact ").expect("should parse");
+        assert_eq!(parsed.name, "compact");
     }
 }
