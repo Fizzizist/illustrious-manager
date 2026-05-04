@@ -20,8 +20,8 @@ mod compact;
 mod spawner;
 
 pub use spawner::{
-    clamp_confirmation, HeadlessOutcome, AgentSpawner, RegistryBuilder, run_headless,
-    spawn_agent, spawn_agent_with_selection,
+    AgentSpawner, HeadlessOutcome, RegistryBuilder, clamp_confirmation, run_headless, spawn_agent,
+    spawn_agent_with_selection,
 };
 
 struct PendingToolCall {
