@@ -347,6 +347,12 @@ pub enum AgentEvent {
     /// A diagnostic warning from the agent, written to the debug log when
     /// `--debug` is active. Not displayed in the conversation UI.
     Warn(String),
+    /// Emitted when a `/compact` operation finishes. Carries the summary text
+    /// on success, or an error message on failure.
+    CompactionComplete {
+        summary: String,
+        is_error: bool,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

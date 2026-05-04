@@ -930,6 +930,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,

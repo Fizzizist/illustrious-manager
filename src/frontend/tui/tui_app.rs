@@ -42,6 +42,7 @@ pub enum AppState {
     },
     SessionPicker,
     TasksPicker,
+    Compacting,
 }
 
 pub struct App {
@@ -67,6 +68,9 @@ pub struct App {
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
     pending_g: bool,
+    /// JoinHandle for the in-flight compaction task, if any.
+    /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
+    pub compaction_task: Option<tokio::task::JoinHandle<()>>,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -94,6 +98,10 @@ impl App {
                 self.input.set_mode(InputMode::TasksPicker);
                 self.pending_g = false;
             }
+            AppState::Compacting => {
+                self.input.set_mode(InputMode::Compacting);
+                self.pending_g = false;
+            }
         }
     }
 
@@ -118,6 +126,7 @@ impl App {
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
             pending_g: false,
+            compaction_task: None,
             tools,
         }
     }
@@ -577,6 +586,9 @@ pub fn handle_agent_event(
         AgentEvent::ThinkingReceived(text) => {
             app.current_thinking.push_str(&text);
         }
+        // CompactionComplete is handled in run_app where we have access to the Agent.
+        // It must not reach this match arm.
+        AgentEvent::CompactionComplete { .. } => {}
     }
     Ok(())
 }
@@ -641,7 +653,37 @@ async fn run_app(
         terminal.draw(|frame| render_app(&mut app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
-                handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+                if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
+                    if *is_error {
+                        app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Error,
+                            summary.clone(),
+                        ));
+                    } else {
+                        // Rebuild conversation from compacted history
+                        match agent.session_history().await {
+                            Ok(history) => {
+                                app.conversation.clear();
+                                app.current_response.clear();
+                                app.current_thinking.clear();
+                                app.scroll_offset = 0;
+                                app.reset_for_session_switch();
+                                app.load_history(&history);
+                            }
+                            Err(e) => {
+                                app.conversation.push(ConversationEntry::new(
+                                    ConversationRole::Error,
+                                    format!("Failed to reload history after compaction: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                    app.set_state(AppState::Input);
+                    app.scroll_offset = 0;
+                    app.compaction_task = None;
+                } else {
+                    handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+                }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
                 if let Event::Paste(text) = &terminal_event {
@@ -668,6 +710,7 @@ async fn run_app(
                                             app: &mut app,
                                             agent: agent.clone(),
                                             config,
+                                            event_tx: &event_tx,
                                         };
                                         let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
                                         if dispatch == DispatchResult::Passthrough {
@@ -822,6 +865,16 @@ async fn run_app(
                                     app.set_state(AppState::Input);
                                 }
                             }
+                        }
+                        AppState::Compacting => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key
+                            {
+                                break;
+                            }
                         },
                         _ => {
                             if let
@@ -843,6 +896,10 @@ async fn run_app(
     }
 
     if let Some(handle) = stream_task {
+        handle.abort();
+    }
+
+    if let Some(handle) = app.compaction_task {
         handle.abort();
     }
 
@@ -2015,6 +2072,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
+            compaction_role: "compaction".to_string(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2590,6 +2648,53 @@ mod tests {
             !app.pending_g,
             "ToolConfirmation state should clear pending_g"
         );
+
+        app.pending_g = true;
+        app.set_state(AppState::Compacting);
+        assert!(!app.pending_g, "Compacting state should clear pending_g");
+    }
+
+    #[test]
+    fn compacting_state_sets_compacting_input_mode() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+        assert_eq!(app.input.mode(), &InputMode::Compacting);
+    }
+
+    #[test]
+    fn compaction_complete_event_is_noop_in_handler() {
+        // CompactionComplete is handled directly in run_app, not in handle_agent_event.
+        // The handler match arm is a no-op to satisfy exhaustiveness.
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::CompactionComplete {
+                summary: "test".to_string(),
+                is_error: false,
+            },
+            None,
+        )
+        .expect("handle event should not error");
+
+        // State should NOT change — it stays Compacting because the real
+        // handling happens in the main loop, not in handle_agent_event.
+        assert_eq!(app.state, AppState::Compacting);
+        assert!(
+            app.conversation.is_empty(),
+            "handle_agent_event should not modify conversation for CompactionComplete"
+        );
+    }
+
+    #[test]
+    fn compacting_state_clears_cancel_token_and_confirmation_tx() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Compacting);
+        // Compacting state should not have these set, but verifying
+        // that the state transition is clean
+        assert!(app.confirmation_tx.is_none());
+        assert!(app.cancel_token.is_none());
     }
 
     // ── Thinking handler tests (Finding 7) ────────────────────────────────

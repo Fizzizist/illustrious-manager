@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
-use crate::backend::{BackendFactory, LlmBackend};
+use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
@@ -15,6 +15,14 @@ use anyhow::Result;
 use futures::StreamExt;
 use futures::channel::mpsc;
 use futures::future::join_all;
+
+mod compact;
+mod spawner;
+
+pub use spawner::{
+    AgentSpawner, HeadlessOutcome, RegistryBuilder, clamp_confirmation, run_headless, spawn_agent,
+    spawn_agent_with_selection,
+};
 
 struct PendingToolCall {
     id: String,
@@ -33,6 +41,9 @@ pub struct Agent {
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
     session: Arc<TokioMutex<Session>>,
+    /// Spawner for creating compaction sub-agents. Set after construction via
+    /// `with_compaction_spawner()`.
+    compaction_spawner: Option<Arc<AgentSpawner>>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -65,6 +76,7 @@ impl Agent {
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
+            compaction_spawner: None,
         }
     }
 
@@ -120,6 +132,13 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) += 1;
         self
+    }
+
+    pub fn with_compaction_spawner(self, spawner: Arc<AgentSpawner>) -> Self {
+        Self {
+            compaction_spawner: Some(spawner),
+            ..self
+        }
     }
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
@@ -825,249 +844,6 @@ async fn execute_tool_calls(
 }
 
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
-
-/// Outcome of a headless sub-agent run.
-pub struct HeadlessOutcome {
-    pub text: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub is_error: bool,
-    pub error_message: Option<String>,
-}
-
-/// Drive an `Agent` to completion without a human in the loop.
-///
-/// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
-/// must be configured with a confirmation mode that does not require human input.
-pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
-    let stream = match agent.send(prompt, None, None).await {
-        Ok(s) => s,
-        Err(e) => {
-            return HeadlessOutcome {
-                text: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                is_error: true,
-                error_message: Some(e.to_string()),
-            };
-        }
-    };
-
-    let mut stream = stream;
-    let mut text = String::new();
-    let mut input_tokens: u32 = 0;
-    let mut output_tokens: u32 = 0;
-    let mut is_error = false;
-    let mut error_message: Option<String> = None;
-
-    while let Some(event) = stream.next().await {
-        match event {
-            AgentEvent::TokenReceived(t) => text.push_str(&t),
-            AgentEvent::ResponseComplete(_) => {}
-            AgentEvent::ToolUseReceived { .. } => {}
-            AgentEvent::ToolResult { .. } => {}
-            AgentEvent::ToolConfirmationRequired { name, .. } => {
-                is_error = true;
-                error_message = Some(format!(
-                    "Sub-agent required confirmation for tool '{name}' but no human is present. \
-                     Set a less restrictive confirmation mode for the sub-agent."
-                ));
-                break;
-            }
-            AgentEvent::Error(msg) => {
-                is_error = true;
-                error_message = Some(msg);
-                break;
-            }
-            AgentEvent::Usage {
-                input_tokens: it,
-                output_tokens: ot,
-                ..
-            } => {
-                input_tokens = input_tokens.saturating_add(it);
-                output_tokens = output_tokens.saturating_add(ot);
-            }
-            AgentEvent::SubAgentUsage { .. } => {}
-            AgentEvent::Interrupted { .. } => {}
-            AgentEvent::Warn(_) => {}
-            AgentEvent::ThinkingReceived(_) => {}
-        }
-    }
-
-    HeadlessOutcome {
-        text,
-        input_tokens,
-        output_tokens,
-        is_error,
-        error_message,
-    }
-}
-
-/// Returns the stricter of two confirmation modes.
-///
-/// Strictness ordering: `Always` > `WriteOnly` > `Never`.
-/// The sub-agent can never be more permissive than the parent.
-pub fn clamp_confirmation(
-    parent: &ConfirmationMode,
-    requested: Option<&ConfirmationMode>,
-) -> ConfirmationMode {
-    let requested = match requested {
-        Some(r) => r,
-        None => return parent.clone(),
-    };
-
-    match (parent, requested) {
-        (ConfirmationMode::Always, _) => ConfirmationMode::Always,
-        (ConfirmationMode::WriteOnly, ConfirmationMode::Always) => ConfirmationMode::Always,
-        (ConfirmationMode::WriteOnly, _) => ConfirmationMode::WriteOnly,
-        (ConfirmationMode::Never, ConfirmationMode::Always) => ConfirmationMode::Always,
-        (ConfirmationMode::Never, ConfirmationMode::WriteOnly) => ConfirmationMode::WriteOnly,
-        (ConfirmationMode::Never, ConfirmationMode::Never) => ConfirmationMode::Never,
-    }
-}
-
-/// Builds a fresh `ToolRegistry` for a sub-agent.
-///
-/// The closure receives the sub-agent's session so that session-bound tools
-/// (e.g. task tools) are wired to the sub-agent rather than the parent.
-pub type RegistryBuilder =
-    Box<dyn Fn(Arc<tokio::sync::Mutex<Session>>) -> anyhow::Result<ToolRegistry> + Send + Sync>;
-
-/// Factory used by `AgentTool` to spawn independent sub-agents.
-pub struct AgentSpawner {
-    pub factory: Arc<BackendFactory>,
-    pub app_config: Arc<crate::config::AppConfig>,
-    pub registry_builder: RegistryBuilder,
-    pub parent_confirmation: ConfirmationMode,
-    pub skills: std::collections::HashMap<String, std::path::PathBuf>,
-}
-
-impl AgentSpawner {
-    pub async fn spawn(
-        &self,
-        role: &str,
-        confirmation: ConfirmationMode,
-        tool_allowlist: Option<&[String]>,
-        prompt: String,
-    ) -> HeadlessOutcome {
-        let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
-            Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
-                };
-            }
-        };
-
-        let registry = match (self.registry_builder)(Arc::clone(&session)) {
-            Ok(r) => r,
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to build sub-agent registry: {e}")),
-                };
-            }
-        };
-
-        let registry = if let Some(allowlist) = tool_allowlist {
-            registry.into_filtered(allowlist)
-        } else {
-            registry
-        };
-
-        let tool_config = ToolsConfig {
-            confirmation,
-            ..self.app_config.tools.clone()
-        };
-
-        let selection = match self.factory.for_role(role).await {
-            Ok(s) => s,
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
-                };
-            }
-        };
-
-        let agent =
-            match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
-                Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
-                Err(e) => {
-                    return HeadlessOutcome {
-                        text: String::new(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        is_error: true,
-                        error_message: Some(format!("Failed to spawn sub-agent: {e}")),
-                    };
-                }
-            };
-
-        let agent = match agent.with_context_files() {
-            Ok(a) => a,
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to load context files: {e}")),
-                };
-            }
-        };
-
-        let agent = agent.with_skills(&self.skills);
-        run_headless(&agent, prompt).await
-    }
-}
-
-/// Spawn a fresh `Agent` for the given named role using the shared `BackendFactory`.
-///
-/// The caller supplies a pre-built `ToolRegistry` and a `Session`. The agent's
-/// model is taken from the role definition; `tool_config` controls iteration
-/// limits and confirmation behaviour.
-pub async fn spawn_agent(
-    factory: &BackendFactory,
-    role: &str,
-    tool_config: &ToolsConfig,
-    session: Arc<TokioMutex<Session>>,
-    tools: ToolRegistry,
-) -> anyhow::Result<Agent> {
-    let selection = factory.for_role(role).await?;
-    spawn_agent_with_selection(selection, tool_config, session, tools).await
-}
-
-/// Core of `spawn_agent` — constructs an `Agent` from an already-resolved
-/// `BackendSelection`. Separated out so tests can inject a fake backend without
-/// going through real auth.
-pub async fn spawn_agent_with_selection(
-    selection: crate::backend::BackendSelection,
-    tool_config: &ToolsConfig,
-    session: Arc<TokioMutex<Session>>,
-    tools: ToolRegistry,
-) -> anyhow::Result<Agent> {
-    let request_config = RequestConfig {
-        model: selection.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
-        tools: tools.definitions(),
-        thinking: None,
-    };
-    Ok(Agent::new(selection.backend, request_config, session)
-        .await
-        .with_tools(tools)
-        .with_tool_config(tool_config))
-}
 
 #[cfg(test)]
 mod tests {
@@ -3472,5 +3248,97 @@ mod tests {
             assert_eq!(text, "let me think");
             assert_eq!(signature, "sig_tool");
         }
+    }
+
+    // ── Compaction tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_without_spawner_returns_error() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let session = test_session_arc().await;
+        let agent = Agent::new(Box::new(backend), config, session).await;
+
+        let result = agent.compact().await;
+        assert!(
+            result.is_err(),
+            "compact without spawner should return error"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("no spawner"),
+            "error message should mention missing spawner, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn compaction_role_falls_back_to_default_when_not_in_models() {
+        use crate::config::AppConfig;
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: std::collections::BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let role = if config.models.contains_key(&config.compaction_role) {
+            config.compaction_role.clone()
+        } else {
+            "default".to_string()
+        };
+        assert_eq!(
+            role, "default",
+            "should fall back to default when compaction role not in models"
+        );
+    }
+
+    #[test]
+    fn compaction_role_uses_configured_role_when_in_models() {
+        use crate::config::{AppConfig, ModelRole};
+        let mut models = std::collections::BTreeMap::new();
+        models.insert(
+            "compaction".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-haiku".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: crate::config::VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            tools: crate::config::ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let role = if config.models.contains_key(&config.compaction_role) {
+            config.compaction_role.clone()
+        } else {
+            "default".to_string()
+        };
+        assert_eq!(
+            role, "compaction",
+            "should use compaction role when defined in models"
+        );
     }
 }
