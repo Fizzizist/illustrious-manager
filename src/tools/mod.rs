@@ -23,6 +23,7 @@ pub enum ToolError {
     AlreadyRegistered { tool_name: String },
     Execution { tool_name: String, message: String },
     InvalidInput { message: String },
+    Timeout { tool_name: String, message: String },
 }
 
 impl std::fmt::Display for ToolError {
@@ -39,6 +40,9 @@ impl std::fmt::Display for ToolError {
             }
             ToolError::InvalidInput { message } => {
                 write!(f, "Invalid input: {}", message)
+            }
+            ToolError::Timeout { tool_name, message } => {
+                write!(f, "Tool '{}' timed out: {}", tool_name, message)
             }
         }
     }

@@ -3,13 +3,13 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│  # Illustrious Manager                                   │"
 "│                                                          │"
 "│  - backend: vertex                                       │"
 "│  - sessions_dir: /sessions                               │"
 "│  - tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"
 "│  - tools.bash_denylist: rm, wget, sudo, chmod, chown     │"
+"│  - tools.bash_timeout_secs: 120                          │"
 "│  - tools.confirmation: WriteOnly                         │"
 "│  - tools.max_tool_iterations: 25                         │"
 "│  - tools.sandbox_root: .                                 │"

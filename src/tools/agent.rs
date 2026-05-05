@@ -20,6 +20,7 @@ pub trait SubAgentSpawner: Send + Sync {
     ) -> HeadlessOutcome;
 
     fn parent_confirmation(&self) -> &ConfirmationMode;
+    fn agent_timeout_secs(&self) -> Option<u64>;
 }
 
 #[async_trait]
@@ -36,6 +37,11 @@ impl SubAgentSpawner for AgentSpawner {
 
     fn parent_confirmation(&self) -> &ConfirmationMode {
         &self.parent_confirmation
+    }
+
+    fn agent_timeout_secs(&self) -> Option<u64> {
+        self.agent_timeout_secs
+            .and_then(|s| if s == 0 { None } else { Some(s) })
     }
 }
 
@@ -158,10 +164,28 @@ impl Tool for AgentTool {
                 .collect()
         });
 
-        let outcome = self
-            .spawner
-            .spawn(&role, confirmation, tool_allowlist.as_deref(), prompt)
-            .await;
+        let outcome = if let Some(secs) = self.spawner.agent_timeout_secs() {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(secs),
+                self.spawner
+                    .spawn(&role, confirmation, tool_allowlist.as_deref(), prompt),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Sub-agent timed out after {} seconds", secs)),
+                },
+            }
+        } else {
+            self.spawner
+                .spawn(&role, confirmation, tool_allowlist.as_deref(), prompt)
+                .await
+        };
 
         if outcome.is_error {
             let msg = outcome
@@ -242,6 +266,10 @@ mod tests {
 
         fn parent_confirmation(&self) -> &ConfirmationMode {
             &self.parent
+        }
+
+        fn agent_timeout_secs(&self) -> Option<u64> {
+            None
         }
     }
 
@@ -488,6 +516,10 @@ mod tests {
             fn parent_confirmation(&self) -> &ConfirmationMode {
                 &self.app_config.tools.confirmation
             }
+
+            fn agent_timeout_secs(&self) -> Option<u64> {
+                self.app_config.tools.agent_timeout_secs
+            }
         }
 
         let tool = AgentTool::with_spawner(spawner, vec!["default".to_string()]);
@@ -603,5 +635,110 @@ mod tests {
             captured, "implement",
             "explicit valid role should be forwarded to spawner"
         );
+    }
+
+    // ── Agent tool timeout tests ─────────────────────────────────────────
+
+    struct TimeoutFakeSpawner {
+        parent: ConfirmationMode,
+        timeout_secs: Option<u64>,
+    }
+
+    impl TimeoutFakeSpawner {
+        fn new(parent: ConfirmationMode, timeout_secs: Option<u64>) -> Arc<Self> {
+            Arc::new(Self {
+                parent,
+                timeout_secs,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SubAgentSpawner for TimeoutFakeSpawner {
+        async fn spawn(
+            &self,
+            _role: &str,
+            _confirmation: ConfirmationMode,
+            _tool_allowlist: Option<&[String]>,
+            _prompt: String,
+        ) -> HeadlessOutcome {
+            // Simulate a long-running sub-agent
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            ok_outcome("never reached")
+        }
+
+        fn parent_confirmation(&self) -> &ConfirmationMode {
+            &self.parent
+        }
+
+        fn agent_timeout_secs(&self) -> Option<u64> {
+            self.timeout_secs
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_timeout_returns_error() {
+        let spawner = TimeoutFakeSpawner::new(ConfirmationMode::Never, Some(1));
+        let tool = AgentTool::with_spawner(
+            spawner as Arc<dyn SubAgentSpawner>,
+            vec!["default".to_string()],
+        );
+        let result = tool
+            .execute(serde_json::json!({"prompt": "long task"}))
+            .await
+            .expect("execute should succeed");
+        assert!(result.is_error, "timed-out sub-agent should return error");
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(
+                text.to_lowercase().contains("timed out"),
+                "error should mention timeout, got: {text}"
+            ),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tool_null_timeout_allows_long_run() {
+        struct FastSpawner {
+            parent: ConfirmationMode,
+        }
+
+        #[async_trait]
+        impl SubAgentSpawner for FastSpawner {
+            async fn spawn(
+                &self,
+                _role: &str,
+                _confirmation: ConfirmationMode,
+                _tool_allowlist: Option<&[String]>,
+                _prompt: String,
+            ) -> HeadlessOutcome {
+                ok_outcome("completed")
+            }
+
+            fn parent_confirmation(&self) -> &ConfirmationMode {
+                &self.parent
+            }
+
+            fn agent_timeout_secs(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let spawner = Arc::new(FastSpawner {
+            parent: ConfirmationMode::Never,
+        });
+        let tool = AgentTool::with_spawner(
+            spawner as Arc<dyn SubAgentSpawner>,
+            vec!["default".to_string()],
+        );
+        let result = tool
+            .execute(serde_json::json!({"prompt": "quick task"}))
+            .await
+            .expect("execute should succeed");
+        assert!(!result.is_error, "no timeout should allow completion");
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert_eq!(text, "completed"),
+            _ => panic!("expected Text"),
+        }
     }
 }

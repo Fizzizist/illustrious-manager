@@ -47,6 +47,14 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
+fn default_bash_timeout_secs() -> Option<u64> {
+    Some(120)
+}
+
+fn default_agent_timeout_secs() -> Option<u64> {
+    None
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
@@ -59,6 +67,10 @@ pub struct ToolsConfig {
     pub bash_allowlist: Vec<String>,
     #[serde(default = "default_bash_denylist")]
     pub bash_denylist: Vec<String>,
+    #[serde(default = "default_bash_timeout_secs")]
+    pub bash_timeout_secs: Option<u64>,
+    #[serde(default = "default_agent_timeout_secs")]
+    pub agent_timeout_secs: Option<u64>,
 }
 
 impl Default for ToolsConfig {
@@ -69,6 +81,8 @@ impl Default for ToolsConfig {
             max_tool_iterations: default_max_tool_iterations(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
+            bash_timeout_secs: default_bash_timeout_secs(),
+            agent_timeout_secs: default_agent_timeout_secs(),
         }
     }
 }
@@ -133,6 +147,10 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
+# Timeout in seconds for bash tool commands (0 to disable)
+# bash_timeout_secs = 120
+# Timeout in seconds for sub-agent execution (0 to disable, default: disabled)
+# agent_timeout_secs = 0
 
 # Extended thinking configuration for models that support it (Vertex AI / Anthropic).
 # [thinking]
@@ -563,6 +581,49 @@ mod tests {
             config.bash_denylist,
             vec!["rm", "wget", "sudo", "chmod", "chown"]
         );
+        assert_eq!(config.bash_timeout_secs, Some(120));
+        assert_eq!(config.agent_timeout_secs, None);
+    }
+
+    #[test]
+    fn bash_timeout_secs_defaults_to_120() {
+        let toml_str = r#"
+            confirmation = "Always"
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.bash_timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn agent_timeout_secs_defaults_to_none() {
+        let toml_str = r#"
+            confirmation = "Always"
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.agent_timeout_secs, None);
+    }
+
+    #[test]
+    fn null_timeout_parses_correctly() {
+        // 0 means "disabled" — treated as None by the tools.
+        let toml_str = r#"
+            bash_timeout_secs = 0
+            agent_timeout_secs = 0
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.bash_timeout_secs, Some(0));
+        assert_eq!(config.agent_timeout_secs, Some(0));
+    }
+
+    #[test]
+    fn explicit_timeout_values_parse_correctly() {
+        let toml_str = r#"
+            bash_timeout_secs = 60
+            agent_timeout_secs = 300
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.bash_timeout_secs, Some(60));
+        assert_eq!(config.agent_timeout_secs, Some(300));
     }
 
     #[test]

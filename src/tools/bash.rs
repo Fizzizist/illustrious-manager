@@ -1,31 +1,27 @@
 use crate::config::ConfirmationMode;
 use crate::types::ContentBlock;
 use async_trait::async_trait;
+use nix::pty::openpty;
 use serde_json::Value;
 use std::collections::HashSet;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::{Tool, ToolError, ToolResult};
 
-/// Executes shell commands in the sandbox directory.
-///
-/// # Confirmation behavior
-/// - Allowlisted commands execute without confirmation regardless of `ConfirmationMode`.
-/// - Denylisted commands are always rejected.
-/// - All other commands follow `ConfirmationMode`. Because bash commands cannot be reliably
-///   classified as read-only or write operations, `WriteOnly` is treated identically to `Always`.
-///
-/// # Denylist limitations
-/// Segment detection splits on common shell operators (`|`, `&`, `;`, newline, `(`, backtick)
-/// to catch obvious bypass patterns. It is best-effort: complex quoting, heredocs, variable
-/// indirection, and other shell features can still evade detection. Confirmation policy is
-/// the primary security gate; the denylist is a convenience filter.
+#[cfg(target_os = "linux")]
+const TIOCSCTTY: u64 = 0x540E;
+
 pub struct BashTool {
     allowlist: HashSet<String>,
     denylist: HashSet<String>,
     sandbox_root: PathBuf,
     confirmation: ConfirmationMode,
     confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    bash_timeout_secs: Option<u64>,
     schema: Value,
 }
 
@@ -36,6 +32,7 @@ impl BashTool {
         sandbox_root: PathBuf,
         confirmation: ConfirmationMode,
         confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+        bash_timeout_secs: Option<u64>,
     ) -> Self {
         let schema = serde_json::json!({
             "type": "object",
@@ -53,14 +50,11 @@ impl BashTool {
             sandbox_root,
             confirmation,
             confirm_fn,
+            bash_timeout_secs,
             schema,
         }
     }
 
-    /// Extracts the first token (command name) from each shell segment.
-    ///
-    /// Splits on `|`, `&`, `;`, newline, `(`, and backtick to catch common shell operator
-    /// bypass patterns. Best-effort only — see struct-level docs.
     fn shell_command_tokens(command: &str) -> Vec<&str> {
         command
             .split(['|', '&', ';', '\n', '(', '`'])
@@ -146,34 +140,141 @@ impl Tool for BashTool {
             }
         }
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
+        run_pty_command(
+            command,
+            &self.sandbox_root,
+            self.bash_timeout_secs
+                .and_then(|s| if s == 0 { None } else { Some(s) }),
+        )
+        .await
+    }
+}
+
+async fn run_pty_command(
+    command: &str,
+    cwd: &PathBuf,
+    timeout_secs: Option<u64>,
+) -> Result<ToolResult, ToolError> {
+    let pty = openpty(None, None).map_err(|e| ToolError::Execution {
+        tool_name: "bash".to_string(),
+        message: format!("Failed to open PTY: {}", e),
+    })?;
+
+    let slave_for_preexec = pty.slave.as_raw_fd();
+
+    let slave_stdout = nix::unistd::dup(&pty.slave).map_err(|e| ToolError::Execution {
+        tool_name: "bash".to_string(),
+        message: format!("Failed to dup slave fd for stdout: {}", e),
+    })?;
+    let slave_stderr = nix::unistd::dup(&pty.slave).map_err(|e| ToolError::Execution {
+        tool_name: "bash".to_string(),
+        message: format!("Failed to dup slave fd for stderr: {}", e),
+    })?;
+
+    let master_raw = pty.master.as_raw_fd();
+    // Prevent OwnedFd::drop from closing master fd — tokio::fs::File will own it.
+    std::mem::forget(pty.master);
+
+    let mut child = {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c")
             .arg(command)
-            .current_dir(&self.sandbox_root)
+            .current_dir(cwd)
             .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|e| ToolError::Execution {
-                tool_name: "bash".to_string(),
-                message: format!("Failed to spawn command: {}", e),
-            })?;
+            .stdin(Stdio::from(pty.slave))
+            .stdout(Stdio::from(slave_stdout))
+            .stderr(Stdio::from(slave_stderr));
 
-        let is_error = !output.status.success();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Safety: pre_exec runs in the child between fork and exec.
+        // setsid() creates a new session and process group; TIOCSCTTY sets
+        // the controlling terminal for the PTY.
+        unsafe {
+            cmd.pre_exec(move || {
+                nix::unistd::setsid()
+                    .map_err(|e| std::io::Error::other(format!("setsid failed: {e}")))?;
+                #[cfg(target_os = "linux")]
+                {
+                    let ret = nix::libc::ioctl(slave_for_preexec, TIOCSCTTY as _, 0);
+                    if ret < 0 {
+                        return Err(std::io::Error::other("TIOCSCTTY ioctl failed"));
+                    }
+                }
+                Ok(())
+            });
+        }
 
-        let content = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{}\n{}", stdout, stderr),
-            (true, false) => stderr.into_owned(),
-            (false, true) => stdout.into_owned(),
-            (true, true) => "(no output)".to_string(),
-        };
+        cmd.spawn().map_err(|e| ToolError::Execution {
+            tool_name: "bash".to_string(),
+            message: format!("Failed to spawn command: {}", e),
+        })?
+    };
 
-        Ok(ToolResult {
-            content: vec![ContentBlock::Text(content)],
-            is_error,
-            agent_events: vec![],
-        })
+    let output_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let output_buf_clone = Arc::clone(&output_buf);
+
+    let master_file = tokio::fs::File::from_std(unsafe { std::fs::File::from_raw_fd(master_raw) });
+
+    let read_future = read_master_into_buffer(master_file, output_buf_clone);
+
+    let output_result = match timeout_secs {
+        Some(secs) => tokio::time::timeout(Duration::from_secs(secs), read_future).await,
+        None => {
+            read_future.await;
+            Ok(())
+        }
+    };
+
+    match output_result {
+        Ok(()) => {
+            let status = child.wait().await;
+            let is_error = status.as_ref().is_ok_and(|s| !s.success());
+            // master fd is closed when master_file is dropped inside read_master_into_buffer
+            let output = String::from_utf8_lossy(&output_buf.lock().expect("lock")).into_owned();
+            let content = if output.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                output
+            };
+            Ok(ToolResult {
+                content: vec![ContentBlock::Text(content)],
+                is_error,
+                agent_events: vec![],
+            })
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            // master fd is closed when master_file is dropped on timeout
+            let partial = String::from_utf8_lossy(&output_buf.lock().expect("lock")).into_owned();
+            let timeout_msg = format!(
+                "bash timed out after {} seconds. Partial output:\n{}",
+                timeout_secs.expect("timeout path requires Some"),
+                if partial.trim().is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    partial
+                }
+            );
+            Ok(ToolResult {
+                content: vec![ContentBlock::Text(timeout_msg)],
+                is_error: true,
+                agent_events: vec![],
+            })
+        }
+    }
+}
+
+async fn read_master_into_buffer(mut file: tokio::fs::File, buf: Arc<Mutex<Vec<u8>>>) {
+    use tokio::io::AsyncReadExt;
+    let mut tmp = [0u8; 4096];
+    loop {
+        match file.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.lock().expect("lock").extend_from_slice(&tmp[..n]);
+            }
+            Err(_) => break,
+        }
     }
 }
 
@@ -187,6 +288,15 @@ mod tests {
         sandbox_root: PathBuf,
         confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
     ) -> BashTool {
+        make_tool_with_timeout(confirmation, sandbox_root, confirm_fn, None)
+    }
+
+    fn make_tool_with_timeout(
+        confirmation: ConfirmationMode,
+        sandbox_root: PathBuf,
+        confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+        bash_timeout_secs: Option<u64>,
+    ) -> BashTool {
         BashTool::new(
             vec!["echo", "ls", "cat"]
                 .into_iter()
@@ -196,6 +306,7 @@ mod tests {
             sandbox_root,
             confirmation,
             confirm_fn,
+            bash_timeout_secs,
         )
     }
 
@@ -319,7 +430,6 @@ mod tests {
     #[tokio::test]
     async fn piped_command_with_all_allowlisted_segments_executes_without_confirmation() {
         let temp_dir = TempDir::new().expect("temp dir");
-        // confirm_fn panics to prove it is not called
         let tool = make_tool(
             ConfirmationMode::Always,
             temp_dir.path().to_path_buf(),
@@ -531,14 +641,6 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_execute_future_kills_long_running_subprocess() {
-        // Regression: prior to migrating to tokio::process::Command with kill_on_drop,
-        // dropping the execute() future on cancellation left bash subprocesses running
-        // for the full sleep duration, freezing the TUI from the user's perspective.
-        //
-        // Strategy: spawn `sleep 30 && touch <marker>`. Race against a 100ms timeout.
-        // After timeout fires (dropping the future), wait 500ms and assert the marker
-        // file does NOT exist — proving the subprocess was killed before it could run
-        // the `touch`.
         let temp_dir = TempDir::new().expect("temp dir");
         let sandbox = temp_dir.path().to_path_buf();
         let marker = sandbox.join("ran_to_completion.marker");
@@ -549,7 +651,6 @@ mod tests {
         let command = format!("sleep 30 && touch {}", marker_str);
         let exec_future = tool.execute(serde_json::json!({"command": command}));
 
-        // Race the execution against a short timeout; on timeout the future is dropped.
         let outcome =
             tokio::time::timeout(std::time::Duration::from_millis(100), exec_future).await;
         assert!(
@@ -557,12 +658,182 @@ mod tests {
             "test setup error: bash should not have completed in 100ms"
         );
 
-        // Give the OS a moment to reap the killed child before checking the filesystem.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         assert!(
             !marker.exists(),
             "marker file at {marker_str} exists — subprocess was NOT killed when future was dropped"
+        );
+    }
+
+    // ── PTY and timeout tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn command_exceeding_timeout_returns_timeout_error() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool_with_timeout(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+            Some(1),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "sleep 300"}))
+            .await
+            .expect("should succeed");
+        assert!(result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(
+                text.to_lowercase().contains("timed out"),
+                "expected timeout message, got: {text}"
+            ),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_captures_partial_output() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool_with_timeout(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+            Some(2),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo 'partial output here'; sleep 300"}))
+            .await
+            .expect("should succeed");
+        assert!(result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => {
+                assert!(
+                    text.contains("partial output here"),
+                    "timeout result should contain partial output, got: {text}"
+                );
+                assert!(
+                    text.to_lowercase().contains("timed out"),
+                    "expected timeout message, got: {text}"
+                );
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn null_timeout_allows_long_running_command() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool_with_timeout(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+            None,
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "sleep 2"}))
+            .await
+            .expect("should succeed");
+        assert!(
+            !result.is_error,
+            "long-running command with no timeout should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_command_within_timeout_works_normally() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool_with_timeout(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+            Some(30),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}))
+            .await
+            .expect("should succeed");
+        assert!(!result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(text.contains("hello")),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pty_provides_tty_to_child() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "tty"}))
+            .await
+            .expect("should succeed");
+        assert!(!result.is_error, "tty command should succeed under PTY");
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(
+                text.contains("/dev/pts/"),
+                "tty output should be a PTY path, got: {text}"
+            ),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn interactive_command_via_pty_does_not_hang() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = make_tool_with_timeout(
+            ConfirmationMode::Never,
+            temp_dir.path().to_path_buf(),
+            Box::new(|_| true),
+            Some(5),
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tool.execute(serde_json::json!({"command": "test -t 0 && echo YES || echo NO"})),
+        )
+        .await
+        .expect("command should not hang")
+        .expect("should succeed");
+        assert!(
+            !result.is_error,
+            "interactive command via PTY should not error"
+        );
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(
+                text.contains("YES"),
+                "stdin should be a TTY under PTY, got: {text}"
+            ),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn kill_on_drop_still_works_with_pty() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let sandbox = temp_dir.path().to_path_buf();
+        let marker = sandbox.join("pty_kill_test.marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
+        let tool = make_tool(ConfirmationMode::Never, sandbox.clone(), Box::new(|_| true));
+
+        let command = format!("sleep 30 && touch {}", marker_str);
+        let exec_future = tool.execute(serde_json::json!({"command": command}));
+
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(100), exec_future).await;
+        assert!(
+            outcome.is_err(),
+            "test setup error: bash should not have completed in 100ms"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            !marker.exists(),
+            "marker file exists — PTY subprocess was NOT killed when future was dropped"
         );
     }
 }

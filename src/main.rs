@@ -247,6 +247,7 @@ fn build_tool_registry(
         PathBuf::from(&tools_config.sandbox_root),
         tools_config.confirmation.clone(),
         Box::new(|_| true),
+        tools_config.bash_timeout_secs,
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
@@ -296,6 +297,7 @@ fn build_agent_spawner_and_register(
             build_tool_registry(sub_session, &tools_config, &skills_clone, agent_tool)
         }),
         parent_confirmation: app_config.tools.confirmation.clone(),
+        agent_timeout_secs: app_config.tools.agent_timeout_secs,
         skills: skills.clone(),
     });
 

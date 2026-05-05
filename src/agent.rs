@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
@@ -6,7 +7,7 @@ use crate::backend::{BackendFactory, LlmBackend};
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolError, ToolRegistry};
 use crate::types::{
     AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
     StreamEvent,
@@ -32,6 +33,7 @@ pub struct Agent {
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
     confirmation_mode: ConfirmationMode,
+    safety_timeout: Option<Duration>,
     session: Arc<TokioMutex<Session>>,
 }
 
@@ -64,6 +66,7 @@ impl Agent {
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
             confirmation_mode: ConfirmationMode::WriteOnly,
+            safety_timeout: None,
             session,
         }
     }
@@ -76,6 +79,13 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self.safety_timeout = tool_config.bash_timeout_secs.and_then(|s| {
+            if s == 0 {
+                None
+            } else {
+                Some(Duration::from_secs(2 * s))
+            }
+        });
         self
     }
 
@@ -260,6 +270,7 @@ impl Agent {
             .clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
+        let safety_timeout = self.safety_timeout;
         let session = Arc::clone(&self.session);
 
         self.session
@@ -470,6 +481,7 @@ impl Agent {
                     &mut confirmation_rx,
                     &event_tx,
                     cancel_token.clone(),
+                    safety_timeout,
                 )
                 .await;
 
@@ -595,6 +607,7 @@ async fn execute_tool_calls(
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel_token: Option<CancellationToken>,
+    safety_timeout: Option<Duration>,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !thinking_prefix.is_empty() {
@@ -736,15 +749,31 @@ async fn execute_tool_calls(
                     ),
                     ToolDecision::Approved => match tools.lookup(&r.name) {
                         Ok(tool) => {
-                            let exec = tool.execute(r.input.clone());
-                            let outcome = if let Some(ref token) = cancel_token {
-                                tokio::select! {
-                                    biased;
-                                    _ = token.cancelled() => None,
-                                    result = exec => Some(result),
+                            let exec = async {
+                                let exec = tool.execute(r.input.clone());
+                                if let Some(ref token) = cancel_token {
+                                    tokio::select! {
+                                        biased;
+                                        _ = token.cancelled() => None,
+                                        result = exec => Some(result),
+                                    }
+                                } else {
+                                    Some(exec.await)
+                                }
+                            };
+                            let outcome = if let Some(timeout) = safety_timeout {
+                                match tokio::time::timeout(timeout, exec).await {
+                                    Ok(inner) => inner,
+                                    Err(_) => Some(Err(ToolError::Timeout {
+                                        tool_name: r.name.clone(),
+                                        message: format!(
+                                            "safety-net timeout of {}s exceeded",
+                                            timeout.as_secs()
+                                        ),
+                                    })),
                                 }
                             } else {
-                                Some(exec.await)
+                                exec.await
                             };
                             match outcome {
                                 None => (
@@ -939,6 +968,7 @@ pub struct AgentSpawner {
     pub app_config: Arc<crate::config::AppConfig>,
     pub registry_builder: RegistryBuilder,
     pub parent_confirmation: ConfirmationMode,
+    pub agent_timeout_secs: Option<u64>,
     pub skills: std::collections::HashMap<String, std::path::PathBuf>,
 }
 
@@ -2690,6 +2720,71 @@ mod tests {
             assert!(is_error, "rejected tool should produce error result");
             assert_eq!(*index, 2);
         }
+    }
+
+    // ── clamp_confirmation ────────────────────────────────────────────────
+
+    // ── safety-net timeout ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn safety_net_timeout_kills_hung_tool() {
+        struct HungTool;
+
+        #[async_trait]
+        impl Tool for HungTool {
+            fn name(&self) -> &str {
+                "hung"
+            }
+            fn description(&self) -> &str {
+                "A tool that never completes"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+                SCHEMA.get_or_init(|| serde_json::json!({"type": "object", "properties": {}}))
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+            ) -> Result<ToolExecResult, ToolError> {
+                // Never completes — simulates a hung tool.
+                std::future::pending::<Result<ToolExecResult, ToolError>>().await
+            }
+        }
+
+        let backend = SequencedBackend::new(vec![
+            tool_call_response("t1", "hung", r#"{}"#),
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(HungTool)).expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            bash_timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { is_error: true, .. })),
+            "hung tool should produce error result from safety-net timeout"
+        );
     }
 
     // ── clamp_confirmation ────────────────────────────────────────────────
