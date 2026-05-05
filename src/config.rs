@@ -149,13 +149,13 @@ model = "gpt-oss:120b"
 # and the matching [vertex]/[zai]/[ollama] model field above.
 # [models.thinking]
 # backend = "vertex"
-# model = "claude-3-5-thinking"
+# model = "claude-opus-4-7"
 # [models.implement]
 # backend = "vertex"
-# model = "claude-sonnet-4-20250514"
+# model = "claude-sonnet-4-6"
 # [models.compaction]
 # backend = "vertex"
-# model = "claude-sonnet-4-20250514"
+# model = "claude-haiku-4-5"
 
 # Role name used for compaction sub-agents. Defaults to "compaction".
 # If the role isn't defined in [models], falls back to "default".
