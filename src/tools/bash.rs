@@ -15,6 +15,9 @@ use super::{Tool, ToolError, ToolResult};
 #[cfg(target_os = "linux")]
 const TIOCSCTTY: u64 = 0x540E;
 
+#[cfg(target_os = "macos")]
+const TIOCSCTTY: u64 = 0x20007461;
+
 pub struct BashTool {
     allowlist: HashSet<String>,
     denylist: HashSet<String>,
@@ -171,8 +174,11 @@ async fn run_pty_command(
         message: format!("Failed to dup slave fd for stderr: {}", e),
     })?;
 
+    // Take ownership of the master fd as a tokio async file before spawning.
+    // If spawn fails, this File drops and closes the fd — no leak.
+    // We also prevent the OwnedFd from double-closing by forgetting it.
     let master_raw = pty.master.as_raw_fd();
-    // Prevent OwnedFd::drop from closing master fd — tokio::fs::File will own it.
+    let master_file = tokio::fs::File::from_std(unsafe { std::fs::File::from_raw_fd(master_raw) });
     std::mem::forget(pty.master);
 
     let mut child = {
@@ -192,7 +198,7 @@ async fn run_pty_command(
             cmd.pre_exec(move || {
                 nix::unistd::setsid()
                     .map_err(|e| std::io::Error::other(format!("setsid failed: {e}")))?;
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
                 {
                     let ret = nix::libc::ioctl(slave_for_preexec, TIOCSCTTY as _, 0);
                     if ret < 0 {
@@ -211,8 +217,6 @@ async fn run_pty_command(
 
     let output_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let output_buf_clone = Arc::clone(&output_buf);
-
-    let master_file = tokio::fs::File::from_std(unsafe { std::fs::File::from_raw_fd(master_raw) });
 
     let read_future = read_master_into_buffer(master_file, output_buf_clone);
 

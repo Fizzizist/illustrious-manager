@@ -19,11 +19,26 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ToolError {
-    NotFound { tool_name: String },
-    AlreadyRegistered { tool_name: String },
-    Execution { tool_name: String, message: String },
-    InvalidInput { message: String },
-    Timeout { tool_name: String, message: String },
+    NotFound {
+        tool_name: String,
+    },
+    AlreadyRegistered {
+        tool_name: String,
+    },
+    Execution {
+        tool_name: String,
+        message: String,
+    },
+    InvalidInput {
+        message: String,
+    },
+    /// Timeout from the safety-net wrapper in `execute_tool_calls`.
+    /// Not used by the bash tool (which returns `ToolResult { is_error: true }`
+    /// with partial output on timeout).
+    Timeout {
+        tool_name: String,
+        message: String,
+    },
 }
 
 impl std::fmt::Display for ToolError {
