@@ -94,7 +94,7 @@ const DEFAULT_REGION: &str = "us-east5";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_BACKEND: &str = "vertex";
 
-const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", or "ollama"
+const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", "ollama", or "openai_compat"
 backend = "vertex"
 # where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
 # or a local `illustrious-manager-sessions` directory if $HOME is not found.
@@ -114,13 +114,25 @@ api_key = ""
 # Model to use
 model = "glm-5.1"
 
-[ollama]
+# [ollama]
 # Required: your Ollama API key
-api_key = ""
+# api_key = ""
 # Model to use
-model = "gpt-oss:120b"
+# model = "gpt-oss:120b"
 # Base URL for Ollama API (change for self-hosted)
 # base_url = "https://ollama.com/api/chat"
+
+# [openai_compat]
+# Required: base URL of the OpenAI-compatible endpoint (without /chat/completions)
+# base_url = "https://vllm.k8s.dc.rxrx.io/v1"
+# Optional: API key (omit or leave empty for unauthenticated endpoints)
+# api_key = ""
+# Model to use
+# model = "Qwen/Qwen3-32B-FP8"
+# Optional: override max_tokens for this backend
+# max_tokens = 16384
+# Reasoning style: "none", "zai_enable_thinking", "qwen_chat_template", "default"
+# reasoning = "qwen_chat_template"
 
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
@@ -188,6 +200,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub ollama: Option<OllamaConfig>,
     #[serde(default)]
+    pub openai_compat: Option<OpenAiCompatConfigToml>,
+    #[serde(default)]
     pub tools: ToolsConfig,
     /// Named model roles. When empty, a `default` role is synthesized from
     /// the top-level `backend` + `[vertex]`/`[zai]` blocks for back-compat.
@@ -238,6 +252,33 @@ pub struct ZaiConfig {
     pub api_key: String,
     #[serde(default = "default_zai_model")]
     pub model: String,
+}
+
+/// Reasoning style for OpenAI-compatible backends, mirroring `openai_compat::ReasoningStyle`.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningStyleConfig {
+    #[default]
+    None,
+    ZaiEnableThinking,
+    QwenChatTemplate,
+    Default,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OpenAiCompatConfigToml {
+    pub base_url: String,
+    #[serde(skip_serializing)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_openai_compat_model")]
+    pub model: String,
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub reasoning: ReasoningStyleConfig,
+}
+
+fn default_openai_compat_model() -> String {
+    String::new()
 }
 
 fn default_backend() -> String {
@@ -331,6 +372,11 @@ impl AppConfig {
                 .as_ref()
                 .map(|o| o.model.clone())
                 .unwrap_or_else(|| "gpt-oss:120b".to_string()),
+            "openai_compat" => self
+                .openai_compat
+                .as_ref()
+                .map(|o| o.model.clone())
+                .unwrap_or_default(),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
@@ -374,6 +420,13 @@ pub fn apply_overrides(
                 && let Some(ref mut ollama) = config.ollama
             {
                 ollama.model = m.to_string();
+            }
+        }
+        "openai_compat" => {
+            if let Some(m) = model
+                && let Some(ref mut oc) = config.openai_compat
+            {
+                oc.model = m.to_string();
             }
         }
         _ => {}
@@ -501,9 +554,37 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 );
             }
         }
+        "openai_compat" => match &config.openai_compat {
+            None => {
+                bail!(
+                    "openai_compat backend configuration is missing. Add a [openai_compat] section to your config file."
+                );
+            }
+            Some(oc) if oc.base_url.is_empty() => {
+                bail!(
+                    "base_url is required for openai_compat backend. Set it in your [openai_compat] config section."
+                );
+            }
+            Some(oc)
+                if oc
+                    .base_url
+                    .trim_end_matches('/')
+                    .ends_with("/chat/completions") =>
+            {
+                bail!(
+                    "base_url must not include '/chat/completions' — provide the base URL only                      (e.g. 'https://example.com/v1')."
+                );
+            }
+            Some(oc) if oc.base_url.contains('?') => {
+                bail!(
+                    "base_url must not contain a query string. Provide only the base URL                      (e.g. 'https://example.com/v1')."
+                );
+            }
+            _ => {}
+        },
         _ => {
             bail!(
-                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama",
+                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama, openai_compat",
                 config.backend
             );
         }
@@ -548,9 +629,22 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 }
                 _ => {}
             },
+            "openai_compat" => match &config.openai_compat {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'openai_compat' but no [openai_compat] section is present."
+                    );
+                }
+                Some(oc) if oc.base_url.is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'openai_compat' but [openai_compat].base_url is not configured."
+                    );
+                }
+                _ => {}
+            },
             other => {
                 bail!(
-                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama"
+                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama, openai_compat"
                 );
             }
         }
@@ -627,6 +721,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -649,6 +744,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -670,6 +766,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -695,6 +792,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -720,6 +818,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -741,6 +840,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -763,6 +863,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -793,6 +894,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -816,6 +918,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Always,
                 sandbox_root: "/tmp/sandbox".to_string(),
@@ -845,6 +948,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
@@ -869,6 +973,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -924,6 +1029,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -972,6 +1078,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1025,6 +1132,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1047,6 +1155,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1077,6 +1186,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1114,6 +1224,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1140,6 +1251,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1166,6 +1278,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1192,6 +1305,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "http://localhost:11434/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1217,6 +1331,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1242,6 +1357,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1275,6 +1391,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1308,6 +1425,7 @@ mod tests {
                 model: "glm-5.1".to_string(),
             }),
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1339,6 +1457,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1374,6 +1493,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1412,6 +1532,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1470,6 +1591,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1567,5 +1689,284 @@ mod tests {
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.compaction_role, "fast");
+    }
+
+    // ── openai_compat config tests ────────────────────────────────────────
+
+    #[test]
+    fn validate_openai_compat_backend_with_missing_config_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("[openai_compat]"),
+            "error should mention [openai_compat]"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_empty_base_url_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("base_url"),
+            "error should mention base_url"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_valid_config_succeeds() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://vllm.example.com/v1".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(
+            result.is_ok(),
+            "valid openai_compat config should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn normalize_back_compat_synthesizes_default_role_for_openai_compat() {
+        let mut config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized for openai_compat backend"
+        );
+        assert_eq!(config.models["default"].backend, "openai_compat");
+        assert_eq!(config.models["default"].model, "Qwen/Qwen3-32B");
+    }
+
+    #[test]
+    fn legacy_openai_compat_config_synthesizes_default_role() {
+        let toml_str = r#"
+            backend = "openai_compat"
+            [vertex]
+            project = ""
+            [openai_compat]
+            base_url = "https://example.com/v1"
+            model = "Qwen/Qwen3-32B"
+        "#;
+        let mut config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized from [openai_compat] block"
+        );
+        let default_role = &config.models["default"];
+        assert_eq!(default_role.backend, "openai_compat");
+        assert_eq!(default_role.model, "Qwen/Qwen3-32B");
+    }
+
+    #[test]
+    fn reasoning_style_config_defaults_to_none() {
+        let toml_str = r#"
+            base_url = "https://example.com/v1"
+            model = "Qwen/Qwen3-32B"
+        "#;
+        let config: OpenAiCompatConfigToml = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.reasoning, ReasoningStyleConfig::None);
+    }
+
+    #[test]
+    fn reasoning_style_config_parses_qwen_chat_template() {
+        let toml_str = r#"
+            base_url = "https://example.com/v1"
+            model = "Qwen/Qwen3-32B"
+            reasoning = "qwen_chat_template"
+        "#;
+        let config: OpenAiCompatConfigToml = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.reasoning, ReasoningStyleConfig::QwenChatTemplate);
+    }
+
+    #[test]
+    fn apply_overrides_openai_compat_model() {
+        // Finding 9d: apply_overrides for openai_compat must work analogously
+        // to the vertex/zai/ollama variants.
+        let mut config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        config.normalize_back_compat();
+        apply_overrides(&mut config, None, None, Some("Qwen/Qwen3-235B"));
+        assert_eq!(
+            config
+                .openai_compat
+                .as_ref()
+                .expect("openai_compat present")
+                .model,
+            "Qwen/Qwen3-235B",
+            "model override should be applied to openai_compat config"
+        );
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(
+            resolved.model, "Qwen/Qwen3-235B",
+            "--model flag must propagate into models[\"default\"]"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_chat_completions_suffix_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1/chat/completions".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("chat/completions"),
+            "error should mention chat/completions; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_query_string_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1?token=secret".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("query string"),
+            "error should mention query string; got: {msg}"
+        );
     }
 }

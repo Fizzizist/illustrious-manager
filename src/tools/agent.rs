@@ -406,6 +406,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Never,
                 ..Default::default()
