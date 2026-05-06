@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
-use std::collections::HashMap;
 
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
@@ -41,12 +40,10 @@ pub struct OpenAiCompatConfig {
 
 /// Stateful SSE parser for OpenAI-compatible streaming responses.
 ///
-/// Tracks tool calls by index so that stable IDs can be generated across
-/// multiple SSE chunks, and buffers extra events that arise when a single
-/// SSE chunk contains multiple tool calls.
+/// Buffers extra events that arise when a single SSE chunk contains multiple
+/// tool calls so they can be drained one at a time.
 #[derive(Default)]
 pub struct OpenAiCompatSseParser {
-    tool_calls_by_index: HashMap<u64, String>,
     event_buffer: Vec<StreamEvent>,
 }
 
@@ -77,49 +74,45 @@ impl OpenAiCompatSseParser {
         let json: serde_json::Value = serde_json::from_str(data)
             .with_context(|| format!("Failed to parse SSE data: {}", data))?;
 
-        if let Some(finish_reason) = json["choices"][0]["finish_reason"].as_str() {
-            let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
-            let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
-            match finish_reason {
-                "tool_calls" => {
-                    self.tool_calls_by_index.clear();
-                    self.event_buffer.push(StreamEvent::ToolUseDone);
-                    if input_tokens > 0 || output_tokens > 0 {
-                        self.event_buffer.push(StreamEvent::Usage {
-                            input_tokens,
-                            output_tokens,
-                            stop_reason: finish_reason.to_string(),
-                        });
-                    }
-                    return Ok(());
-                }
-                "length" => {
-                    return Err(anyhow::anyhow!(
-                        "Response truncated: max_tokens limit reached \
-                         (input_tokens={}, output_tokens={}). \
-                         Increase max_tokens in your config.",
-                        input_tokens,
-                        output_tokens,
-                    ));
-                }
-                _ => {
-                    if input_tokens > 0 || output_tokens > 0 {
-                        self.event_buffer.push(StreamEvent::Usage {
-                            input_tokens,
-                            output_tokens,
-                            stop_reason: finish_reason.to_string(),
-                        });
-                    }
-                }
+        // Determine finish_reason and any co-located usage.
+        let finish_reason = json["choices"][0]["finish_reason"].as_str();
+        let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
+
+        // Terminal chunk for tool calls: ToolUseDone first, then usage.
+        if finish_reason == Some("tool_calls") {
+            self.event_buffer.push(StreamEvent::ToolUseDone);
+            if input_tokens > 0 || output_tokens > 0 {
+                self.event_buffer.push(StreamEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    stop_reason: "tool_calls".to_string(),
+                });
             }
+            return Ok(());
         }
 
+        // Hard limit: propagate immediately as an error.
+        if finish_reason == Some("length") {
+            return Err(anyhow::anyhow!(
+                "Response truncated: max_tokens limit reached \
+                 (input_tokens={}, output_tokens={}). \
+                 Increase max_tokens in your config.",
+                input_tokens,
+                output_tokens,
+            ));
+        }
+
+        // Emit content deltas before any usage event so the TUI always
+        // receives the last character before stats.
+
+        // No early return after ThinkingDelta — fall through so a co-located
+        // `content` field in the same chunk is also processed.
         if let Some(reasoning) = json["choices"][0]["delta"]["reasoning_content"].as_str()
             && !reasoning.is_empty()
         {
             self.event_buffer
                 .push(StreamEvent::ThinkingDelta(reasoning.to_string()));
-            return Ok(());
         }
 
         if let Some(content) = json["choices"][0]["delta"]["content"].as_str()
@@ -127,7 +120,6 @@ impl OpenAiCompatSseParser {
         {
             self.event_buffer
                 .push(StreamEvent::TextDelta(content.to_string()));
-            return Ok(());
         }
 
         if let Some(tool_calls) = json["choices"][0]["delta"]["tool_calls"].as_array() {
@@ -137,7 +129,6 @@ impl OpenAiCompatSseParser {
                 {
                     if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
                         let id = format!("tool_{}", index);
-                        self.tool_calls_by_index.insert(index, id.clone());
                         self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),
@@ -152,6 +143,19 @@ impl OpenAiCompatSseParser {
                     }
                 }
             }
+        }
+
+        // Emit usage after content deltas.  Also handles standalone usage-only
+        // frames (no `choices` array) emitted by providers using stream_options.
+        let choices_empty = json["choices"].as_array().is_none_or(|a| a.is_empty());
+        let has_usage = input_tokens > 0 || output_tokens > 0;
+        let normal_stop = finish_reason.is_some_and(|r| r != "tool_calls" && r != "length");
+        if has_usage && (normal_stop || choices_empty) {
+            self.event_buffer.push(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                stop_reason: finish_reason.unwrap_or("stop").to_string(),
+            });
         }
 
         Ok(())
@@ -179,6 +183,12 @@ impl OpenAiCompatBackend {
             anyhow::bail!(
                 "base_url must not include '/chat/completions' — provide the base URL only \
                  (e.g. 'https://example.com/v1') and the backend will append the path automatically."
+            );
+        }
+        if base.contains('?') {
+            anyhow::bail!(
+                "base_url must not contain a query string — provide only the base URL \
+                 (e.g. 'https://example.com/v1')."
             );
         }
         let endpoint = format!("{}/chat/completions", base);
@@ -307,15 +317,13 @@ impl OpenAiCompatBackend {
                         let content: Vec<serde_json::Value> = m
                             .content
                             .iter()
-                            .map(|block| match block {
+                            .filter_map(|block| match block {
                                 ContentBlock::Text(text) => {
-                                    serde_json::json!({"type": "text", "text": text})
+                                    Some(serde_json::json!({"type": "text", "text": text}))
                                 }
                                 ContentBlock::Thinking { .. }
-                                | ContentBlock::RedactedThinking { .. } => serde_json::Value::Null,
-                                other => {
-                                    serde_json::to_value(other).unwrap_or(serde_json::Value::Null)
-                                }
+                                | ContentBlock::RedactedThinking { .. } => None,
+                                other => serde_json::to_value(other).ok(),
                             })
                             .collect();
                         messages_json
@@ -939,5 +947,179 @@ mod tests {
             body.get("chat_template_kwargs").is_none(),
             "chat_template_kwargs must not be set for Default"
         );
+    }
+
+    // --- fill_buffer ordering and new behavior tests ---
+
+    #[test]
+    fn parser_tool_calls_finish_with_usage_emits_tool_use_done_then_usage() {
+        // Finding 9b: tool_calls finish_reason + non-zero usage must drain
+        // ToolUseDone before Usage.
+        let mut p = OpenAiCompatSseParser::new();
+        let data = r#"{"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":20}}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e1, StreamEvent::ToolUseDone),
+            "first event must be ToolUseDone; got {e1:?}"
+        );
+        let e2 = p.event_buffer.remove(0);
+        assert!(
+            matches!(
+                e2,
+                StreamEvent::Usage {
+                    input_tokens: 50,
+                    output_tokens: 20,
+                    ..
+                }
+            ),
+            "second event must be Usage(50,20); got {e2:?}"
+        );
+        assert!(p.event_buffer.is_empty());
+    }
+
+    #[test]
+    fn parser_stop_finish_reason_usage_comes_after_text_delta() {
+        // Finding 4: when finish_reason="stop" co-located with content, Usage
+        // must be buffered AFTER TextDelta.
+        let mut p = OpenAiCompatSseParser::new();
+        let data = r#"{"choices":[{"finish_reason":"stop","delta":{"content":"last"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e1, StreamEvent::TextDelta(ref t) if t == "last"),
+            "first event must be TextDelta(\"last\"); got {e1:?}"
+        );
+        let e2 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e2, StreamEvent::Usage { .. }),
+            "second event must be Usage; got {e2:?}"
+        );
+        assert!(p.event_buffer.is_empty());
+    }
+
+    #[test]
+    fn parser_reasoning_and_content_in_same_chunk_both_emitted() {
+        // Finding 3: removing the early return after ThinkingDelta must allow
+        // a co-located content field to also be emitted.
+        let mut p = OpenAiCompatSseParser::new();
+        let data = r#"{"choices":[{"delta":{"reasoning_content":"think","content":"answer"}}]}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e1, StreamEvent::ThinkingDelta(ref t) if t == "think"),
+            "first event must be ThinkingDelta; got {e1:?}"
+        );
+        let e2 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e2, StreamEvent::TextDelta(ref t) if t == "answer"),
+            "second event must be TextDelta; got {e2:?}"
+        );
+        assert!(p.event_buffer.is_empty());
+    }
+
+    #[test]
+    fn parser_usage_only_frame_without_choices_emits_usage() {
+        // Finding 5: standalone usage frame (no choices) must produce a Usage event.
+        let mut p = OpenAiCompatSseParser::new();
+        let data = r#"{"usage":{"prompt_tokens":100,"completion_tokens":42}}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(
+                e1,
+                StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 42,
+                    ..
+                }
+            ),
+            "must emit Usage(100,42) for standalone usage frame; got {e1:?}"
+        );
+        assert!(p.event_buffer.is_empty());
+    }
+
+    #[test]
+    fn parser_usage_frame_with_empty_choices_emits_usage() {
+        // Variant: vLLM sends {"choices": [], "usage": {...}}.
+        let mut p = OpenAiCompatSseParser::new();
+        let data = r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(
+                e1,
+                StreamEvent::Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    ..
+                }
+            ),
+            "must emit Usage for empty choices frame; got {e1:?}"
+        );
+    }
+
+    // --- construct validation tests ---
+
+    #[test]
+    fn new_rejects_base_url_with_query_string() {
+        let result = OpenAiCompatBackend::new(OpenAiCompatConfig {
+            base_url: "https://example.com/v1?token=secret".to_string(),
+            api_key: None,
+            model: String::new(),
+            max_tokens: None,
+            reasoning: ReasoningStyle::None,
+        });
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("query string"),
+            "error should mention query string; got: {msg}"
+        );
+    }
+
+    // --- build_request_body: thinking/null regression ---
+
+    #[test]
+    fn build_request_body_assistant_thinking_blocks_not_serialised_as_null() {
+        // Finding 2: Thinking blocks must be skipped, not emitted as null.
+        let b = make_backend(ReasoningStyle::None);
+        let messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text("hi".to_string())],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "internal".to_string(),
+                        signature: "sig".to_string(),
+                    },
+                    ContentBlock::Text("answer".to_string()),
+                ],
+            },
+        ];
+        let body = b.build_request_body(&messages, &simple_config());
+        let assistant_content = body["messages"][1]["content"]
+            .as_array()
+            .expect("content array");
+        for item in assistant_content {
+            assert!(
+                !item.is_null(),
+                "content array must not contain null; got {assistant_content:?}"
+            );
+        }
+        assert_eq!(
+            assistant_content.len(),
+            1,
+            "only the Text block should survive"
+        );
+        assert_eq!(assistant_content[0]["text"], "answer");
     }
 }
