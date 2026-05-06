@@ -49,7 +49,7 @@ cargo fmt                            # Format
 
 Four-layer decoupled design:
 
-1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Three implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing), `zai` (z.ai), and `ollama` (Ollama Cloud/self-hosted via NDJSON, with `ndjson.rs` for NDJSON stream parsing). Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
+1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Four implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing), `zai` (z.ai — thin shim over `openai_compat`), `ollama` (Ollama Cloud/self-hosted via NDJSON, with `ndjson.rs` for NDJSON stream parsing), and `openai_compat` (generic OpenAI Chat Completions client — SSE, message serialisation, tool calls). `openai_compat` exposes `ReasoningStyle` (`None` | `ZaiEnableThinking` | `QwenChatTemplate` | `Default`) to control how extended-thinking is expressed per-provider. The `zai` backend is a back-compat shim that constructs an `OpenAiCompatBackend` with `ReasoningStyle::ZaiEnableThinking` and the z.ai base URL. The constructor strips trailing `/` from `base_url` and rejects URLs that already include `/chat/completions`. When `api_key` is `None` or empty, no `Authorization` header is sent. Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
 2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Tool calls within a single assistant turn run concurrently via `join_all`; confirmations are gathered sequentially first, then approved calls execute in parallel. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
@@ -76,7 +76,7 @@ Key types live in `src/types.rs`. Configuration loading and CLI merge logic is i
 Config file at `~/.config/illustrious-manager/config.toml` (auto-created on first run):
 
 ```toml
-backend = "vertex"                    # "vertex", "zai", or "ollama"
+backend = "vertex"                    # "vertex", "zai", "ollama", or "openai_compat"
 # sessions_dir = "/path/to/sessions" # defaults to ~/.config/illustrious-manager/sessions
 
 [vertex]
@@ -92,6 +92,13 @@ model = "glm-5.1"
 api_key = ""                          # Ollama API key (required for ollama backend)
 model = "gpt-oss:120b"
 # base_url = "https://ollama.com/api/chat"  # change for self-hosted Ollama
+
+# [openai_compat]
+# base_url = "https://vllm.k8s.dc.rxrx.io/v1"  # required, without /chat/completions
+# api_key = ""                        # omit or leave empty for unauthenticated endpoints
+# model = "Qwen/Qwen3-32B-FP8"
+# max_tokens = 16384                  # optional override
+# reasoning = "qwen_chat_template"    # none | zai_enable_thinking | qwen_chat_template | default
 
 # [tools]
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never

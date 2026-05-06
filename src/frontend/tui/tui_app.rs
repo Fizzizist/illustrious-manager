@@ -2068,6 +2068,7 @@ mod tests {
             },
             zai: None,
             ollama: None,
+            openai_compat: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
