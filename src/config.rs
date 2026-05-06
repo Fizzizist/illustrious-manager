@@ -565,6 +565,21 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     "base_url is required for openai_compat backend. Set it in your [openai_compat] config section."
                 );
             }
+            Some(oc)
+                if oc
+                    .base_url
+                    .trim_end_matches('/')
+                    .ends_with("/chat/completions") =>
+            {
+                bail!(
+                    "base_url must not include '/chat/completions' — provide the base URL only                      (e.g. 'https://example.com/v1')."
+                );
+            }
+            Some(oc) if oc.base_url.contains('?') => {
+                bail!(
+                    "base_url must not contain a query string. Provide only the base URL                      (e.g. 'https://example.com/v1')."
+                );
+            }
             _ => {}
         },
         _ => {
@@ -1841,5 +1856,117 @@ mod tests {
         "#;
         let config: OpenAiCompatConfigToml = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.reasoning, ReasoningStyleConfig::QwenChatTemplate);
+    }
+
+    #[test]
+    fn apply_overrides_openai_compat_model() {
+        // Finding 9d: apply_overrides for openai_compat must work analogously
+        // to the vertex/zai/ollama variants.
+        let mut config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        config.normalize_back_compat();
+        apply_overrides(&mut config, None, None, Some("Qwen/Qwen3-235B"));
+        assert_eq!(
+            config
+                .openai_compat
+                .as_ref()
+                .expect("openai_compat present")
+                .model,
+            "Qwen/Qwen3-235B",
+            "model override should be applied to openai_compat config"
+        );
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(
+            resolved.model, "Qwen/Qwen3-235B",
+            "--model flag must propagate into models[\"default\"]"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_chat_completions_suffix_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1/chat/completions".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("chat/completions"),
+            "error should mention chat/completions; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_openai_compat_backend_with_query_string_errors() {
+        let config = AppConfig {
+            backend: "openai_compat".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: Some(OpenAiCompatConfigToml {
+                base_url: "https://example.com/v1?token=secret".to_string(),
+                api_key: None,
+                model: "Qwen/Qwen3-32B".to_string(),
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("query string"),
+            "error should mention query string; got: {msg}"
+        );
     }
 }
