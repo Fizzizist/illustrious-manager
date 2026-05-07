@@ -27,6 +27,10 @@ fn default_max_tool_iterations() -> u32 {
     25
 }
 
+fn default_max_context_window_len() -> u32 {
+    0
+}
+
 fn default_bash_allowlist() -> Vec<String> {
     ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
         .iter()
@@ -55,6 +59,8 @@ pub struct ToolsConfig {
     pub sandbox_root: String,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    #[serde(default = "default_max_context_window_len")]
+    pub max_context_window_len: u32,
     #[serde(default = "default_bash_allowlist")]
     pub bash_allowlist: Vec<String>,
     #[serde(default = "default_bash_denylist")]
@@ -67,6 +73,7 @@ impl Default for ToolsConfig {
             confirmation: default_confirmation(),
             sandbox_root: default_sandbox_root(),
             max_tool_iterations: default_max_tool_iterations(),
+            max_context_window_len: default_max_context_window_len(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
         }
@@ -133,6 +140,8 @@ model = "gpt-oss:120b"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
+# Token threshold for auto-compaction (0 = disabled)
+# max_context_window_len = 0
 
 # Extended thinking configuration for models that support it (Vertex AI / Anthropic).
 # [thinking]
@@ -1567,5 +1576,29 @@ mod tests {
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.compaction_role, "fast");
+    }
+
+    #[test]
+    fn max_context_window_len_defaults_to_zero() {
+        let config = ToolsConfig::default();
+        assert_eq!(config.max_context_window_len, 0);
+    }
+
+    #[test]
+    fn max_context_window_len_parses_from_toml() {
+        let toml_str = r#"
+            max_context_window_len = 100000
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 100000);
+    }
+
+    #[test]
+    fn max_context_window_len_absent_key_defaults_to_zero() {
+        let toml_str = r#"
+            confirmation = "Always"
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 0);
     }
 }

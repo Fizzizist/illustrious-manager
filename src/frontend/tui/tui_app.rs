@@ -71,6 +71,9 @@ pub struct App {
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
+    /// Storm guard: prevents auto-compaction from firing on two consecutive
+    /// ResponseComplete events without an intervening compaction completion.
+    pub auto_compacted_last_turn: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -127,6 +130,7 @@ impl App {
             working_dir: std::path::PathBuf::new(),
             pending_g: false,
             compaction_task: None,
+            auto_compacted_last_turn: false,
             tools,
         }
     }
@@ -357,6 +361,13 @@ impl App {
         self.tasks_picker = None;
         self.session_picker = None;
         self.pending_g = false;
+        self.auto_compacted_last_turn = false;
+    }
+
+    pub fn should_auto_compact(&self, max_context_window_len: u32) -> bool {
+        max_context_window_len > 0
+            && self.last_input_total > max_context_window_len
+            && !self.auto_compacted_last_turn
     }
 
     fn max_scroll(&mut self) -> u16 {
@@ -593,6 +604,11 @@ pub fn handle_agent_event(
     Ok(())
 }
 
+/// Generate an info message for auto-compaction.
+pub fn auto_compact_info_message(last_input_total: u32, limit: u32) -> String {
+    format!("Auto-compacting context (current: {last_input_total} tokens, limit: {limit} tokens)")
+}
+
 /// Run the TUI REPL. If `initial_prompt` is provided, it's sent immediately.
 pub async fn run(
     agent: Arc<Agent>,
@@ -654,6 +670,7 @@ async fn run_app(
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
+                    let saved_auto_compacted = app.auto_compacted_last_turn;
                     if *is_error {
                         app.conversation.push(ConversationEntry::new(
                             ConversationRole::Error,
@@ -681,8 +698,42 @@ async fn run_app(
                     app.set_state(AppState::Input);
                     app.scroll_offset = 0;
                     app.compaction_task = None;
+                    app.auto_compacted_last_turn = saved_auto_compacted;
                 } else {
+                    let was_response_complete = matches!(&agent_event, AgentEvent::ResponseComplete(_));
                     handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+
+                    // Auto-compact trigger after ResponseComplete
+                    if was_response_complete {
+                        if app.should_auto_compact(config.tools.max_context_window_len) {
+                            let msg = auto_compact_info_message(
+                                app.last_input_total,
+                                config.tools.max_context_window_len,
+                            );
+                            app.conversation.push(ConversationEntry::new(
+                                ConversationRole::Info,
+                                msg,
+                            ));
+                            app.auto_compacted_last_turn = true;
+                            app.set_state(AppState::Compacting);
+                            let agent = Arc::clone(&agent);
+                            let tx = event_tx.clone();
+                            let handle = tokio::spawn(async move {
+                                let result = agent.compact().await;
+                                let (summary, is_error) = match result {
+                                    Ok(s) => (s, false),
+                                    Err(e) => (e, true),
+                                };
+                                let _ = tx
+                                    .send(AgentEvent::CompactionComplete { summary, is_error })
+                                    .await;
+                            });
+                            app.compaction_task = Some(handle);
+                        } else if app.auto_compacted_last_turn {
+                            // Threshold no longer exceeded — clear the storm guard
+                            app.auto_compacted_last_turn = false;
+                        }
+                    }
                 }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
@@ -2811,6 +2862,76 @@ mod tests {
         assert!(
             app.current_thinking.is_empty(),
             "current_thinking should be cleared on Interrupted"
+        );
+    }
+
+    #[test]
+    fn should_auto_compact_returns_false_when_disabled() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 150_000;
+        assert!(
+            !app.should_auto_compact(0),
+            "auto-compact should be disabled when limit is 0"
+        );
+    }
+
+    #[test]
+    fn should_auto_compact_returns_true_when_threshold_exceeded_and_not_storm_guarded() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 120_000;
+        app.auto_compacted_last_turn = false;
+        assert!(
+            app.should_auto_compact(100_000),
+            "auto-compact should trigger when threshold exceeded and not storm-guarded"
+        );
+    }
+
+    #[test]
+    fn should_auto_compact_returns_false_when_threshold_not_exceeded() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 80_000;
+        assert!(
+            !app.should_auto_compact(100_000),
+            "auto-compact should not trigger when threshold is not exceeded"
+        );
+    }
+
+    #[test]
+    fn should_auto_compact_returns_false_when_storm_guarded() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 120_000;
+        app.auto_compacted_last_turn = true;
+        assert!(
+            !app.should_auto_compact(100_000),
+            "auto-compact should not trigger when storm-guarded"
+        );
+    }
+
+    #[test]
+    fn auto_compact_info_message_format() {
+        let msg = auto_compact_info_message(120_000, 100_000);
+        assert!(
+            msg.contains("Auto-compacting context"),
+            "message should mention auto-compacting context"
+        );
+        assert!(
+            msg.contains("current: 120000 tokens"),
+            "message should contain current token count"
+        );
+        assert!(
+            msg.contains("limit: 100000 tokens"),
+            "message should contain limit token count"
+        );
+    }
+
+    #[test]
+    fn reset_for_session_switch_resets_auto_compacted_last_turn() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.auto_compacted_last_turn = true;
+        app.reset_for_session_switch();
+        assert!(
+            !app.auto_compacted_last_turn,
+            "auto_compacted_last_turn should be reset on session switch"
         );
     }
 }
