@@ -87,12 +87,7 @@ impl VertexSseParser {
                         let index = json["index"].as_u64().ok_or_else(|| {
                             anyhow::anyhow!("content_block_start missing 'index'")
                         })?;
-                        // Signature may be present in content_block_start for some API versions
-                        let sig = json["content_block"]["signature"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        self.thinking_signatures.insert(index, sig);
+                        self.thinking_signatures.insert(index, String::new());
                     }
                     "redacted_thinking" => {
                         let index = json["index"].as_u64().ok_or_else(|| {
@@ -132,7 +127,11 @@ impl VertexSseParser {
                         })?;
                         let chunk = json["delta"]["signature"]
                             .as_str()
-                            .unwrap_or("")
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "signature_delta missing or invalid 'signature' field"
+                                )
+                            })?
                             .to_string();
                         self.thinking_signatures
                             .entry(index)
@@ -375,7 +374,7 @@ impl LlmBackend for VertexBackend {
 fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<serde_json::Value> {
     let messages_json: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
+        .filter_map(|m| {
             let content: Vec<&crate::types::ContentBlock> = m
                 .content
                 .iter()
@@ -383,8 +382,8 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
                     if let crate::types::ContentBlock::Thinking { signature, .. } = block
                         && signature.is_empty()
                     {
-                        tracing::warn!(
-                            "Dropping thinking block with empty signature from history \
+                        eprintln!(
+                            "WARNING: dropping thinking block with empty signature from history \
                              (corrupted session data); it cannot be replayed."
                         );
                         return false;
@@ -392,10 +391,13 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
                     true
                 })
                 .collect();
-            serde_json::json!({
+            if content.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
                 "role": m.role,
                 "content": content,
-            })
+            }))
         })
         .collect();
 
@@ -1028,5 +1030,86 @@ mod tests {
             body.get("thinking").is_none(),
             "thinking must not be in the request body when disabled"
         );
+    }
+
+    #[test]
+    fn parser_thinking_block_with_no_signature_delta_emits_empty_signature() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser
+            .parse(r#"{"type":"content_block_stop","index":0}"#)
+            .expect("block_stop");
+        match result {
+            Some(StreamEvent::ThinkingSignature(sig)) => {
+                assert!(
+                    sig.is_empty(),
+                    "no signature_delta → empty signature emitted"
+                );
+            }
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parser_signature_delta_missing_index_returns_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser.parse(
+            r#"{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}"#,
+        );
+        assert!(
+            result.is_err(),
+            "signature_delta with missing index should return error"
+        );
+    }
+
+    #[test]
+    fn parser_signature_delta_non_string_signature_returns_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser.parse(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":42}}"#,
+        );
+        assert!(
+            result.is_err(),
+            "signature_delta with non-string signature should return error"
+        );
+    }
+
+    #[test]
+    fn build_request_body_drops_thinking_only_message_with_empty_signatures() {
+        let messages = vec![
+            Message {
+                role: crate::types::Role::Assistant,
+                content: vec![crate::types::ContentBlock::Thinking {
+                    text: "reasoning".to_string(),
+                    signature: String::new(),
+                }],
+            },
+            Message {
+                role: crate::types::Role::User,
+                content: vec![crate::types::ContentBlock::Text("follow-up".to_string())],
+            },
+        ];
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&messages, &config).expect("build");
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "message with only empty-signature thinking blocks must be dropped"
+        );
+        assert_eq!(msgs[0]["role"], "user");
     }
 }
