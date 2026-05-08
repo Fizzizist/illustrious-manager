@@ -152,7 +152,7 @@ model = "glm-5.1"
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
-# Token threshold for auto-compaction (0 = disabled)
+# Token threshold for auto-compaction (0 = disabled; minimum 1000 when enabled, recommended: 50000-150000)
 # max_context_window_len = 0
 
 # Extended thinking configuration for models that support it (Vertex AI / Anthropic).
@@ -657,6 +657,14 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 );
             }
         }
+    }
+
+    // Validate max_context_window_len floor (if enabled).
+    if config.tools.max_context_window_len > 0 && config.tools.max_context_window_len < 1000 {
+        bail!(
+            "max_context_window_len must be at least 1000 tokens (or 0 to disable). Got: {}",
+            config.tools.max_context_window_len
+        );
     }
 
     Ok(())
@@ -1976,6 +1984,116 @@ mod tests {
         assert!(
             msg.contains("query string"),
             "error should mention query string; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_max_context_window_len_of_zero_succeeds() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            tools: ToolsConfig {
+                max_context_window_len: 0,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        assert!(
+            validate(&config, None).is_ok(),
+            "max_context_window_len = 0 should be valid (disabled)"
+        );
+    }
+
+    #[test]
+    fn validate_max_context_window_len_below_minimum_errors() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            tools: ToolsConfig {
+                max_context_window_len: 1,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("1000"),
+            "error should mention minimum of 1000"
+        );
+    }
+
+    #[test]
+    fn validate_max_context_window_len_at_minimum_succeeds() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            tools: ToolsConfig {
+                max_context_window_len: 1000,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        assert!(
+            validate(&config, None).is_ok(),
+            "max_context_window_len = 1000 should be valid (at minimum)"
+        );
+    }
+
+    #[test]
+    fn validate_max_context_window_len_above_minimum_succeeds() {
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "my-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            tools: ToolsConfig {
+                max_context_window_len: 100000,
+                ..Default::default()
+            },
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction_role: "compaction".to_string(),
+        };
+        assert!(
+            validate(&config, None).is_ok(),
+            "max_context_window_len = 100000 should be valid (above minimum)"
         );
     }
 

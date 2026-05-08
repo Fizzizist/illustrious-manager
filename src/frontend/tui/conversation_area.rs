@@ -20,6 +20,7 @@ pub enum ConversationRole {
     ToolResult,
     Info,
     Thinking,
+    Warn,
 }
 
 impl ConversationRole {
@@ -32,6 +33,7 @@ impl ConversationRole {
             ConversationRole::ToolResult => "[Result]",
             ConversationRole::Info => "Info",
             ConversationRole::Thinking => "[Thinking]",
+            ConversationRole::Warn => "Warning",
         }
     }
 
@@ -44,6 +46,7 @@ impl ConversationRole {
             ConversationRole::ToolResult => Color::Yellow,
             ConversationRole::Info => Color::Magenta,
             ConversationRole::Thinking => Color::DarkGray,
+            ConversationRole::Warn => Color::Yellow,
         }
     }
 }

@@ -71,9 +71,18 @@ pub struct App {
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
+    /// CancellationToken for the in-flight auto-compaction task.
+    /// Cancelled on app exit to prevent lingering HTTP connections.
+    pub auto_compact_cancel_token: Option<CancellationToken>,
     /// Storm guard: prevents auto-compaction from firing on two consecutive
     /// ResponseComplete events without an intervening compaction completion.
     pub auto_compacted_last_turn: bool,
+    /// Counter for consecutive auto-compaction triggers (success or not).
+    /// Used to circuit-break after 3 consecutive triggers.
+    pub consecutive_auto_compact_count: u32,
+    /// When true, auto-compaction is permanently disabled for the current session.
+    /// Reset on session switch.
+    pub auto_compact_disabled: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -130,7 +139,10 @@ impl App {
             working_dir: std::path::PathBuf::new(),
             pending_g: false,
             compaction_task: None,
+            auto_compact_cancel_token: None,
             auto_compacted_last_turn: false,
+            consecutive_auto_compact_count: 0,
+            auto_compact_disabled: false,
             tools,
         }
     }
@@ -362,12 +374,16 @@ impl App {
         self.session_picker = None;
         self.pending_g = false;
         self.auto_compacted_last_turn = false;
+        self.auto_compact_cancel_token = None;
+        self.consecutive_auto_compact_count = 0;
+        self.auto_compact_disabled = false;
     }
 
     pub fn should_auto_compact(&self, max_context_window_len: u32) -> bool {
         max_context_window_len > 0
             && self.last_input_total > max_context_window_len
             && !self.auto_compacted_last_turn
+            && !self.auto_compact_disabled
     }
 
     fn max_scroll(&mut self) -> u16 {
@@ -676,6 +692,12 @@ async fn run_app(
                             ConversationRole::Error,
                             summary.clone(),
                         ));
+                        app.auto_compact_disabled = true;
+                        app.conversation.push(ConversationEntry::new(
+                            ConversationRole::Warn,
+                            "Auto-compaction disabled for this session: compaction failed. Use /compact manually.".to_string(),
+                        ));
+                        app.consecutive_auto_compact_count = 0;
                     } else {
                         // Rebuild conversation from compacted history
                         match agent.session_history().await {
@@ -694,10 +716,13 @@ async fn run_app(
                                 ));
                             }
                         }
+                        // Compaction succeeded — reset the consecutive counter
+                        app.consecutive_auto_compact_count = 0;
                     }
                     app.set_state(AppState::Input);
                     app.scroll_offset = 0;
                     app.compaction_task = None;
+                    app.auto_compact_cancel_token = None;
                     app.auto_compacted_last_turn = saved_auto_compacted;
                 } else {
                     let was_response_complete = matches!(&agent_event, AgentEvent::ResponseComplete(_));
@@ -706,32 +731,49 @@ async fn run_app(
                     // Auto-compact trigger after ResponseComplete
                     if was_response_complete {
                         if app.should_auto_compact(config.tools.max_context_window_len) {
-                            let msg = auto_compact_info_message(
-                                app.last_input_total,
-                                config.tools.max_context_window_len,
-                            );
-                            app.conversation.push(ConversationEntry::new(
-                                ConversationRole::Info,
-                                msg,
-                            ));
-                            app.auto_compacted_last_turn = true;
-                            app.set_state(AppState::Compacting);
-                            let agent = Arc::clone(&agent);
-                            let tx = event_tx.clone();
-                            let handle = tokio::spawn(async move {
-                                let result = agent.compact().await;
-                                let (summary, is_error) = match result {
-                                    Ok(s) => (s, false),
-                                    Err(e) => (e, true),
-                                };
-                                let _ = tx
-                                    .send(AgentEvent::CompactionComplete { summary, is_error })
-                                    .await;
-                            });
-                            app.compaction_task = Some(handle);
+                            app.consecutive_auto_compact_count += 1;
+                            if app.consecutive_auto_compact_count >= 3 {
+                                app.auto_compact_disabled = true;
+                                app.conversation.push(ConversationEntry::new(
+                                    ConversationRole::Warn,
+                                    "Auto-compaction disabled for this session: context remains above threshold after multiple attempts. Raise the limit or use /compact manually.".to_string(),
+                                ));
+                                app.consecutive_auto_compact_count = 0;
+                            } else {
+                                let msg = auto_compact_info_message(
+                                    app.last_input_total,
+                                    config.tools.max_context_window_len,
+                                );
+                                app.conversation.push(ConversationEntry::new(
+                                    ConversationRole::Info,
+                                    msg,
+                                ));
+                                app.auto_compacted_last_turn = true;
+                                app.set_state(AppState::Compacting);
+                                let compact_cancel = CancellationToken::new();
+                                let compact_cancel_clone = compact_cancel.clone();
+                                app.auto_compact_cancel_token = Some(compact_cancel);
+                                let agent = Arc::clone(&agent);
+                                let tx = event_tx.clone();
+                                let handle = tokio::spawn(async move {
+                                    if compact_cancel_clone.is_cancelled() {
+                                        return;
+                                    }
+                                    let result = agent.compact().await;
+                                    let (summary, is_error) = match result {
+                                        Ok(s) => (s, false),
+                                        Err(e) => (e, true),
+                                    };
+                                    let _ = tx
+                                        .send(AgentEvent::CompactionComplete { summary, is_error })
+                                        .await;
+                                });
+                                app.compaction_task = Some(handle);
+                            }
                         } else if app.auto_compacted_last_turn {
                             // Threshold no longer exceeded — clear the storm guard
                             app.auto_compacted_last_turn = false;
+                            app.consecutive_auto_compact_count = 0;
                         }
                     }
                 }
@@ -952,6 +994,10 @@ async fn run_app(
 
     if let Some(handle) = app.compaction_task {
         handle.abort();
+    }
+
+    if let Some(token) = app.auto_compact_cancel_token.take() {
+        token.cancel();
     }
 
     Ok(())
@@ -2933,6 +2979,164 @@ mod tests {
         assert!(
             !app.auto_compacted_last_turn,
             "auto_compacted_last_turn should be reset on session switch"
+        );
+    }
+
+    #[test]
+    fn auto_compact_disabled_flag_prevents_auto_compact() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 120_000;
+        app.auto_compact_disabled = true;
+        assert!(
+            !app.should_auto_compact(100_000),
+            "auto-compact should return false when auto_compact_disabled is true even with threshold exceeded"
+        );
+    }
+
+    #[test]
+    fn consecutive_auto_compact_count_reset_on_session_switch() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.consecutive_auto_compact_count = 3;
+        app.reset_for_session_switch();
+        assert_eq!(
+            app.consecutive_auto_compact_count, 0,
+            "consecutive_auto_compact_count should be reset on session switch"
+        );
+    }
+
+    #[test]
+    fn auto_compact_disabled_reset_on_session_switch() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.auto_compact_disabled = true;
+        app.reset_for_session_switch();
+        assert!(
+            !app.auto_compact_disabled,
+            "auto_compact_disabled should be reset on session switch"
+        );
+    }
+
+    #[test]
+    fn storm_guard_clears_when_threshold_no_longer_exceeded() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.auto_compacted_last_turn = true;
+        app.consecutive_auto_compact_count = 1;
+        app.last_input_total = 50_000; // below threshold
+        let limit = 100_000;
+
+        // Simulate the else-if branch in run_app
+        if !app.should_auto_compact(limit) && app.auto_compacted_last_turn {
+            app.auto_compacted_last_turn = false;
+            app.consecutive_auto_compact_count = 0;
+        }
+
+        assert!(
+            !app.auto_compacted_last_turn,
+            "storm guard should clear when threshold no longer exceeded"
+        );
+        assert_eq!(
+            app.consecutive_auto_compact_count, 0,
+            "consecutive count should reset with storm guard"
+        );
+    }
+
+    #[test]
+    fn compaction_complete_preserves_auto_compacted_last_turn_across_reset() {
+        // Simulates the save/restore pattern in the CompactionComplete handler:
+        //   let saved_auto_compacted = app.auto_compacted_last_turn;
+        //   app.reset_for_session_switch();   // sets auto_compacted_last_turn = false
+        //   app.auto_compacted_last_turn = saved_auto_compacted;
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.auto_compacted_last_turn = true;
+
+        let saved = app.auto_compacted_last_turn;
+        app.reset_for_session_switch();
+        // After reset it's false
+        assert!(!app.auto_compacted_last_turn, "reset should clear flag");
+        // Restore simulates CompactionComplete handler
+        app.auto_compacted_last_turn = saved;
+        assert!(
+            app.auto_compacted_last_turn,
+            "save/restore must preserve auto_compacted_last_turn across reset"
+        );
+    }
+
+    #[test]
+    fn auto_compact_trigger_sequence_pushes_info_message_and_sets_guard() {
+        // Tests the behavior sequence that would happen in run_app after ResponseComplete:
+        // 1. should_auto_compact returns true
+        // 2. info message is pushed
+        // 3. auto_compacted_last_turn is set to true
+        // 4. consecutive_auto_compact_count is incremented
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 120_000;
+        let limit = 100_000;
+
+        assert!(
+            app.should_auto_compact(limit),
+            "precondition: should trigger"
+        );
+
+        // Simulate the trigger sequence
+        app.consecutive_auto_compact_count += 1;
+        let msg = auto_compact_info_message(app.last_input_total, limit);
+        app.conversation
+            .push(ConversationEntry::new(ConversationRole::Info, msg.clone()));
+        app.auto_compacted_last_turn = true;
+
+        assert!(
+            app.auto_compacted_last_turn,
+            "storm guard should be set after trigger"
+        );
+        assert_eq!(
+            app.consecutive_auto_compact_count, 1,
+            "counter should increment"
+        );
+        assert_eq!(app.conversation.len(), 1, "info message should be pushed");
+        assert_eq!(app.conversation[0].role, ConversationRole::Info);
+        assert!(
+            app.conversation[0]
+                .content
+                .contains("Auto-compacting context"),
+            "info message should mention auto-compacting"
+        );
+        // Second attempt: should_auto_compact returns false (storm-guarded)
+        assert!(
+            !app.should_auto_compact(limit),
+            "should be storm-guarded after trigger"
+        );
+    }
+
+    #[test]
+    fn auto_compact_circuit_breaker_disables_after_three_attempts() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.last_input_total = 120_000;
+        let limit = 100_000;
+
+        // Simulate 3 consecutive auto-compact attempts
+        for _ in 0..2 {
+            app.consecutive_auto_compact_count += 1;
+            app.auto_compacted_last_turn = true;
+        }
+        // On the 3rd attempt (count goes to 3), circuit breaker fires
+        app.auto_compacted_last_turn = false; // storm guard was cleared
+        assert!(app.should_auto_compact(limit));
+        app.consecutive_auto_compact_count += 1;
+        if app.consecutive_auto_compact_count >= 3 {
+            app.auto_compact_disabled = true;
+            app.consecutive_auto_compact_count = 0;
+        }
+
+        assert!(
+            app.auto_compact_disabled,
+            "auto-compact should be disabled after 3 attempts"
+        );
+        assert_eq!(
+            app.consecutive_auto_compact_count, 0,
+            "count should reset after circuit breaker"
+        );
+        assert!(
+            !app.should_auto_compact(limit),
+            "should_auto_compact must return false when disabled"
         );
     }
 }
