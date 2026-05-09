@@ -62,6 +62,38 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Check whether auto-compaction should be triggered based on accumulated input
+/// tokens and the configured threshold. Emits `AutoCompactTriggered` or `Warn`
+/// as appropriate, and updates the consecutive-compaction guard flag.
+fn check_auto_compact(
+    accumulated_input_tokens: u32,
+    max_context_window_len: u32,
+    last_auto_compacted: &std::sync::atomic::AtomicBool,
+    event_tx: &futures::channel::mpsc::UnboundedSender<AgentEvent>,
+) {
+    if max_context_window_len == 0 {
+        return;
+    }
+
+    if accumulated_input_tokens > max_context_window_len {
+        if last_auto_compacted.load(Ordering::SeqCst) {
+            let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
+                "Context still exceeds threshold ({} > {}) after auto-compaction. \
+                 Manual /compact or starting a new session is recommended.",
+                accumulated_input_tokens, max_context_window_len
+            )));
+        } else {
+            let _ = event_tx.unbounded_send(AgentEvent::AutoCompactTriggered {
+                current_tokens: accumulated_input_tokens,
+                threshold: max_context_window_len,
+            });
+            last_auto_compacted.store(true, Ordering::SeqCst);
+        }
+    } else {
+        last_auto_compacted.store(false, Ordering::SeqCst);
+    }
+}
+
 impl Agent {
     pub async fn new(
         backend: Box<dyn LlmBackend>,
@@ -251,6 +283,7 @@ impl Agent {
             history.extend(new_history);
         }
         *self.session.lock().await = session;
+        self.last_auto_compacted.store(false, Ordering::SeqCst);
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -478,29 +511,14 @@ impl Agent {
                         .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
 
-                    // Auto-compact: if the threshold is set and input_tokens exceeded it,
-                    // emit AutoCompactTriggered. The TUI handles this by calling
-                    // agent.compact() and displaying the result. Single-shot and
-                    // sub-agent frontends silently absorb the event.
-                    if max_context_window_len > 0
-                        && accumulated_input_tokens > max_context_window_len
-                    {
-                        if last_auto_compacted.load(Ordering::SeqCst) {
-                            let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
-                                "Context still exceeds threshold ({} > {}) after auto-compaction. \
-                                 Manual /compact or starting a new session is recommended.",
-                                accumulated_input_tokens, max_context_window_len
-                            )));
-                        } else {
-                            let _ = event_tx.unbounded_send(AgentEvent::AutoCompactTriggered {
-                                current_tokens: accumulated_input_tokens,
-                                threshold: max_context_window_len,
-                            });
-                            last_auto_compacted.store(true, Ordering::SeqCst);
-                        }
-                    } else {
-                        last_auto_compacted.store(false, Ordering::SeqCst);
-                    }
+                    // Auto-compact check: runs after every completed iteration,
+                    // whether the response included tool calls or not.
+                    check_auto_compact(
+                        accumulated_input_tokens,
+                        max_context_window_len,
+                        &last_auto_compacted,
+                        &event_tx,
+                    );
 
                     break;
                 }
@@ -593,6 +611,15 @@ impl Agent {
                     .conversation()
                     .insert_message(&tool_result_msg)
                     .await;
+
+                // Auto-compact check: runs after every completed iteration,
+                // whether the response included tool calls or not.
+                check_auto_compact(
+                    accumulated_input_tokens,
+                    max_context_window_len,
+                    &last_auto_compacted,
+                    &event_tx,
+                );
             }
         });
 
@@ -3671,6 +3698,106 @@ mod tests {
             agent.max_context_window_len_for_test(),
             42_000,
             "max_context_window_len should be set from tool_config"
+        );
+    }
+
+    // Regression: auto-compact must trigger on tool-use turns, not just text-only turns.
+    // When the LLM emits tool calls, the threshold check must still run after tool
+    // results are persisted and the loop continues.
+    #[tokio::test]
+    async fn auto_compact_triggers_on_tool_use_turn() {
+        // First turn: tool call with high input_tokens.
+        // Second turn: text-only response (triggers after loop iteration).
+        // The tool-use turn should emit AutoCompactTriggered before the loop
+        // continues to the second iteration.
+        let combined = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 60_000,
+                    output_tokens: 100,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Must see AutoCompactTriggered even though the first turn had tool calls.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should be emitted on tool-use turns"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_resets_auto_compact_flag() {
+        let backend = SequencedBackend::new(vec![text_with_usage_response("hi", 60_000, 50)]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config);
+
+        // Trigger auto-compact to set the flag
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+        assert!(
+            agent.last_auto_compacted.load(Ordering::SeqCst),
+            "flag should be set after AutoCompactTriggered"
+        );
+
+        // Load a new session — should reset the flag
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let new_session = Session::new(None, dir.keep()).await.expect("session");
+        agent.load_session(new_session).await;
+        assert!(
+            !agent.last_auto_compacted.load(Ordering::SeqCst),
+            "flag should be reset after load_session"
         );
     }
 }
