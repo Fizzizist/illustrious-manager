@@ -358,14 +358,22 @@ impl App {
         self.session_picker = None;
         self.pending_g = false;
     }
+}
 
+fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
+    thinking.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+impl App {
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
         }
+        let thinking_preview = extract_last_thinking_line(&self.current_thinking);
         let mut conv_area = ConversationArea::new(
             &mut self.conversation,
             !self.current_thinking.is_empty(),
+            thinking_preview,
             &self.current_response,
             0,
             self.viewport_height,
@@ -397,9 +405,11 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     let text_width = chunks[0].width.saturating_sub(2);
     app.text_width = text_width;
+    let thinking_preview = extract_last_thinking_line(&app.current_thinking);
     let mut conv_area = ConversationArea::new(
         &mut app.conversation,
         !app.current_thinking.is_empty(),
+        thinking_preview,
         &app.current_response,
         app.scroll_offset,
         chunks[0].height.saturating_sub(2),
@@ -2813,5 +2823,36 @@ mod tests {
             app.current_thinking.is_empty(),
             "current_thinking should be cleared on Interrupted"
         );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_basic() {
+        assert_eq!(
+            extract_last_thinking_line("line1\nline2\nline3"),
+            Some("line3")
+        );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_trailing_newlines() {
+        assert_eq!(
+            extract_last_thinking_line("line1\nline2\n\n  \n"),
+            Some("line2")
+        );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_empty() {
+        assert_eq!(extract_last_thinking_line(""), None);
+    }
+
+    #[test]
+    fn extract_last_thinking_line_whitespace_only() {
+        assert_eq!(extract_last_thinking_line("   \n  \n  "), None);
+    }
+
+    #[test]
+    fn extract_last_thinking_line_single_line() {
+        assert_eq!(extract_last_thinking_line("only line"), Some("only line"));
     }
 }
