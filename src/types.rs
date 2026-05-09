@@ -353,6 +353,12 @@ pub enum AgentEvent {
         summary: String,
         is_error: bool,
     },
+    /// Emitted when auto-compaction is triggered because `input_tokens` exceeded
+    /// the configured `max_context_window_len` threshold.
+    AutoCompactTriggered {
+        current_tokens: u32,
+        threshold: u32,
+    },
 }
 
 /// A pinned, boxed stream type alias for convenience

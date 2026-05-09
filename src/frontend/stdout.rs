@@ -138,6 +138,7 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
+            AgentEvent::AutoCompactTriggered { .. } => {}
             AgentEvent::ThinkingReceived(text) => {
                 if logger.is_some() {
                     write!(writer, "// {}", text)?;
@@ -205,6 +206,7 @@ async fn collect_response<R: BufRead>(
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
+            AgentEvent::AutoCompactTriggered { .. } => {}
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;
@@ -515,6 +517,41 @@ mod tests {
         let output = String::from_utf8(buf).expect("valid UTF-8");
         assert!(output.contains("[error(1) from bash]"));
         assert!(output.contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn auto_compact_triggered_is_silently_absorbed_in_run_text() {
+        let events = vec![
+            AgentEvent::TokenReceived("hello".to_string()),
+            AgentEvent::AutoCompactTriggered {
+                current_tokens: 60000,
+                threshold: 50000,
+            },
+            AgentEvent::TokenReceived(" world".to_string()),
+            AgentEvent::ResponseComplete("hello world".to_string()),
+        ];
+        let (result, buf) = run_text_events(events, false).await;
+        result.expect("stdout run should succeed");
+        assert_eq!(
+            String::from_utf8(buf).expect("valid UTF-8"),
+            "hello world\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_response_auto_compact_triggered_is_silently_absorbed() {
+        let events = vec![
+            AgentEvent::TokenReceived("hello".to_string()),
+            AgentEvent::AutoCompactTriggered {
+                current_tokens: 60000,
+                threshold: 50000,
+            },
+            AgentEvent::TokenReceived(" world".to_string()),
+            AgentEvent::ResponseComplete("hello world".to_string()),
+        ];
+        let (text, is_error) = run_json_collect(events, false).await;
+        assert!(!is_error);
+        assert_eq!(text, "hello world");
     }
 
     #[tokio::test]
