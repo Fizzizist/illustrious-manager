@@ -15,7 +15,7 @@ pub async fn compact_with(
     session: &Arc<TokioMutex<Session>>,
     context_prefix_len: &Arc<Mutex<usize>>,
 ) -> Result<String, String> {
-    let compaction_role = spawner.app_config.compaction_role.clone();
+    let compaction_role = spawner.app_config.compaction.role.clone();
 
     let role = if spawner.app_config.models.contains_key(&compaction_role) {
         compaction_role

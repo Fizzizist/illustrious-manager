@@ -131,7 +131,11 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
-        self.max_context_window_len = tool_config.max_context_window_len;
+        self
+    }
+
+    pub fn with_compaction_config(mut self, config: &crate::config::CompactionConfig) -> Self {
+        self.max_context_window_len = config.max_context_window_len;
         self
     }
 
@@ -922,6 +926,7 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
     use crate::config::{ConfirmationMode, ToolsConfig};
     use crate::tools::{Tool, ToolError, ToolResult as ToolExecResult};
     use anyhow::Result;
@@ -3367,10 +3372,10 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
-        let role = if config.models.contains_key(&config.compaction_role) {
-            config.compaction_role.clone()
+        let role = if config.models.contains_key(&config.compaction.role) {
+            config.compaction.role.clone()
         } else {
             "default".to_string()
         };
@@ -3405,10 +3410,10 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
-        let role = if config.models.contains_key(&config.compaction_role) {
-            config.compaction_role.clone()
+        let role = if config.models.contains_key(&config.compaction.role) {
+            config.compaction.role.clone()
         } else {
             "default".to_string()
         };
@@ -3447,12 +3452,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 0,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         let stream = agent
             .send("hi".to_string(), None, None)
@@ -3485,12 +3494,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         let stream = agent
             .send("hi".to_string(), None, None)
@@ -3517,12 +3530,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         let stream = agent
             .send("hi".to_string(), None, None)
@@ -3571,12 +3588,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         // First send: above threshold -> AutoCompactTriggered
         let stream1 = agent
@@ -3630,12 +3651,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         // First send: above threshold -> AutoCompactTriggered
         let stream1 = agent
@@ -3678,7 +3703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_tool_config_sets_max_context_window_len() {
+    async fn with_compaction_config_sets_max_context_window_len() {
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
@@ -3688,16 +3713,20 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 42_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
         assert_eq!(
             agent.max_context_window_len_for_test(),
             42_000,
-            "max_context_window_len should be set from tool_config"
+            "max_context_window_len should be set from compaction_config"
         );
     }
 
@@ -3739,13 +3768,17 @@ mod tests {
             .expect("register");
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
             .await
             .with_tools(registry)
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         let stream = agent
             .send("run".to_string(), None, None)
@@ -3773,12 +3806,16 @@ mod tests {
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 50_000,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
-            .with_tool_config(&tool_config);
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
 
         // Trigger auto-compact to set the flag
         let stream = agent

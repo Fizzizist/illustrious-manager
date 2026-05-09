@@ -1000,6 +1000,7 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     #[test]
     fn scroll_offset_starts_at_zero() {
@@ -2119,7 +2120,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
