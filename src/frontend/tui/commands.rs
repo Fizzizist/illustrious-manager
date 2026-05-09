@@ -241,6 +241,7 @@ pub fn default_registry() -> CommandRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
     use crate::config::{AppConfig, ToolsConfig, VertexConfig};
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -260,7 +261,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         }
     }
 

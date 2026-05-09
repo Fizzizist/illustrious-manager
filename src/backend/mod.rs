@@ -166,6 +166,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::CompactionConfig;
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
@@ -252,7 +253,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let factory = super::BackendFactory::new(config);
 
@@ -301,7 +302,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let factory = super::BackendFactory::new(config);
 
