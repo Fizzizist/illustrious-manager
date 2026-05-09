@@ -732,11 +732,11 @@ async fn run_app(
                     if was_response_complete {
                         if app.should_auto_compact(config.tools.max_context_window_len) {
                             app.consecutive_auto_compact_count += 1;
-                            if app.consecutive_auto_compact_count >= 3 {
+                            if app.consecutive_auto_compact_count >= 2 {
                                 app.auto_compact_disabled = true;
                                 app.conversation.push(ConversationEntry::new(
                                     ConversationRole::Warn,
-                                    "Auto-compaction disabled for this session: context remains above threshold after multiple attempts. Raise the limit or use /compact manually.".to_string(),
+                                    "Auto-compaction disabled for this session: context remains above threshold after two attempts. Raise the limit or use /compact manually.".to_string(),
                                 ));
                                 app.consecutive_auto_compact_count = 0;
                             } else {
@@ -3107,28 +3107,26 @@ mod tests {
     }
 
     #[test]
-    fn auto_compact_circuit_breaker_disables_after_three_attempts() {
+    fn auto_compact_circuit_breaker_disables_after_two_attempts() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.last_input_total = 120_000;
         let limit = 100_000;
 
-        // Simulate 3 consecutive auto-compact attempts
-        for _ in 0..2 {
-            app.consecutive_auto_compact_count += 1;
-            app.auto_compacted_last_turn = true;
-        }
-        // On the 3rd attempt (count goes to 3), circuit breaker fires
-        app.auto_compacted_last_turn = false; // storm guard was cleared
+        // Simulate 2 consecutive auto-compact attempts
+        app.consecutive_auto_compact_count += 1;
+        app.auto_compacted_last_turn = true;
+        // Storm guard clears after compaction completes and threshold still exceeded
+        app.auto_compacted_last_turn = false;
         assert!(app.should_auto_compact(limit));
         app.consecutive_auto_compact_count += 1;
-        if app.consecutive_auto_compact_count >= 3 {
+        if app.consecutive_auto_compact_count >= 2 {
             app.auto_compact_disabled = true;
             app.consecutive_auto_compact_count = 0;
         }
 
         assert!(
             app.auto_compact_disabled,
-            "auto-compact should be disabled after 3 attempts"
+            "auto-compact should be disabled after 2 attempts"
         );
         assert_eq!(
             app.consecutive_auto_compact_count, 0,
