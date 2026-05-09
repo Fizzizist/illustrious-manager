@@ -132,4 +132,14 @@ impl Agent {
         )
         .await
     }
+
+    /// Reset the consecutive auto-compaction guard flag.
+    ///
+    /// Called by the TUI when compaction fails, so subsequent turns can
+    /// retry auto-compaction instead of being permanently blocked by the
+    /// guard.
+    pub fn reset_auto_compact_flag(&self) {
+        self.last_auto_compacted
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }

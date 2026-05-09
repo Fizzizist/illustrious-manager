@@ -658,6 +658,7 @@ async fn run_app(
             Some(agent_event) = event_rx.recv() => {
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
                     if *is_error {
+                        agent.reset_auto_compact_flag();
                         app.conversation.push(ConversationEntry::new(
                             ConversationRole::Error,
                             summary.clone(),
@@ -771,6 +772,10 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Abort any in-progress compaction before switching sessions
+                                        if let Some(handle) = app.compaction_task.take() {
+                                            handle.abort();
+                                        }
                                         // Checkpoint current session WAL before switching
                                         if let Err(e) = agent.checkpoint_session().await {
                                             app.conversation.push(ConversationEntry::new(
@@ -898,6 +903,13 @@ async fn run_app(
                             } = key
                             {
                                 break;
+                            }
+                            if let KeyEvent { code: KeyCode::Esc, .. } = key {
+                                if let Some(handle) = app.compaction_task.take() {
+                                    handle.abort();
+                                }
+                                app.set_state(AppState::Input);
+                                app.scroll_offset = 0;
                             }
                         },
                         _ => {
