@@ -3,7 +3,6 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│                                                          │"
 "│  - backend: vertex                                       │"
 "│  - compaction_role: compaction                           │"
 "│  - sessions_dir: /sessions                               │"
@@ -11,6 +10,7 @@ expression: terminal.backend()
 "│wc, tree                                                  │"
 "│  - tools.bash_denylist: rm, wget, sudo, chmod, chown     │"
 "│  - tools.confirmation: WriteOnly                         │"
+"│  - tools.max_context_window_len: 0                       │"
 "│  - tools.max_tool_iterations: 25                         │"
 "│  - tools.sandbox_root: .                                 │"
 "│  - vertex.model: claude-sonnet-4-20250514                │"

@@ -27,6 +27,10 @@ fn default_max_tool_iterations() -> u32 {
     25
 }
 
+fn default_max_context_window_len() -> u32 {
+    0
+}
+
 fn default_bash_allowlist() -> Vec<String> {
     ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
         .iter()
@@ -55,6 +59,8 @@ pub struct ToolsConfig {
     pub sandbox_root: String,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    #[serde(default = "default_max_context_window_len")]
+    pub max_context_window_len: u32,
     #[serde(default = "default_bash_allowlist")]
     pub bash_allowlist: Vec<String>,
     #[serde(default = "default_bash_denylist")]
@@ -67,6 +73,7 @@ impl Default for ToolsConfig {
             confirmation: default_confirmation(),
             sandbox_root: default_sandbox_root(),
             max_tool_iterations: default_max_tool_iterations(),
+            max_context_window_len: default_max_context_window_len(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
         }
@@ -141,6 +148,9 @@ model = "glm-5.1"
 # sandbox_root = "."
 # Maximum number of tool-use iterations per agent turn
 # max_tool_iterations = 25
+# Context window length threshold for auto-compaction (0 = disabled)
+# When input_tokens exceeds this value, the agent automatically compacts the conversation
+# max_context_window_len = 0
 # Shell commands that may be executed without a denylist match
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
@@ -664,6 +674,7 @@ mod tests {
         assert_eq!(config.confirmation, ConfirmationMode::WriteOnly);
         assert_eq!(config.sandbox_root, ".");
         assert_eq!(config.max_tool_iterations, 25);
+        assert_eq!(config.max_context_window_len, 0);
         assert_eq!(
             config.bash_allowlist,
             vec!["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
@@ -680,6 +691,7 @@ mod tests {
             confirmation = "Always"
             sandbox_root = "/tmp/sandbox"
             max_tool_iterations = 10
+            max_context_window_len = 50000
             bash_allowlist = ["echo"]
             bash_denylist = ["curl"]
         "#;
@@ -687,8 +699,33 @@ mod tests {
         assert_eq!(config.confirmation, ConfirmationMode::Always);
         assert_eq!(config.sandbox_root, "/tmp/sandbox");
         assert_eq!(config.max_tool_iterations, 10);
+        assert_eq!(config.max_context_window_len, 50000);
         assert_eq!(config.bash_allowlist, vec!["echo"]);
         assert_eq!(config.bash_denylist, vec!["curl"]);
+    }
+
+    #[test]
+    fn default_tools_config_includes_max_context_window_len() {
+        let config = ToolsConfig::default();
+        assert_eq!(config.max_context_window_len, 0);
+    }
+
+    #[test]
+    fn max_context_window_len_deserializes_from_toml() {
+        let toml_str = r#"
+            max_context_window_len = 50000
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 50000);
+    }
+
+    #[test]
+    fn max_context_window_len_zero_by_default_in_toml() {
+        let toml_str = r#"
+            confirmation = "Always"
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 0);
     }
 
     #[test]
