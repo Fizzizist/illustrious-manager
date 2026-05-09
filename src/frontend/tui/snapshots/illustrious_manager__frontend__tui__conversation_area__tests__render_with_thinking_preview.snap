@@ -1,0 +1,24 @@
+---
+source: src/frontend/tui/conversation_area.rs
+expression: terminal.backend()
+---
+"┌Conversation────────────────────────────────────────────┐  "
+"│[Thinking]:                                             │  "
+"│  analyzing the request                                 │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"│                                                        │  "
+"└────────────────────────────────────────────────────────┘  "
+"                                                            "
+"                                                            "
