@@ -62,38 +62,6 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Check whether auto-compaction should be triggered based on accumulated input
-/// tokens and the configured threshold. Emits `AutoCompactTriggered` or `Warn`
-/// as appropriate, and updates the consecutive-compaction guard flag.
-fn check_auto_compact(
-    peak_input_tokens: u32,
-    max_context_window_len: u32,
-    last_auto_compacted: &std::sync::atomic::AtomicBool,
-    event_tx: &futures::channel::mpsc::UnboundedSender<AgentEvent>,
-) {
-    if max_context_window_len == 0 {
-        return;
-    }
-
-    if peak_input_tokens > max_context_window_len {
-        if last_auto_compacted.load(Ordering::SeqCst) {
-            let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
-                "Context still exceeds threshold ({} > {}) after auto-compaction. \
-                 Manual /compact or starting a new session is recommended.",
-                peak_input_tokens, max_context_window_len
-            )));
-        } else {
-            let _ = event_tx.unbounded_send(AgentEvent::AutoCompactTriggered {
-                current_tokens: peak_input_tokens,
-                threshold: max_context_window_len,
-            });
-            last_auto_compacted.store(true, Ordering::SeqCst);
-        }
-    } else {
-        last_auto_compacted.store(false, Ordering::SeqCst);
-    }
-}
-
 impl Agent {
     pub async fn new(
         backend: Box<dyn LlmBackend>,
@@ -516,7 +484,7 @@ impl Agent {
 
                     // Auto-compact check: runs after every completed iteration,
                     // whether the response included tool calls or not.
-                    check_auto_compact(
+                    compact::check_auto_compact(
                         peak_input_tokens,
                         max_context_window_len,
                         &last_auto_compacted,
@@ -617,7 +585,7 @@ impl Agent {
 
                 // Auto-compact check: runs after every completed iteration,
                 // whether the response included tool calls or not.
-                check_auto_compact(
+                compact::check_auto_compact(
                     peak_input_tokens,
                     max_context_window_len,
                     &last_auto_compacted,
