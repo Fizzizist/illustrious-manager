@@ -66,7 +66,7 @@ fn lock(m: &Mutex<Vec<Message>>) -> std::sync::MutexGuard<'_, Vec<Message>> {
 /// tokens and the configured threshold. Emits `AutoCompactTriggered` or `Warn`
 /// as appropriate, and updates the consecutive-compaction guard flag.
 fn check_auto_compact(
-    accumulated_input_tokens: u32,
+    peak_input_tokens: u32,
     max_context_window_len: u32,
     last_auto_compacted: &std::sync::atomic::AtomicBool,
     event_tx: &futures::channel::mpsc::UnboundedSender<AgentEvent>,
@@ -75,16 +75,16 @@ fn check_auto_compact(
         return;
     }
 
-    if accumulated_input_tokens > max_context_window_len {
+    if peak_input_tokens > max_context_window_len {
         if last_auto_compacted.load(Ordering::SeqCst) {
             let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
                 "Context still exceeds threshold ({} > {}) after auto-compaction. \
                  Manual /compact or starting a new session is recommended.",
-                accumulated_input_tokens, max_context_window_len
+                peak_input_tokens, max_context_window_len
             )));
         } else {
             let _ = event_tx.unbounded_send(AgentEvent::AutoCompactTriggered {
-                current_tokens: accumulated_input_tokens,
+                current_tokens: peak_input_tokens,
                 threshold: max_context_window_len,
             });
             last_auto_compacted.store(true, Ordering::SeqCst);
@@ -378,7 +378,7 @@ impl Agent {
                 let mut thinking_signature = String::new();
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
-                let mut accumulated_input_tokens: u32 = 0;
+                let mut peak_input_tokens: u32 = 0;
                 let mut stream = backend_stream;
 
                 loop {
@@ -456,8 +456,7 @@ impl Agent {
                             output_tokens,
                             stop_reason,
                         })) => {
-                            accumulated_input_tokens =
-                                accumulated_input_tokens.saturating_add(input_tokens);
+                            peak_input_tokens = peak_input_tokens.max(input_tokens);
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
@@ -518,7 +517,7 @@ impl Agent {
                     // Auto-compact check: runs after every completed iteration,
                     // whether the response included tool calls or not.
                     check_auto_compact(
-                        accumulated_input_tokens,
+                        peak_input_tokens,
                         max_context_window_len,
                         &last_auto_compacted,
                         &event_tx,
@@ -619,7 +618,7 @@ impl Agent {
                 // Auto-compact check: runs after every completed iteration,
                 // whether the response included tool calls or not.
                 check_auto_compact(
-                    accumulated_input_tokens,
+                    peak_input_tokens,
                     max_context_window_len,
                     &last_auto_compacted,
                     &event_tx,
@@ -3835,6 +3834,63 @@ mod tests {
         assert!(
             !agent.last_auto_compacted.load(Ordering::SeqCst),
             "flag should be reset after load_session"
+        );
+    }
+
+    // Regression: when multiple Usage events arrive in a single turn (e.g. tool-use
+    // loops), the API reports the *total* context size per request, not incremental
+    // tokens. We must track the peak, not the sum, so that a context of 12.8k across
+    // two iterations doesn't falsely accumulate to 27.8k.
+    #[tokio::test]
+    async fn auto_compact_uses_peak_input_tokens_not_sum() {
+        // Simulate two Usage events in one response (can happen with tool-use turns).
+        // Both report the total context size (~12k), but the peak is 12k, not 24k.
+        let combined = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("hello".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 12_000,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            // Second Usage event (some backends send a final summary)
+            Ok(StreamEvent::Usage {
+                input_tokens: 12_800,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 15_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Peak is 12800, which is below 15000, so auto-compact should NOT trigger.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should not be emitted when peak (12800) is below threshold (15000)"
         );
     }
 }
