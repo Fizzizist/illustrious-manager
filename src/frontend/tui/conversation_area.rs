@@ -499,6 +499,7 @@ pub fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     #[test]
     fn conversation_role_labels() {
@@ -1004,7 +1005,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,

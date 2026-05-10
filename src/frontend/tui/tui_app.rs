@@ -596,6 +596,9 @@ pub fn handle_agent_event(
         AgentEvent::ThinkingReceived(text) => {
             app.current_thinking.push_str(&text);
         }
+        // AutoCompactTriggered is handled in run_app where we have access to the Agent
+        // to call compact(). It must not reach this match arm.
+        AgentEvent::AutoCompactTriggered { .. } => {}
         // CompactionComplete is handled in run_app where we have access to the Agent.
         // It must not reach this match arm.
         AgentEvent::CompactionComplete { .. } => {}
@@ -665,6 +668,7 @@ async fn run_app(
             Some(agent_event) = event_rx.recv() => {
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
                     if *is_error {
+                        agent.reset_auto_compact_flag();
                         app.conversation.push(ConversationEntry::new(
                             ConversationRole::Error,
                             summary.clone(),
@@ -691,6 +695,27 @@ async fn run_app(
                     app.set_state(AppState::Input);
                     app.scroll_offset = 0;
                     app.compaction_task = None;
+                } else if let AgentEvent::AutoCompactTriggered { current_tokens, threshold } = &agent_event {
+                    app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Info,
+                        format!(
+                            "Auto-compact triggered: context ({} tokens) exceeded threshold ({} tokens)",
+                            current_tokens, threshold
+                        ),
+                    ));
+                    app.set_state(AppState::Compacting);
+                    app.scroll_offset = 0;
+                    let compact_agent = agent.clone();
+                    let compact_tx = event_tx.clone();
+                    let compact_task = tokio::spawn(async move {
+                        let result = compact_agent.compact().await;
+                        let event = match result {
+                            Ok(summary) => AgentEvent::CompactionComplete { summary, is_error: false },
+                            Err(err) => AgentEvent::CompactionComplete { summary: err, is_error: true },
+                        };
+                        let _ = compact_tx.send(event).await;
+                    });
+                    app.compaction_task = Some(compact_task);
                 } else {
                     handle_agent_event(&mut app, agent_event, logger.as_mut())?;
                 }
@@ -757,6 +782,10 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Abort any in-progress compaction before switching sessions
+                                        if let Some(handle) = app.compaction_task.take() {
+                                            handle.abort();
+                                        }
                                         // Checkpoint current session WAL before switching
                                         if let Err(e) = agent.checkpoint_session().await {
                                             app.conversation.push(ConversationEntry::new(
@@ -885,6 +914,13 @@ async fn run_app(
                             {
                                 break;
                             }
+                            if let KeyEvent { code: KeyCode::Esc, .. } = key {
+                                if let Some(handle) = app.compaction_task.take() {
+                                    handle.abort();
+                                }
+                                app.set_state(AppState::Input);
+                                app.scroll_offset = 0;
+                            }
                         },
                         _ => {
                             if let
@@ -964,6 +1000,7 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     #[test]
     fn scroll_offset_starts_at_zero() {
@@ -2083,7 +2120,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2695,6 +2732,28 @@ mod tests {
         assert!(
             app.conversation.is_empty(),
             "handle_agent_event should not modify conversation for CompactionComplete"
+        );
+    }
+
+    #[test]
+    fn handle_agent_event_auto_compact_triggered_is_noop() {
+        // AutoCompactTriggered is handled in run_app, not in handle_agent_event.
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert!(app.conversation.is_empty());
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::AutoCompactTriggered {
+                current_tokens: 60000,
+                threshold: 50000,
+            },
+            None,
+        )
+        .expect("handle event should not error");
+
+        assert!(
+            app.conversation.is_empty(),
+            "handle_agent_event should not push a conversation entry for AutoCompactTriggered"
         );
     }
 
