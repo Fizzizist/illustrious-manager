@@ -1,11 +1,45 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use futures::channel::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::session::Session;
-use crate::types::Message;
+use crate::types::{AgentEvent, Message};
 
 use super::{Agent, AgentSpawner, lock};
+
+/// Check whether auto-compaction should be triggered based on peak input
+/// tokens and the configured threshold. Emits `AutoCompactTriggered` or
+/// `Warn` as appropriate, and updates the consecutive-compaction guard flag.
+pub(crate) fn check_auto_compact(
+    peak_input_tokens: u32,
+    max_context_window_len: u32,
+    last_auto_compacted: &AtomicBool,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    if max_context_window_len == 0 {
+        return;
+    }
+
+    if peak_input_tokens > max_context_window_len {
+        if last_auto_compacted.load(Ordering::SeqCst) {
+            let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
+                "Context still exceeds threshold ({} > {}) after auto-compaction. \
+                 Manual /compact or starting a new session is recommended.",
+                peak_input_tokens, max_context_window_len
+            )));
+        } else {
+            let _ = event_tx.unbounded_send(AgentEvent::AutoCompactTriggered {
+                current_tokens: peak_input_tokens,
+                threshold: max_context_window_len,
+            });
+            last_auto_compacted.store(true, Ordering::SeqCst);
+        }
+    } else {
+        last_auto_compacted.store(false, Ordering::SeqCst);
+    }
+}
 
 /// Extracted core compaction logic so it can be called from `Agent::compact()`
 /// without needing `&self`.
