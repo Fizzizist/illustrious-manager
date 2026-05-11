@@ -4,6 +4,75 @@ use crate::types::{ContentBlock, Message, Role};
 
 use super::Session;
 
+/// Count the number of turns in a message history.
+///
+/// A "turn" starts with a user message and includes all immediately following
+/// assistant messages. If the history starts with assistant messages (orphan),
+/// they are treated as a single partial turn. If the last message is a user
+/// message with no assistant reply yet, that counts as a partial turn.
+fn count_turns(messages: &[Message]) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+
+    let mut turns = 0;
+    let mut i = 0;
+
+    while i < messages.len() {
+        turns += 1;
+        i += 1;
+        while i < messages.len() && messages[i].role == Role::Assistant {
+            i += 1;
+        }
+    }
+
+    turns
+}
+
+/// Extract the last `n` turns from the history, returning the messages
+/// that belong to those turns with non-text blocks stripped.
+fn retained_turns(messages: &[Message], n: usize) -> Vec<Message> {
+    if n == 0 || messages.is_empty() {
+        return Vec::new();
+    }
+
+    let total = count_turns(messages);
+    let skip_turns = total.saturating_sub(n);
+    let mut turn_boundaries: Vec<usize> = Vec::new();
+    let mut i = 0;
+
+    while i < messages.len() {
+        turn_boundaries.push(i);
+        i += 1;
+        while i < messages.len() && messages[i].role == Role::Assistant {
+            i += 1;
+        }
+    }
+
+    let start = turn_boundaries[skip_turns];
+    let retained: Vec<Message> = messages[start..]
+        .iter()
+        .filter_map(|msg| {
+            let stripped: Vec<ContentBlock> = msg
+                .content
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::Text(_)))
+                .cloned()
+                .collect();
+            if stripped.is_empty() {
+                None
+            } else {
+                Some(Message {
+                    role: msg.role.clone(),
+                    content: stripped,
+                })
+            }
+        })
+        .collect();
+
+    retained
+}
+
 pub struct ConversationRepo<'a> {
     session: &'a Session,
 }
@@ -126,6 +195,63 @@ impl<'a> ConversationRepo<'a> {
             .context("Failed to commit compaction transaction")?;
 
         Ok(())
+    }
+
+    /// Compact with retained turns: deactivate all rows, insert summary, then
+    /// insert cleaned versions of the last `retain_count` turns.
+    ///
+    /// A "turn" is a user message plus its immediately following assistant
+    /// message(s). Turns are counted from the end of the conversation. If the
+    /// last message is a user message with no assistant reply yet, that partial
+    /// turn is still retained.
+    ///
+    /// Tool-use, tool-result, thinking, and redacted-thinking blocks are
+    /// stripped from retained messages — only text blocks are preserved.
+    /// Messages that become empty after stripping are dropped entirely.
+    ///
+    /// Returns `Ok(true)` if compaction was performed, or `Ok(false)` if it
+    /// was a no-op (retain_count >= total turns, meaning there's nothing to
+    /// compact).
+    pub async fn compact_retaining(&self, summary: &Message, retain_count: u32) -> Result<bool> {
+        let history = self.load_history().await?;
+
+        let total_turns = count_turns(&history);
+        if retain_count as usize >= total_turns {
+            return Ok(false);
+        }
+
+        let retained_messages = retained_turns(&history, retain_count as usize);
+
+        self.session
+            .conn
+            .execute("BEGIN TRANSACTION", ())
+            .await
+            .context("Failed to begin compaction transaction")?;
+
+        if let Err(e) = self.deactivate_all().await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        if let Err(e) = self.insert_message(summary).await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        for msg in &retained_messages {
+            if let Err(e) = self.insert_message(msg).await {
+                let _ = self.session.conn.execute("ROLLBACK", ()).await;
+                return Err(e);
+            }
+        }
+
+        self.session
+            .conn
+            .execute("COMMIT", ())
+            .await
+            .context("Failed to commit compaction transaction")?;
+
+        Ok(true)
     }
 
     pub async fn read_first_user_message(&self) -> Result<String> {
@@ -465,5 +591,437 @@ mod tests {
             .await
             .expect("load history");
         assert_eq!(history.len(), 1, "summary should be the only active entry");
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_deactivates_old_and_keeps_last_n_turns() {
+        let (_dir, session) = create_test_session().await;
+
+        // 3 turns:
+        // turn 1: user "hello" + assistant "hi there"
+        // turn 2: user "how are you" + assistant "fine"
+        // turn 3: user "goodbye" + assistant "see you"
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi there".to_string()))
+            .await
+            .expect("insert 2");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "how are you".to_string()))
+            .await
+            .expect("insert 3");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "fine".to_string()))
+            .await
+            .expect("insert 4");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "goodbye".to_string()))
+            .await
+            .expect("insert 5");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "see you".to_string()))
+            .await
+            .expect("insert 6");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 2)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(
+            result,
+            "compact_retaining should return true when it performs compaction"
+        );
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        // Expected: summary + turn 2 messages + turn 3 messages = 1 + 4 = 5
+        // But turn 2 and turn 3 only have text blocks, so they're all kept.
+        assert_eq!(
+            history.len(),
+            5,
+            "should have summary + 4 retained text messages"
+        );
+
+        assert_eq!(history[0].role, Role::User);
+        assert!(
+            matches!(&history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+        assert_eq!(history[1].role, Role::User);
+        assert!(matches!(&history[1].content[0], ContentBlock::Text(t) if t == "how are you"));
+        assert_eq!(history[2].role, Role::Assistant);
+        assert!(matches!(&history[2].content[0], ContentBlock::Text(t) if t == "fine"));
+        assert_eq!(history[3].role, Role::User);
+        assert!(matches!(&history[3].content[0], ContentBlock::Text(t) if t == "goodbye"));
+        assert_eq!(history[4].role, Role::Assistant);
+        assert!(matches!(&history[4].content[0], ContentBlock::Text(t) if t == "see you"));
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_with_zero_is_equivalent_to_compact() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi there".to_string()))
+            .await
+            .expect("insert 2");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "how are you".to_string()))
+            .await
+            .expect("insert 3");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 0)
+            .await
+            .expect("compact_retaining with 0 should succeed");
+        assert!(
+            result,
+            "compact_retaining with 0 should return true (there are turns to compact)"
+        );
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(
+            history.len(),
+            1,
+            "with 0 retained turns, only summary should remain"
+        );
+        assert!(
+            matches!(&history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_with_count_exceeding_total_is_noop() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi".to_string()))
+            .await
+            .expect("insert 2");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 5)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(
+            !result,
+            "compact_retaining with retain_count >= total turns should be a no-op"
+        );
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 2, "history should be unchanged after no-op");
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_on_single_turn_is_noop() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi".to_string()))
+            .await
+            .expect("insert 2");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(
+            !result,
+            "compact_retaining with retain_count == total turns should be a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_strips_tool_use_blocks() {
+        let (_dir, session) = create_test_session().await;
+
+        // 2 turns; retain 1 turn
+        // turn 1: user text + assistant text (will be compacted away)
+        // turn 2: user text + assistant with tool_use and text
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi there".to_string()))
+            .await
+            .expect("insert 2");
+        session
+            .conversation()
+            .insert_message(&Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text("run something".to_string())],
+            })
+            .await
+            .expect("insert 3");
+        session
+            .conversation()
+            .insert_message(&Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "tool-1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    },
+                    ContentBlock::Text("I ran ls".to_string()),
+                ],
+            })
+            .await
+            .expect("insert 4");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result);
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        // summary + user "run something" + assistant "I ran ls" (tool-use stripped)
+        assert_eq!(history.len(), 3);
+
+        assert!(
+            matches!(&history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+
+        assert_eq!(history[1].role, Role::User);
+        assert!(matches!(&history[1].content[0], ContentBlock::Text(t) if t == "run something"));
+
+        assert_eq!(history[2].role, Role::Assistant);
+        assert_eq!(
+            history[2].content.len(),
+            1,
+            "tool-use block should be stripped"
+        );
+        assert!(matches!(&history[2].content[0], ContentBlock::Text(t) if t == "I ran ls"));
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_strips_thinking_and_tool_result_blocks() {
+        let (_dir, session) = create_test_session().await;
+
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi".to_string()))
+            .await
+            .expect("insert 2");
+        session
+            .conversation()
+            .insert_message(&Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "deep thoughts".to_string(),
+                        signature: "sig123".to_string(),
+                    },
+                    ContentBlock::RedactedThinking {
+                        data: "redacted_data".to_string(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tool-1".to_string(),
+                        content: "output".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text("visible response".to_string()),
+                ],
+            })
+            .await
+            .expect("insert 3");
+
+        // 2 turns total, retain 1 (the one with the assistant message that has mixed blocks)
+        // But wait — this is only 1 full turn (user + assistant) plus an orphan assistant.
+        // Let's start over with a proper 2-turn setup using a new session.
+        drop(session);
+        let dir2 = TempDir::new().expect("temp dir 2");
+        let session2 = super::super::Session::new(None, dir2.path().to_path_buf())
+            .await
+            .expect("create session 2");
+
+        // turn 1: user + assistant
+        session2
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session2
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi".to_string()))
+            .await
+            .expect("insert 2");
+
+        // turn 2: user + assistant with thinking, redacted, tool_result, text
+        session2
+            .conversation()
+            .insert_message(&Message::text(Role::User, "question".to_string()))
+            .await
+            .expect("insert 3");
+        session2
+            .conversation()
+            .insert_message(&Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "deep thoughts".to_string(),
+                        signature: "sig123".to_string(),
+                    },
+                    ContentBlock::RedactedThinking {
+                        data: "redacted_data".to_string(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "tool-1".to_string(),
+                        content: "output".to_string(),
+                        is_error: false,
+                    },
+                    ContentBlock::Text("visible response".to_string()),
+                ],
+            })
+            .await
+            .expect("insert 4");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session2
+            .conversation()
+            .compact_retaining(&summary, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result);
+
+        let history = session2
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        // summary + user "question" + assistant "visible response" (thinking, redacted, tool_result stripped)
+        assert_eq!(history.len(), 3);
+
+        assert_eq!(history[1].role, Role::User);
+        assert!(matches!(&history[1].content[0], ContentBlock::Text(t) if t == "question"));
+
+        assert_eq!(history[2].role, Role::Assistant);
+        assert_eq!(history[2].content.len(), 1, "only text block should remain");
+        assert!(matches!(&history[2].content[0], ContentBlock::Text(t) if t == "visible response"));
+    }
+
+    #[tokio::test]
+    async fn compact_retaining_drops_empty_messages_after_stripping() {
+        let (_dir, session) = create_test_session().await;
+
+        // turn 1: user + assistant (will be compacted)
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "hello".to_string()))
+            .await
+            .expect("insert 1");
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::Assistant, "hi".to_string()))
+            .await
+            .expect("insert 2");
+
+        // turn 2: user text + assistant with only tool_use (no text → entire assistant message dropped)
+        session
+            .conversation()
+            .insert_message(&Message::text(Role::User, "run it".to_string()))
+            .await
+            .expect("insert 3");
+        session
+            .conversation()
+            .insert_message(&Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "tool-1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            })
+            .await
+            .expect("insert 4");
+
+        let summary = Message::text(Role::User, "[Compacted] Summary".to_string());
+        let result = session
+            .conversation()
+            .compact_retaining(&summary, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result);
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        // Turn 2 has:
+        //   user "run it" (text only → kept)
+        //   assistant with only ToolUse (stripped → empty → dropped)
+        // So: summary + user "run it" = 2 active messages
+        assert_eq!(history.len(), 2);
+        assert!(
+            matches!(&history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+        assert_eq!(history[1].role, Role::User);
+        assert!(matches!(&history[1].content[0], ContentBlock::Text(t) if t == "run it"));
     }
 }

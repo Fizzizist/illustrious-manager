@@ -5,7 +5,7 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::session::Session;
-use crate::types::{AgentEvent, Message};
+use crate::types::{AgentEvent, ContentBlock, Message};
 
 use super::{Agent, AgentSpawner, lock};
 
@@ -41,6 +41,67 @@ pub(crate) fn check_auto_compact(
     }
 }
 
+/// Count the number of turns in a message slice.
+/// A "turn" starts with a user message and includes all immediately following
+/// assistant messages. Orphan assistant messages at the start form their own turn.
+fn count_turns(messages: &[Message]) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+    let mut turns = 0;
+    let mut i = 0;
+    while i < messages.len() {
+        turns += 1;
+        i += 1;
+        while i < messages.len() && messages[i].role == crate::types::Role::Assistant {
+            i += 1;
+        }
+    }
+    turns
+}
+
+/// Find the start index of the last `n` turns in the message slice.
+/// Returns `messages.len()` if there are fewer than `n` turns (i.e., all
+/// messages are retained).
+fn retained_start_index(messages: &[Message], n: usize) -> usize {
+    if n == 0 || messages.is_empty() {
+        return 0;
+    }
+    let total = count_turns(messages);
+    let skip = total.saturating_sub(n);
+    let mut turn_start = 0;
+    let mut turns_seen = 0;
+    let mut i = 0;
+    while i < messages.len() && turns_seen < skip {
+        turn_start = i + 1;
+        turns_seen += 1;
+        i += 1;
+        while i < messages.len() && messages[i].role == crate::types::Role::Assistant {
+            turn_start = i + 1;
+            i += 1;
+        }
+    }
+    turn_start
+}
+
+/// Strip non-text blocks from a message, returning `None` if the result is empty.
+fn strip_non_text(msg: &Message) -> Option<Message> {
+    let stripped: Vec<ContentBlock> = msg
+        .content
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Text(_)))
+        .cloned()
+        .collect();
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(Message {
+            role: msg.role.clone(),
+            content: stripped,
+        })
+    }
+}
+
 /// Extracted core compaction logic so it can be called from `Agent::compact()`
 /// without needing `&self`.
 pub async fn compact_with(
@@ -48,6 +109,7 @@ pub async fn compact_with(
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
     context_prefix_len: &Arc<Mutex<usize>>,
+    num_retained_turns: u32,
 ) -> Result<String, String> {
     let compaction_role = spawner.app_config.compaction.role.clone();
 
@@ -57,48 +119,103 @@ pub async fn compact_with(
         "default".to_string()
     };
 
-    let prompt = {
+    let (prompt, retained_messages) = {
         let hist = lock(history);
         let prefix_len = *context_prefix_len.lock().unwrap_or_else(|e| e.into_inner());
         let persisted = &hist[prefix_len.min(hist.len())..];
-        let mut parts = Vec::new();
-        for msg in persisted {
-            let role_label = match msg.role {
-                crate::types::Role::User => "User",
-                crate::types::Role::Assistant => "Assistant",
-            };
-            for block in &msg.content {
-                match block {
-                    crate::types::ContentBlock::Text(text) => {
-                        parts.push(format!("{role_label}: {text}"));
-                    }
-                    crate::types::ContentBlock::ToolUse { name, input, .. } => {
-                        parts.push(format!(
-                            "{role_label}: [Called tool {name} with input {input}]"
-                        ));
-                    }
-                    crate::types::ContentBlock::ToolResult {
-                        content, is_error, ..
-                    } => {
-                        let label = if *is_error { "error" } else { "result" };
-                        parts.push(format!("{role_label}: [Tool {label}: {content}]"));
-                    }
-                    crate::types::ContentBlock::Thinking { text, .. } => {
-                        parts.push(format!("{role_label}: [Thinking: {text}]"));
-                    }
-                    crate::types::ContentBlock::RedactedThinking { .. } => {
-                        parts.push(format!("{role_label}: [Redacted thinking]"));
+
+        if num_retained_turns == 0 {
+            let mut parts = Vec::new();
+            for msg in persisted {
+                let role_label = match msg.role {
+                    crate::types::Role::User => "User",
+                    crate::types::Role::Assistant => "Assistant",
+                };
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text(text) => {
+                            parts.push(format!("{role_label}: {text}"));
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            parts.push(format!(
+                                "{role_label}: [Called tool {name} with input {input}]"
+                            ));
+                        }
+                        ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } => {
+                            let label = if *is_error { "error" } else { "result" };
+                            parts.push(format!("{role_label}: [Tool {label}: {content}]"));
+                        }
+                        ContentBlock::Thinking { text, .. } => {
+                            parts.push(format!("{role_label}: [Thinking: {text}]"));
+                        }
+                        ContentBlock::RedactedThinking { .. } => {
+                            parts.push(format!("{role_label}: [Redacted thinking]"));
+                        }
                     }
                 }
             }
+            if parts.is_empty() {
+                return Ok("Nothing to compact: the conversation is empty.".to_string());
+            }
+            let prompt = format!(
+                "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation. Do not include meta-commentary — output only the summary.\n\n{}",
+                parts.join("\n\n")
+            );
+            (prompt, Vec::<Message>::new())
+        } else {
+            let retained_start = retained_start_index(persisted, num_retained_turns as usize);
+
+            let compacted = &persisted[..retained_start];
+            let retained = &persisted[retained_start..];
+
+            if compacted.is_empty() {
+                return Ok("Nothing to compact: all turns are retained.".to_string());
+            }
+
+            let mut parts = Vec::new();
+            for msg in compacted {
+                let role_label = match msg.role {
+                    crate::types::Role::User => "User",
+                    crate::types::Role::Assistant => "Assistant",
+                };
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text(text) => {
+                            parts.push(format!("{role_label}: {text}"));
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            parts.push(format!(
+                                "{role_label}: [Called tool {name} with input {input}]"
+                            ));
+                        }
+                        ContentBlock::ToolResult {
+                            content, is_error, ..
+                        } => {
+                            let label = if *is_error { "error" } else { "result" };
+                            parts.push(format!("{role_label}: [Tool {label}: {content}]"));
+                        }
+                        ContentBlock::Thinking { text, .. } => {
+                            parts.push(format!("{role_label}: [Thinking: {text}]"));
+                        }
+                        ContentBlock::RedactedThinking { .. } => {
+                            parts.push(format!("{role_label}: [Redacted thinking]"));
+                        }
+                    }
+                }
+            }
+            if parts.is_empty() {
+                return Ok("Nothing to compact: the conversation is empty.".to_string());
+            }
+            let prompt = format!(
+                "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation. Do not include meta-commentary — output only the summary.\n\n{}",
+                parts.join("\n\n")
+            );
+            let stripped_retained: Vec<Message> =
+                retained.iter().filter_map(strip_non_text).collect();
+            (prompt, stripped_retained)
         }
-        if parts.is_empty() {
-            return Ok("Nothing to compact: the conversation is empty.".to_string());
-        }
-        format!(
-            "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation. Do not include meta-commentary — output only the summary.\n\n{}",
-            parts.join("\n\n")
-        )
     };
 
     let outcome = spawner
@@ -126,8 +243,20 @@ pub async fn compact_with(
 
     let sess = session.lock().await;
 
-    if let Err(e) = sess.conversation().compact(&summary_msg).await {
-        return Err(format!("Compaction failed: {e}"));
+    if num_retained_turns == 0 {
+        if let Err(e) = sess.conversation().compact(&summary_msg).await {
+            return Err(format!("Compaction failed: {e}"));
+        }
+    } else {
+        let result = sess
+            .conversation()
+            .compact_retaining(&summary_msg, num_retained_turns)
+            .await
+            .map_err(|e| format!("Compaction failed: {e}"))?;
+        if !result {
+            drop(sess);
+            return Ok("Nothing to compact: all turns are retained.".to_string());
+        }
     }
 
     drop(sess);
@@ -141,6 +270,7 @@ pub async fn compact_with(
     lock(history).clear();
     lock(history).extend(prefix);
     lock(history).push(summary_msg.clone());
+    lock(history).extend(retained_messages);
 
     Ok(summary)
 }
@@ -149,6 +279,9 @@ impl Agent {
     /// Run context compaction: summarise the active conversation history using a
     /// headless sub-agent, then replace it with the summary while preserving the
     /// context prefix (skills, CLAUDE.md, etc.).
+    ///
+    /// When `num_retained_turns > 0`, the last N turns are preserved after the
+    /// summary with tool-use blocks stripped, maintaining conversational continuity.
     ///
     /// Returns the summary text on success, or an error message on failure.
     pub async fn compact(&self) -> Result<String, String> {
@@ -163,6 +296,7 @@ impl Agent {
             &self.history,
             &self.session,
             &self.context_prefix_len,
+            self.num_retained_turns,
         )
         .await
     }
@@ -175,5 +309,191 @@ impl Agent {
     pub fn reset_auto_compact_flag(&self) {
         self.last_auto_compacted
             .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ContentBlock, Role};
+
+    #[test]
+    fn count_turns_empty() {
+        assert_eq!(count_turns(&[]), 0);
+    }
+
+    #[test]
+    fn count_turns_single_user() {
+        let msgs = vec![Message::text(Role::User, "hello".to_string())];
+        assert_eq!(count_turns(&msgs), 1);
+    }
+
+    #[test]
+    fn count_turns_single_turn() {
+        let msgs = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+        ];
+        assert_eq!(count_turns(&msgs), 1);
+    }
+
+    #[test]
+    fn count_turns_multiple_turns() {
+        let msgs = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+            Message::text(Role::User, "how are you".to_string()),
+            Message::text(Role::Assistant, "fine".to_string()),
+            Message::text(Role::User, "goodbye".to_string()),
+            Message::text(Role::Assistant, "bye".to_string()),
+        ];
+        assert_eq!(count_turns(&msgs), 3);
+    }
+
+    #[test]
+    fn count_turns_partial_turn_at_end() {
+        let msgs = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+            Message::text(Role::User, "waiting".to_string()),
+        ];
+        assert_eq!(count_turns(&msgs), 2);
+    }
+
+    #[test]
+    fn count_turns_orphan_assistant_at_start() {
+        let msgs = vec![
+            Message::text(Role::Assistant, "orphan".to_string()),
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+        ];
+        assert_eq!(count_turns(&msgs), 2);
+    }
+
+    #[test]
+    fn count_turns_multiple_assistants_after_user() {
+        let msgs = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+            Message::text(Role::Assistant, "there".to_string()),
+        ];
+        assert_eq!(count_turns(&msgs), 1);
+    }
+
+    #[test]
+    fn retained_start_index_retains_all() {
+        let msgs = vec![
+            Message::text(Role::User, "a".to_string()),
+            Message::text(Role::Assistant, "b".to_string()),
+            Message::text(Role::User, "c".to_string()),
+            Message::text(Role::Assistant, "d".to_string()),
+        ];
+        // retain 2 turns (all) → start from 0
+        assert_eq!(retained_start_index(&msgs, 2), 0);
+    }
+
+    #[test]
+    fn retained_start_index_retains_one_of_two() {
+        let msgs = vec![
+            Message::text(Role::User, "a".to_string()),
+            Message::text(Role::Assistant, "b".to_string()),
+            Message::text(Role::User, "c".to_string()),
+            Message::text(Role::Assistant, "d".to_string()),
+        ];
+        // retain 1 of 2 turns → skip first turn (indices 0-1), start from 2
+        assert_eq!(retained_start_index(&msgs, 1), 2);
+    }
+
+    #[test]
+    fn retained_start_index_zero() {
+        let msgs = vec![
+            Message::text(Role::User, "a".to_string()),
+            Message::text(Role::Assistant, "b".to_string()),
+        ];
+        // retain 0 turns → start from 0 (compact everything)
+        assert_eq!(retained_start_index(&msgs, 0), 0);
+    }
+
+    #[test]
+    fn strip_non_text_preserves_text_only() {
+        let msg = Message::text(Role::User, "hello".to_string());
+        let result = strip_non_text(&msg);
+        assert!(result.is_some());
+        let stripped = result.expect("checked");
+        assert_eq!(stripped.content.len(), 1);
+        assert!(matches!(&stripped.content[0], ContentBlock::Text(t) if t == "hello"));
+    }
+
+    #[test]
+    fn strip_non_text_removes_tool_use() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({}),
+                },
+                ContentBlock::Text("I ran it".to_string()),
+            ],
+        };
+        let result = strip_non_text(&msg);
+        assert!(result.is_some());
+        let stripped = result.expect("checked");
+        assert_eq!(stripped.content.len(), 1);
+        assert!(matches!(&stripped.content[0], ContentBlock::Text(t) if t == "I ran it"));
+    }
+
+    #[test]
+    fn strip_non_text_drops_empty_message() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+            }],
+        };
+        let result = strip_non_text(&msg);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn strip_non_text_removes_thinking_and_tool_result() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "deep".to_string(),
+                    signature: "sig".to_string(),
+                },
+                ContentBlock::RedactedThinking {
+                    data: "redacted".to_string(),
+                },
+                ContentBlock::ToolResult {
+                    tool_use_id: "t1".to_string(),
+                    content: "output".to_string(),
+                    is_error: false,
+                },
+                ContentBlock::Text("visible".to_string()),
+            ],
+        };
+        let result = strip_non_text(&msg);
+        assert!(result.is_some());
+        let stripped = result.expect("checked");
+        assert_eq!(stripped.content.len(), 1);
+        assert!(matches!(&stripped.content[0], ContentBlock::Text(t) if t == "visible"));
+    }
+
+    #[test]
+    fn retained_start_index_with_partial_turn() {
+        let msgs = vec![
+            Message::text(Role::User, "a".to_string()),
+            Message::text(Role::Assistant, "b".to_string()),
+            Message::text(Role::User, "c".to_string()),
+        ];
+        // 2 turns: turn 1 = [a, b], turn 2 = [c] (partial)
+        // retain 1 → skip turn 1, start from index 2
+        assert_eq!(retained_start_index(&msgs, 1), 2);
     }
 }

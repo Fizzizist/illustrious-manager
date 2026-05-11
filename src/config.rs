@@ -51,6 +51,10 @@ fn default_max_context_window_len() -> u32 {
     0
 }
 
+fn default_num_retained_turns() -> u32 {
+    0
+}
+
 fn default_compaction_role() -> String {
     "compaction".to_string()
 }
@@ -61,6 +65,8 @@ pub struct CompactionConfig {
     pub role: String,
     #[serde(default = "default_max_context_window_len")]
     pub max_context_window_len: u32,
+    #[serde(default = "default_num_retained_turns")]
+    pub num_retained_turns: u32,
 }
 
 impl Default for CompactionConfig {
@@ -68,6 +74,7 @@ impl Default for CompactionConfig {
         CompactionConfig {
             role: default_compaction_role(),
             max_context_window_len: default_max_context_window_len(),
+            num_retained_turns: default_num_retained_turns(),
         }
     }
 }
@@ -166,6 +173,9 @@ model = "glm-5.1"
 # Context window length threshold for auto-compaction (0 = disabled).
 # When input_tokens exceeds this value, the agent automatically compacts the conversation.
 # max_context_window_len = 0
+# Number of recent conversation turns to retain after compaction (0 = full compaction, default).
+# When set, the last N turns are kept after the summary, preserving recent context.
+# num_retained_turns = 0
 
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
@@ -712,6 +722,21 @@ mod tests {
         assert_eq!(config.max_tool_iterations, 10);
         assert_eq!(config.bash_allowlist, vec!["echo"]);
         assert_eq!(config.bash_denylist, vec!["curl"]);
+    }
+
+    #[test]
+    fn compaction_config_default_num_retained_turns_is_zero() {
+        let config = CompactionConfig::default();
+        assert_eq!(config.num_retained_turns, 0);
+    }
+
+    #[test]
+    fn compaction_config_num_retained_turns_deserializes_from_toml() {
+        let toml_str = r#"
+            num_retained_turns = 5
+        "#;
+        let config: CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.num_retained_turns, 5);
     }
 
     #[test]

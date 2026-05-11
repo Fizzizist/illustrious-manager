@@ -53,6 +53,11 @@ pub struct Agent {
     /// loops: if the previous turn already auto-compacted and the threshold is
     /// still exceeded, a warning is emitted instead.
     last_auto_compacted: Arc<AtomicBool>,
+    /// Number of recent conversation turns to retain after compaction.
+    /// When 0 (default), compaction replaces the entire history with a summary.
+    /// When > 0, the last N turns are kept after the summary, with tool-use
+    /// blocks stripped from retained messages.
+    num_retained_turns: u32,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -88,6 +93,7 @@ impl Agent {
             compaction_spawner: None,
             max_context_window_len: 0,
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
+            num_retained_turns: 0,
         }
     }
 
@@ -104,6 +110,7 @@ impl Agent {
 
     pub fn with_compaction_config(mut self, config: &crate::config::CompactionConfig) -> Self {
         self.max_context_window_len = config.max_context_window_len;
+        self.num_retained_turns = config.num_retained_turns;
         self
     }
 
