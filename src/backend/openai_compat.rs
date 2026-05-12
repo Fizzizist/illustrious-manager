@@ -595,6 +595,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[], &config);
@@ -618,6 +619,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[], &config);
@@ -867,6 +869,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
@@ -890,6 +893,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
@@ -913,6 +917,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
@@ -936,6 +941,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
+                display: None,
             }),
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
