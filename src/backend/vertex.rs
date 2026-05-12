@@ -87,12 +87,7 @@ impl VertexSseParser {
                         let index = json["index"].as_u64().ok_or_else(|| {
                             anyhow::anyhow!("content_block_start missing 'index'")
                         })?;
-                        // Signature may be present in content_block_start for some API versions
-                        let sig = json["content_block"]["signature"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        self.thinking_signatures.insert(index, sig);
+                        self.thinking_signatures.insert(index, String::new());
                     }
                     "redacted_thinking" => {
                         let index = json["index"].as_u64().ok_or_else(|| {
@@ -125,6 +120,23 @@ impl VertexSseParser {
                     "thinking_delta" => {
                         let text = json["delta"]["thinking"].as_str().unwrap_or("").to_string();
                         self.event_buffer.push(StreamEvent::ThinkingDelta(text));
+                    }
+                    "signature_delta" => {
+                        let index = json["index"].as_u64().ok_or_else(|| {
+                            anyhow::anyhow!("content_block_delta missing 'index'")
+                        })?;
+                        let chunk = json["delta"]["signature"]
+                            .as_str()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "signature_delta missing or invalid 'signature' field"
+                                )
+                            })?
+                            .to_string();
+                        self.thinking_signatures
+                            .entry(index)
+                            .or_default()
+                            .push_str(&chunk);
                     }
                     _ => {
                         let text = json["delta"]["text"].as_str().unwrap_or("").to_string();
@@ -362,11 +374,30 @@ impl LlmBackend for VertexBackend {
 fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<serde_json::Value> {
     let messages_json: Vec<serde_json::Value> = messages
         .iter()
-        .map(|m| {
-            serde_json::json!({
+        .filter_map(|m| {
+            let content: Vec<&crate::types::ContentBlock> = m
+                .content
+                .iter()
+                .filter(|block| {
+                    if let crate::types::ContentBlock::Thinking { signature, .. } = block
+                        && signature.is_empty()
+                    {
+                        eprintln!(
+                            "WARNING: dropping thinking block with empty signature from history \
+                             (corrupted session data); it cannot be replayed."
+                        );
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+            if content.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
                 "role": m.role,
-                "content": m.content,
-            })
+                "content": content,
+            }))
         })
         .collect();
 
@@ -774,23 +805,152 @@ mod tests {
     }
 
     #[test]
-    fn parser_content_block_stop_after_thinking_emits_signature() {
+    fn parser_content_block_stop_after_thinking_emits_signature_via_signature_delta() {
         let mut parser = VertexSseParser::new();
         parser
-            .parse(r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":"","signature":"sig_test"}}"#)
+            .parse(r#"{"type":"content_block_start","index":1,"content_block":{"type":"thinking","thinking":""}}"#)
             .expect("should parse thinking block_start");
+        parser
+            .parse(r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig_abc123"}}"#)
+            .expect("should parse signature_delta");
         let result = parser
             .parse(r#"{"type":"content_block_stop","index":1}"#)
             .expect("should parse block_stop");
         match result {
             Some(StreamEvent::ThinkingSignature(sig)) => {
-                assert_eq!(
-                    sig, "sig_test",
-                    "signature should match the one from content_block_start"
-                );
+                assert_eq!(sig, "sig_abc123");
             }
             other => panic!("expected ThinkingSignature, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parser_chunked_signature_delta_accumulates() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        parser
+            .parse(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"chunk1_"}}"#)
+            .expect("first signature_delta");
+        parser
+            .parse(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"chunk2"}}"#)
+            .expect("second signature_delta");
+        let result = parser
+            .parse(r#"{"type":"content_block_stop","index":0}"#)
+            .expect("block_stop");
+        match result {
+            Some(StreamEvent::ThinkingSignature(sig)) => {
+                assert_eq!(sig, "chunk1_chunk2");
+            }
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parser_round_trip_signature_survives_build_request_body() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        parser
+            .parse(r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}"#)
+            .expect("thinking_delta");
+        parser
+            .parse(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"round_trip_sig"}}"#)
+            .expect("signature_delta");
+        // Drain ThinkingDelta from buffer
+        parser.parse("").expect("drain");
+        let stop_result = parser
+            .parse(r#"{"type":"content_block_stop","index":0}"#)
+            .expect("block_stop");
+        let sig = match stop_result {
+            Some(StreamEvent::ThinkingSignature(s)) => s,
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        };
+
+        let message = Message {
+            role: crate::types::Role::Assistant,
+            content: vec![crate::types::ContentBlock::Thinking {
+                text: "Let me think".to_string(),
+                signature: sig,
+            }],
+        };
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&[message], &config).expect("build");
+        let content = &body["messages"][0]["content"];
+        let block = &content[0];
+        assert_eq!(block["type"], "thinking");
+        assert_eq!(block["signature"], "round_trip_sig");
+    }
+
+    #[test]
+    fn build_request_body_drops_empty_signature_thinking_blocks() {
+        let messages = vec![Message {
+            role: crate::types::Role::Assistant,
+            content: vec![
+                crate::types::ContentBlock::Thinking {
+                    text: "some reasoning".to_string(),
+                    signature: String::new(),
+                },
+                crate::types::ContentBlock::Text("visible text".to_string()),
+            ],
+        }];
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&messages, &config).expect("build");
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(
+            content.len(),
+            1,
+            "empty-signature thinking block must be dropped"
+        );
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn build_request_body_preserves_redacted_thinking_and_other_blocks() {
+        let messages = vec![Message {
+            role: crate::types::Role::Assistant,
+            content: vec![
+                crate::types::ContentBlock::RedactedThinking {
+                    data: "opaque_data".to_string(),
+                },
+                crate::types::ContentBlock::Thinking {
+                    text: "bad".to_string(),
+                    signature: String::new(),
+                },
+                crate::types::ContentBlock::Text("answer".to_string()),
+            ],
+        }];
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&messages, &config).expect("build");
+        let content = body["messages"][0]["content"]
+            .as_array()
+            .expect("content array");
+        assert_eq!(
+            content.len(),
+            2,
+            "only empty-signature thinking block dropped"
+        );
+        assert_eq!(content[0]["type"], "redacted_thinking");
+        assert_eq!(content[1]["type"], "text");
     }
 
     #[test]
@@ -870,5 +1030,86 @@ mod tests {
             body.get("thinking").is_none(),
             "thinking must not be in the request body when disabled"
         );
+    }
+
+    #[test]
+    fn parser_thinking_block_with_no_signature_delta_emits_empty_signature() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser
+            .parse(r#"{"type":"content_block_stop","index":0}"#)
+            .expect("block_stop");
+        match result {
+            Some(StreamEvent::ThinkingSignature(sig)) => {
+                assert!(
+                    sig.is_empty(),
+                    "no signature_delta → empty signature emitted"
+                );
+            }
+            other => panic!("expected ThinkingSignature, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parser_signature_delta_missing_index_returns_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser.parse(
+            r#"{"type":"content_block_delta","delta":{"type":"signature_delta","signature":"abc"}}"#,
+        );
+        assert!(
+            result.is_err(),
+            "signature_delta with missing index should return error"
+        );
+    }
+
+    #[test]
+    fn parser_signature_delta_non_string_signature_returns_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#)
+            .expect("block_start");
+        let result = parser.parse(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":42}}"#,
+        );
+        assert!(
+            result.is_err(),
+            "signature_delta with non-string signature should return error"
+        );
+    }
+
+    #[test]
+    fn build_request_body_drops_thinking_only_message_with_empty_signatures() {
+        let messages = vec![
+            Message {
+                role: crate::types::Role::Assistant,
+                content: vec![crate::types::ContentBlock::Thinking {
+                    text: "reasoning".to_string(),
+                    signature: String::new(),
+                }],
+            },
+            Message {
+                role: crate::types::Role::User,
+                content: vec![crate::types::ContentBlock::Text("follow-up".to_string())],
+            },
+        ];
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&messages, &config).expect("build");
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(
+            msgs.len(),
+            1,
+            "message with only empty-signature thinking blocks must be dropped"
+        );
+        assert_eq!(msgs[0]["role"], "user");
     }
 }
