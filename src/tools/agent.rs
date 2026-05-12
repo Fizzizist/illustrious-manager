@@ -191,6 +191,7 @@ impl Tool for AgentTool {
 mod tests {
     use super::*;
     use crate::agent::HeadlessOutcome;
+    use crate::config::CompactionConfig;
     use crate::config::ConfirmationMode;
     use crate::types::ContentBlock;
     use std::sync::Arc;
@@ -414,7 +415,7 @@ mod tests {
             sessions_dir: dir_path.clone(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         });
 
         // Spawner that wires ImmediateTextBackend bypassing real auth.

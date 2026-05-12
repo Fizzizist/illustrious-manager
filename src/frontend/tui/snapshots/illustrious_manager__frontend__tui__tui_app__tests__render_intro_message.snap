@@ -3,9 +3,9 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│                                                          │"
 "│  - backend: vertex                                       │"
-"│  - compaction_role: compaction                           │"
+"│  - compaction.max_context_window_len: 0                  │"
+"│  - compaction.role: compaction                           │"
 "│  - sessions_dir: /sessions                               │"
 "│  - tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"

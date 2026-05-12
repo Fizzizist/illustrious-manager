@@ -358,14 +358,22 @@ impl App {
         self.session_picker = None;
         self.pending_g = false;
     }
+}
 
+fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
+    thinking.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+impl App {
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
         }
+        let thinking_preview = extract_last_thinking_line(&self.current_thinking);
         let mut conv_area = ConversationArea::new(
             &mut self.conversation,
             !self.current_thinking.is_empty(),
+            thinking_preview,
             &self.current_response,
             0,
             self.viewport_height,
@@ -397,9 +405,11 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     let text_width = chunks[0].width.saturating_sub(2);
     app.text_width = text_width;
+    let thinking_preview = extract_last_thinking_line(&app.current_thinking);
     let mut conv_area = ConversationArea::new(
         &mut app.conversation,
         !app.current_thinking.is_empty(),
+        thinking_preview,
         &app.current_response,
         app.scroll_offset,
         chunks[0].height.saturating_sub(2),
@@ -586,6 +596,9 @@ pub fn handle_agent_event(
         AgentEvent::ThinkingReceived(text) => {
             app.current_thinking.push_str(&text);
         }
+        // AutoCompactTriggered is handled in run_app where we have access to the Agent
+        // to call compact(). It must not reach this match arm.
+        AgentEvent::AutoCompactTriggered { .. } => {}
         // CompactionComplete is handled in run_app where we have access to the Agent.
         // It must not reach this match arm.
         AgentEvent::CompactionComplete { .. } => {}
@@ -655,6 +668,7 @@ async fn run_app(
             Some(agent_event) = event_rx.recv() => {
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
                     if *is_error {
+                        agent.reset_auto_compact_flag();
                         app.conversation.push(ConversationEntry::new(
                             ConversationRole::Error,
                             summary.clone(),
@@ -681,6 +695,27 @@ async fn run_app(
                     app.set_state(AppState::Input);
                     app.scroll_offset = 0;
                     app.compaction_task = None;
+                } else if let AgentEvent::AutoCompactTriggered { current_tokens, threshold } = &agent_event {
+                    app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Info,
+                        format!(
+                            "Auto-compact triggered: context ({} tokens) exceeded threshold ({} tokens)",
+                            current_tokens, threshold
+                        ),
+                    ));
+                    app.set_state(AppState::Compacting);
+                    app.scroll_offset = 0;
+                    let compact_agent = agent.clone();
+                    let compact_tx = event_tx.clone();
+                    let compact_task = tokio::spawn(async move {
+                        let result = compact_agent.compact().await;
+                        let event = match result {
+                            Ok(summary) => AgentEvent::CompactionComplete { summary, is_error: false },
+                            Err(err) => AgentEvent::CompactionComplete { summary: err, is_error: true },
+                        };
+                        let _ = compact_tx.send(event).await;
+                    });
+                    app.compaction_task = Some(compact_task);
                 } else {
                     handle_agent_event(&mut app, agent_event, logger.as_mut())?;
                 }
@@ -747,6 +782,10 @@ async fn run_app(
                                     SessionPickerAction::Select(session_id) => {
                                         app.session_picker = None;
                                         app.set_state(AppState::Input);
+                                        // Abort any in-progress compaction before switching sessions
+                                        if let Some(handle) = app.compaction_task.take() {
+                                            handle.abort();
+                                        }
                                         // Checkpoint current session WAL before switching
                                         if let Err(e) = agent.checkpoint_session().await {
                                             app.conversation.push(ConversationEntry::new(
@@ -875,6 +914,13 @@ async fn run_app(
                             {
                                 break;
                             }
+                            if let KeyEvent { code: KeyCode::Esc, .. } = key {
+                                if let Some(handle) = app.compaction_task.take() {
+                                    handle.abort();
+                                }
+                                app.set_state(AppState::Input);
+                                app.scroll_offset = 0;
+                            }
                         },
                         _ => {
                             if let
@@ -954,6 +1000,7 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     #[test]
     fn scroll_offset_starts_at_zero() {
@@ -2073,7 +2120,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));
@@ -2689,6 +2736,28 @@ mod tests {
     }
 
     #[test]
+    fn handle_agent_event_auto_compact_triggered_is_noop() {
+        // AutoCompactTriggered is handled in run_app, not in handle_agent_event.
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        assert!(app.conversation.is_empty());
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::AutoCompactTriggered {
+                current_tokens: 60000,
+                threshold: 50000,
+            },
+            None,
+        )
+        .expect("handle event should not error");
+
+        assert!(
+            app.conversation.is_empty(),
+            "handle_agent_event should not push a conversation entry for AutoCompactTriggered"
+        );
+    }
+
+    #[test]
     fn compacting_state_clears_cancel_token_and_confirmation_tx() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_state(AppState::Compacting);
@@ -2813,5 +2882,36 @@ mod tests {
             app.current_thinking.is_empty(),
             "current_thinking should be cleared on Interrupted"
         );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_basic() {
+        assert_eq!(
+            extract_last_thinking_line("line1\nline2\nline3"),
+            Some("line3")
+        );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_trailing_newlines() {
+        assert_eq!(
+            extract_last_thinking_line("line1\nline2\n\n  \n"),
+            Some("line2")
+        );
+    }
+
+    #[test]
+    fn extract_last_thinking_line_empty() {
+        assert_eq!(extract_last_thinking_line(""), None);
+    }
+
+    #[test]
+    fn extract_last_thinking_line_whitespace_only() {
+        assert_eq!(extract_last_thinking_line("   \n  \n  "), None);
+    }
+
+    #[test]
+    fn extract_last_thinking_line_single_line() {
+        assert_eq!(extract_last_thinking_line("only line"), Some("only line"));
     }
 }

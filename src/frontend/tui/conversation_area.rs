@@ -207,14 +207,61 @@ fn render_current_response_lines(current_response: &str, text_width: u16) -> Vec
     )
 }
 
-fn thinking_indicator_lines() -> Vec<Line<'static>> {
-    vec![
-        Line::from(Span::styled(
-            "[Thinking]:",
-            Style::default().fg(ConversationRole::Thinking.color()),
-        )),
-        Line::from(""),
-    ]
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let total_width = UnicodeWidthStr::width(s);
+    if total_width <= max_width {
+        return s.to_string();
+    }
+
+    let prefix_width = 3;
+    let available = max_width.saturating_sub(prefix_width);
+
+    if available == 0 {
+        return "...".to_string();
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut tail_width = 0usize;
+    let mut tail_start = chars.len();
+
+    for (i, &ch) in chars.iter().enumerate().rev() {
+        let ch_width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if tail_width + ch_width > available {
+            break;
+        }
+        tail_width += ch_width;
+        tail_start = i;
+    }
+
+    let tail: String = chars[tail_start..].iter().collect();
+    format!("...{tail}")
+}
+
+fn thinking_indicator_lines(preview: Option<&str>, text_width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "[Thinking]:",
+        Style::default().fg(ConversationRole::Thinking.color()),
+    ))];
+
+    if let Some(preview_text) = preview
+        && !preview_text.trim().is_empty()
+    {
+        let max_width = text_width.saturating_sub(2) as usize;
+        let truncated = truncate_to_width(preview_text, max_width);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(truncated, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines
 }
 
 fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
@@ -233,6 +280,7 @@ fn estimate_wrapped_count(lines: &[Line<'_>], text_width: u16) -> u16 {
 pub struct ConversationArea<'a> {
     entries: &'a mut [ConversationEntry],
     is_thinking: bool,
+    thinking_preview: Option<String>,
     current_response: &'a str,
     scroll_offset: u16,
     viewport_height: u16,
@@ -242,6 +290,7 @@ impl<'a> ConversationArea<'a> {
     pub fn new(
         entries: &'a mut [ConversationEntry],
         is_thinking: bool,
+        thinking_preview: Option<&str>,
         current_response: &'a str,
         scroll_offset: u16,
         viewport_height: u16,
@@ -249,6 +298,7 @@ impl<'a> ConversationArea<'a> {
         Self {
             entries,
             is_thinking,
+            thinking_preview: thinking_preview.map(|s| s.to_string()),
             current_response,
             scroll_offset,
             viewport_height,
@@ -266,7 +316,15 @@ impl<'a> ConversationArea<'a> {
         let entry_counts = self.compute_entry_counts(text_width);
         let total_entries: u16 = entry_counts.iter().sum();
 
-        let thinking_count = if self.is_thinking { 2u16 } else { 0u16 };
+        let thinking_count = if self.is_thinking {
+            let has_preview = self
+                .thinking_preview
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+            if has_preview { 3u16 } else { 2u16 }
+        } else {
+            0u16
+        };
 
         let response_count = if self.current_response.is_empty() {
             0u16
@@ -288,11 +346,19 @@ impl<'a> ConversationArea<'a> {
         let total_entries: u16 = entry_counts.iter().sum();
 
         let thinking_lines = if self.is_thinking {
-            thinking_indicator_lines()
+            thinking_indicator_lines(self.thinking_preview.as_deref(), text_width)
         } else {
             Vec::new()
         };
-        let thinking_count = if self.is_thinking { 2u16 } else { 0u16 };
+        let thinking_count = if self.is_thinking {
+            let has_preview = self
+                .thinking_preview
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+            if has_preview { 3u16 } else { 2u16 }
+        } else {
+            0u16
+        };
 
         let response_lines = if self.current_response.is_empty() {
             Vec::new()
@@ -433,6 +499,7 @@ pub fn tool_use_display_content(name: &str, input: &serde_json::Value) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     #[test]
     fn conversation_role_labels() {
@@ -474,7 +541,7 @@ mod tests {
     #[test]
     fn entry_lines_empty_conversation() {
         let entries: &mut [ConversationEntry] = &mut [];
-        let area = ConversationArea::new(entries, false, "", 0, 10);
+        let area = ConversationArea::new(entries, false, None, "", 0, 10);
         assert!(area.entries.is_empty());
     }
 
@@ -486,20 +553,20 @@ mod tests {
         ];
         let total_lines: usize = entries.iter().map(|e| e.lines().len()).sum();
         assert_eq!(total_lines, 6);
-        let _ = ConversationArea::new(&mut entries, false, "", 0, 10);
+        let _ = ConversationArea::new(&mut entries, false, None, "", 0, 10);
     }
 
     #[test]
     fn entry_lines_with_current_response() {
         let mut entries: Vec<ConversationEntry> = Vec::new();
-        let area = ConversationArea::new(&mut entries, false, "streaming text", 0, 10);
+        let area = ConversationArea::new(&mut entries, false, None, "streaming text", 0, 10);
         assert!(!area.current_response.is_empty());
     }
 
     #[test]
     fn entry_lines_with_current_thinking_and_response() {
         let mut entries: Vec<ConversationEntry> = Vec::new();
-        let area = ConversationArea::new(&mut entries, true, "streaming text", 0, 10);
+        let area = ConversationArea::new(&mut entries, true, None, "streaming text", 0, 10);
         assert!(area.is_thinking);
         assert!(!area.current_response.is_empty());
     }
@@ -512,7 +579,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
-                let mut area = ConversationArea::new(&mut entries, true, "the answer", 0, 18);
+                let mut area = ConversationArea::new(&mut entries, true, None, "the answer", 0, 18);
                 area.render(frame, rect, 56);
             })
             .expect("draw");
@@ -539,7 +606,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
-                let mut area = ConversationArea::new(&mut entries, true, "", 0, 18);
+                let mut area = ConversationArea::new(&mut entries, true, None, "", 0, 18);
                 area.render(frame, rect, 56);
             })
             .expect("draw");
@@ -569,7 +636,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -638,7 +705,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -657,7 +724,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -673,8 +740,14 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget =
-                    ConversationArea::new(&mut entries, false, "Streaming response...", 0, 20);
+                let mut area_widget = ConversationArea::new(
+                    &mut entries,
+                    false,
+                    None,
+                    "Streaming response...",
+                    0,
+                    20,
+                );
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -687,7 +760,7 @@ mod tests {
         let mut entries: Vec<ConversationEntry> = (0..40)
             .map(|i| ConversationEntry::new(ConversationRole::User, format!("line {i}")))
             .collect();
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, 10);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 10);
         let max = area.max_scroll(58);
         assert!(max > 0, "should have scrollable content");
     }
@@ -698,7 +771,7 @@ mod tests {
             ConversationRole::User,
             "short".to_string(),
         )];
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, 100);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 100);
         let max = area.max_scroll(58);
         assert_eq!(max, 0);
     }
@@ -721,7 +794,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -740,7 +813,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -759,7 +832,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -778,7 +851,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -798,7 +871,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -818,7 +891,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -838,7 +911,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -859,7 +932,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, table, 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, table, 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -883,7 +957,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -905,7 +979,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -931,7 +1005,7 @@ mod tests {
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,
@@ -942,7 +1016,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -961,7 +1035,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1001,7 +1075,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1060,7 +1134,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 10);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 8);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 8);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1078,7 +1152,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 12);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 20, 10);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 20, 10);
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1095,7 +1169,7 @@ mod tests {
         )];
         let viewport = 10u16;
         let text_width = 30u16;
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let max = area.max_scroll(text_width);
 
         let paragraph = Paragraph::new(entries[0].lines().to_vec()).wrap(Wrap { trim: false });
@@ -1123,7 +1197,7 @@ mod tests {
             ));
         }
 
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let max = area.max_scroll(text_width);
 
         let all_lines: Vec<Line<'static>> =
@@ -1149,7 +1223,7 @@ mod tests {
             ));
         }
 
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let max = area.max_scroll(text_width);
 
         let backend = ratatui::backend::TestBackend::new(60, viewport + 2);
@@ -1158,7 +1232,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                 let mut scrolled_area =
-                    ConversationArea::new(&mut entries, false, "", max, viewport);
+                    ConversationArea::new(&mut entries, false, None, "", max, viewport);
                 scrolled_area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1187,7 +1261,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
-                let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+                let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
                 area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1212,7 +1286,7 @@ mod tests {
             long_text,
         )];
 
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let max = area.max_scroll(text_width);
         assert!(max > 0, "should have scrollable content");
 
@@ -1225,7 +1299,8 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
-                    let mut area = ConversationArea::new(&mut entries, false, "", scroll, viewport);
+                    let mut area =
+                        ConversationArea::new(&mut entries, false, None, "", scroll, viewport);
                     area.render(frame, rect, text_width);
                 })
                 .expect("draw");
@@ -1263,7 +1338,7 @@ mod tests {
             .collect();
 
         // Verify entries exist so the boundary scenario is meaningful.
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let entry_only_max = area.max_scroll(text_width);
         assert!(
             entry_only_max == 0,
@@ -1284,7 +1359,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
-                let mut area = ConversationArea::new(&mut entries, false, &streaming, 0, viewport);
+                let mut area =
+                    ConversationArea::new(&mut entries, false, None, &streaming, 0, viewport);
                 area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1307,6 +1383,7 @@ mod tests {
                 let mut area = ConversationArea::new(
                     &mut entries,
                     false,
+                    None,
                     &streaming,
                     scroll_up_amount,
                     viewport,
@@ -1339,7 +1416,7 @@ mod tests {
             ConversationEntry::new(ConversationRole::User, "final message".to_string()),
         ];
 
-        let mut area = ConversationArea::new(&mut entries, false, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
         let max = area.max_scroll(text_width);
         assert!(
             max > viewport,
@@ -1356,7 +1433,8 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
-                    let mut area = ConversationArea::new(entries, false, "", scroll, viewport);
+                    let mut area =
+                        ConversationArea::new(entries, false, None, "", scroll, viewport);
                     area.render(frame, rect, text_width);
                 })
                 .expect("draw");
@@ -1385,7 +1463,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 40, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, "", 0, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
                 area_widget.render(frame, rect, 38);
             })
             .expect("draw");
@@ -1508,6 +1586,157 @@ mod tests {
         assert_eq!(
             render_at_80, render_at_80_again,
             "rebuilding back to width 80 should produce identical content"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_short_string() {
+        let result = truncate_to_width("hello", 10);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn truncate_to_width_long_string() {
+        let result = truncate_to_width("the user is asking me to tell a joke", 20);
+        assert!(
+            result.starts_with("..."),
+            "should start with '...': {result}"
+        );
+        use unicode_width::UnicodeWidthStr;
+        let width = UnicodeWidthStr::width(result.as_str());
+        assert!(width <= 20, "display width {width} should be <= 20");
+        assert!(
+            result.contains("joke"),
+            "tail should be preserved, got: {result}"
+        );
+    }
+
+    #[test]
+    fn truncate_to_width_multibyte() {
+        let result = truncate_to_width("hello 🦀🦀🦀 world", 12);
+        assert!(
+            std::str::from_utf8(result.as_bytes()).is_ok(),
+            "result should be valid UTF-8"
+        );
+        use unicode_width::UnicodeWidthStr;
+        let width = UnicodeWidthStr::width(result.as_str());
+        assert!(width <= 12, "display width {width} should be <= 12");
+    }
+
+    #[test]
+    fn truncate_to_width_zero_max_width() {
+        let result = truncate_to_width("hello", 0);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn truncate_to_width_exact_fit() {
+        let result = truncate_to_width("hello", 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn thinking_indicator_lines_with_preview() {
+        let lines = thinking_indicator_lines(Some("preview text"), 80);
+        assert_eq!(lines.len(), 3, "should have 3 lines with preview");
+        let label_line = format!("{:?}", lines[0]);
+        assert!(
+            label_line.contains("[Thinking]:"),
+            "first line should contain [Thinking]: label, got: {label_line}"
+        );
+        let preview_line = &lines[1];
+        let preview_text: String = preview_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            preview_text.starts_with("  "),
+            "preview line should start with '  ' indent, got: {preview_text}"
+        );
+        assert!(
+            preview_text.contains("preview text"),
+            "preview line should contain the preview text, got: {preview_text}"
+        );
+        let has_dark_gray = preview_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::DarkGray));
+        assert!(has_dark_gray, "preview line should have DarkGray style");
+        assert!(
+            lines[2].spans.is_empty() || lines[2].spans.iter().all(|s| s.content.is_empty()),
+            "last line should be blank"
+        );
+    }
+
+    #[test]
+    fn thinking_indicator_lines_without_preview() {
+        let lines = thinking_indicator_lines(None, 80);
+        assert_eq!(lines.len(), 2, "should have 2 lines without preview");
+        let label_line = format!("{:?}", lines[0]);
+        assert!(
+            label_line.contains("[Thinking]:"),
+            "first line should contain [Thinking]: label, got: {label_line}"
+        );
+        assert!(
+            lines[1].spans.is_empty() || lines[1].spans.iter().all(|s| s.content.is_empty()),
+            "second line should be blank"
+        );
+    }
+
+    #[test]
+    fn thinking_indicator_lines_empty_preview() {
+        let lines = thinking_indicator_lines(Some(""), 80);
+        assert_eq!(lines.len(), 2, "empty preview should fall back to 2 lines");
+
+        let lines = thinking_indicator_lines(Some("   "), 80);
+        assert_eq!(
+            lines.len(),
+            2,
+            "whitespace-only preview should fall back to 2 lines"
+        );
+    }
+
+    #[test]
+    fn render_with_thinking_preview() {
+        let mut entries: Vec<ConversationEntry> = Vec::new();
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
+                let mut area = ConversationArea::new(
+                    &mut entries,
+                    true,
+                    Some("analyzing the request"),
+                    "",
+                    0,
+                    18,
+                );
+                area.render(frame, rect, 56);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_with_thinking_preview", terminal.backend());
+    }
+
+    #[test]
+    fn max_scroll_includes_thinking_preview_line() {
+        let mut entries: Vec<ConversationEntry> = (0..6)
+            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .collect();
+
+        let mut area_no_preview = ConversationArea::new(&mut entries, true, None, "", 0, 10);
+        let max_no_preview = area_no_preview.max_scroll(58);
+
+        let mut area_with_preview =
+            ConversationArea::new(&mut entries, true, Some("test preview"), "", 0, 10);
+        let max_with_preview = area_with_preview.max_scroll(58);
+
+        assert_eq!(
+            max_with_preview,
+            max_no_preview + 1,
+            "thinking preview should add exactly 1 to max_scroll"
         );
     }
 }
