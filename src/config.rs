@@ -1733,6 +1733,54 @@ mod tests {
     }
 
     #[test]
+    fn thinking_section_with_display_summarized_parses() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "adaptive" }
+            display = "summarized"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(
+            config.thinking.expect("thinking present").display,
+            Some(crate::types::ThinkingDisplay::Summarized)
+        );
+    }
+
+    #[test]
+    fn thinking_section_with_display_omitted_parses() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "adaptive" }
+            display = "omitted"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(
+            config.thinking.expect("thinking present").display,
+            Some(crate::types::ThinkingDisplay::Omitted)
+        );
+    }
+
+    #[test]
+    fn thinking_section_without_display_defaults_to_none() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "adaptive" }
+            enabled = true
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(config.thinking.expect("thinking present").display.is_none());
+    }
+
+    #[test]
     fn compaction_role_defaults_to_compaction() {
         let toml_str = r#"
             backend = "vertex"
