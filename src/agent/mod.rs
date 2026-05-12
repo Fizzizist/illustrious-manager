@@ -18,6 +18,7 @@ use futures::channel::mpsc;
 use futures::future::join_all;
 
 mod compact;
+pub(crate) mod compact_helpers;
 mod spawner;
 
 pub use spawner::{
@@ -3406,7 +3407,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_with_retained_turns_rebuilds_history_correctly() {
-        use crate::compact_helpers::{retained_start_index, retained_turns};
+        use crate::agent::compact_helpers::{retained_start_index, retained_turns};
 
         let session = test_session_arc().await;
 
@@ -3502,7 +3503,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_with_retained_turns_strips_tool_use_from_retained() {
-        use crate::compact_helpers::retained_turns;
+        use crate::agent::compact_helpers::retained_turns;
 
         let session = test_session_arc().await;
 

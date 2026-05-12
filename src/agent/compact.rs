@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use futures::channel::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 
+use super::compact_helpers::{retained_start_index, strip_non_text};
 use super::{Agent, AgentSpawner, lock};
-use crate::compact_helpers::{retained_start_index, strip_non_text};
 use crate::session::Session;
 use crate::types::{AgentEvent, ContentBlock, Message};
 
@@ -254,7 +254,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compact_helpers::count_turns;
+    use crate::agent::compact_helpers::count_turns;
     use crate::types::{ContentBlock, Role};
 
     #[test]

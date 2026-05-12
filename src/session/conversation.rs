@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 
-use crate::compact_helpers::{count_turns, retained_turns};
+use crate::agent::compact_helpers::{count_turns, retained_turns};
 use crate::types::{ContentBlock, Message, Role};
 
 use super::Session;
