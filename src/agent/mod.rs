@@ -191,6 +191,11 @@ impl Agent {
     }
 
     #[cfg(test)]
+    pub fn num_retained_turns_for_test(&self) -> u32 {
+        self.num_retained_turns
+    }
+
+    #[cfg(test)]
     pub fn confirmation_mode_for_test(&self) -> &ConfirmationMode {
         &self.confirmation_mode
     }
@@ -3397,6 +3402,235 @@ mod tests {
         );
     }
 
+    // ── Compaction with retained turns integration tests ────────────────
+
+    #[tokio::test]
+    async fn compact_with_retained_turns_rebuilds_history_correctly() {
+        use crate::compact_helpers::{retained_start_index, retained_turns};
+
+        let session = test_session_arc().await;
+
+        // Insert 3 turns into the session
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi there".to_string()),
+            Message::text(Role::User, "how are you".to_string()),
+            Message::text(Role::Assistant, "fine".to_string()),
+            Message::text(Role::User, "goodbye".to_string()),
+            Message::text(Role::Assistant, "see you".to_string()),
+        ];
+        for msg in &messages {
+            session
+                .lock()
+                .await
+                .conversation()
+                .insert_message(msg)
+                .await
+                .expect("insert");
+        }
+
+        let summary_text = "[Compacted] Summary of conversation";
+        let summary_msg = Message::text(Role::User, summary_text.to_string());
+
+        // Compact with 1 retained turn via DB
+        let result = session
+            .lock()
+            .await
+            .conversation()
+            .compact_retaining(&summary_msg, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result, "compact_retaining should perform compaction");
+
+        // Load DB history
+        let db_history = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .expect("load DB history");
+
+        // Compute expected in-memory history using shared helpers
+        let retained_start = retained_start_index(&messages, 1);
+        let expected_retained = retained_turns(&messages, 1);
+
+        // Expected history: [summary, retained...]
+        let mut expected: Vec<Message> = vec![summary_msg.clone()];
+        expected.extend(expected_retained.clone());
+
+        // Verify DB matches expected
+        assert_eq!(
+            db_history.len(),
+            expected.len(),
+            "DB history length mismatch"
+        );
+        assert_eq!(db_history[0].role, Role::User);
+        assert!(
+            matches!(&db_history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]")),
+            "first DB entry should be summary"
+        );
+
+        // Verify retained messages have only text blocks
+        for (i, msg) in db_history.iter().skip(1).enumerate() {
+            assert!(
+                msg.content
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::Text(_))),
+                "retained message {} should only have text blocks",
+                i
+            );
+        }
+
+        // Verify the compacted messages (before retained_start) are NOT in DB
+        let compacted = &messages[..retained_start];
+        for compacted_msg in compacted {
+            let found = db_history.iter().any(|db_msg| {
+                db_msg.content.iter().any(|db_b| {
+                    compacted_msg.content.iter().any(|c_b| {
+                        if let (ContentBlock::Text(a), ContentBlock::Text(b)) = (c_b, db_b) {
+                            a == b
+                        } else {
+                            false
+                        }
+                    })
+                })
+            });
+            assert!(!found, "compacted message should not appear in DB history");
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_with_retained_turns_strips_tool_use_from_retained() {
+        use crate::compact_helpers::retained_turns;
+
+        let session = test_session_arc().await;
+
+        // turn 1: user + assistant (text only, will be compacted)
+        // turn 2: user text + assistant with tool_use and text
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text("run it".to_string())],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                    ContentBlock::Text("done".to_string()),
+                ],
+            },
+        ];
+        for msg in &messages {
+            session
+                .lock()
+                .await
+                .conversation()
+                .insert_message(msg)
+                .await
+                .expect("insert");
+        }
+
+        let summary_msg = Message::text(Role::User, "[Compacted] Summary".to_string());
+
+        let result = session
+            .lock()
+            .await
+            .conversation()
+            .compact_retaining(&summary_msg, 1)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result);
+
+        let db_history = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        // Expected: summary + user "run it" + assistant "done" (tool_use stripped)
+        let expected_retained = retained_turns(&messages, 1);
+        assert_eq!(
+            expected_retained.len(),
+            2,
+            "should retain 2 messages after stripping"
+        );
+
+        assert_eq!(db_history.len(), 3, "summary + 2 retained = 3");
+        assert!(
+            matches!(&db_history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+        assert!(matches!(&db_history[1].content[0], ContentBlock::Text(t) if t == "run it"));
+        assert!(matches!(&db_history[2].content[0], ContentBlock::Text(t) if t == "done"));
+
+        // Verify no tool-use blocks in retained messages
+        for msg in db_history.iter().skip(1) {
+            assert!(
+                msg.content
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::Text(_))),
+                "retained messages must only contain text blocks"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_with_zero_retained_turns_behaves_as_before() {
+        let session = test_session_arc().await;
+
+        let messages = vec![
+            Message::text(Role::User, "hello".to_string()),
+            Message::text(Role::Assistant, "hi".to_string()),
+            Message::text(Role::User, "how are you".to_string()),
+            Message::text(Role::Assistant, "fine".to_string()),
+        ];
+        for msg in &messages {
+            session
+                .lock()
+                .await
+                .conversation()
+                .insert_message(msg)
+                .await
+                .expect("insert");
+        }
+
+        let summary_msg = Message::text(Role::User, "[Compacted] Summary".to_string());
+
+        let result = session
+            .lock()
+            .await
+            .conversation()
+            .compact_retaining(&summary_msg, 0)
+            .await
+            .expect("compact_retaining should succeed");
+        assert!(result);
+
+        let db_history = session
+            .lock()
+            .await
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+
+        assert_eq!(
+            db_history.len(),
+            1,
+            "with 0 retained turns, only summary should remain"
+        );
+        assert!(
+            matches!(&db_history[0].content[0], ContentBlock::Text(t) if t.contains("[Compacted]"))
+        );
+    }
+
     // ── Auto-compact threshold tests ─────────────────────────────────────
 
     fn text_with_usage_response(
@@ -3691,6 +3925,7 @@ mod tests {
         };
         let compaction_config = crate::config::CompactionConfig {
             max_context_window_len: 42_000,
+            num_retained_turns: 3,
             ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
@@ -3701,6 +3936,11 @@ mod tests {
             agent.max_context_window_len_for_test(),
             42_000,
             "max_context_window_len should be set from compaction_config"
+        );
+        assert_eq!(
+            agent.num_retained_turns_for_test(),
+            3,
+            "num_retained_turns should be set from compaction_config"
         );
     }
 

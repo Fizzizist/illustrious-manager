@@ -1,77 +1,9 @@
 use anyhow::{Context, Result, bail};
 
+use crate::compact_helpers::{count_turns, retained_turns};
 use crate::types::{ContentBlock, Message, Role};
 
 use super::Session;
-
-/// Count the number of turns in a message history.
-///
-/// A "turn" starts with a user message and includes all immediately following
-/// assistant messages. If the history starts with assistant messages (orphan),
-/// they are treated as a single partial turn. If the last message is a user
-/// message with no assistant reply yet, that counts as a partial turn.
-fn count_turns(messages: &[Message]) -> usize {
-    if messages.is_empty() {
-        return 0;
-    }
-
-    let mut turns = 0;
-    let mut i = 0;
-
-    while i < messages.len() {
-        turns += 1;
-        i += 1;
-        while i < messages.len() && messages[i].role == Role::Assistant {
-            i += 1;
-        }
-    }
-
-    turns
-}
-
-/// Extract the last `n` turns from the history, returning the messages
-/// that belong to those turns with non-text blocks stripped.
-fn retained_turns(messages: &[Message], n: usize) -> Vec<Message> {
-    if n == 0 || messages.is_empty() {
-        return Vec::new();
-    }
-
-    let total = count_turns(messages);
-    let skip_turns = total.saturating_sub(n);
-    let mut turn_boundaries: Vec<usize> = Vec::new();
-    let mut i = 0;
-
-    while i < messages.len() {
-        turn_boundaries.push(i);
-        i += 1;
-        while i < messages.len() && messages[i].role == Role::Assistant {
-            i += 1;
-        }
-    }
-
-    let start = turn_boundaries[skip_turns];
-    let retained: Vec<Message> = messages[start..]
-        .iter()
-        .filter_map(|msg| {
-            let stripped: Vec<ContentBlock> = msg
-                .content
-                .iter()
-                .filter(|b| matches!(b, ContentBlock::Text(_)))
-                .cloned()
-                .collect();
-            if stripped.is_empty() {
-                None
-            } else {
-                Some(Message {
-                    role: msg.role.clone(),
-                    content: stripped,
-                })
-            }
-        })
-        .collect();
-
-    retained
-}
 
 pub struct ConversationRepo<'a> {
     session: &'a Session,
@@ -220,7 +152,11 @@ impl<'a> ConversationRepo<'a> {
             return Ok(false);
         }
 
-        let retained_messages = retained_turns(&history, retain_count as usize);
+        let retained_messages = if retain_count == 0 {
+            Vec::new()
+        } else {
+            retained_turns(&history, retain_count as usize)
+        };
 
         self.session
             .conn

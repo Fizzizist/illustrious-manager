@@ -4,10 +4,10 @@ use std::sync::{Arc, Mutex};
 use futures::channel::mpsc;
 use tokio::sync::Mutex as TokioMutex;
 
+use super::{Agent, AgentSpawner, lock};
+use crate::compact_helpers::{retained_start_index, strip_non_text};
 use crate::session::Session;
 use crate::types::{AgentEvent, ContentBlock, Message};
-
-use super::{Agent, AgentSpawner, lock};
 
 /// Check whether auto-compaction should be triggered based on peak input
 /// tokens and the configured threshold. Emits `AutoCompactTriggered` or
@@ -38,67 +38,6 @@ pub(crate) fn check_auto_compact(
         }
     } else {
         last_auto_compacted.store(false, Ordering::SeqCst);
-    }
-}
-
-/// Count the number of turns in a message slice.
-/// A "turn" starts with a user message and includes all immediately following
-/// assistant messages. Orphan assistant messages at the start form their own turn.
-fn count_turns(messages: &[Message]) -> usize {
-    if messages.is_empty() {
-        return 0;
-    }
-    let mut turns = 0;
-    let mut i = 0;
-    while i < messages.len() {
-        turns += 1;
-        i += 1;
-        while i < messages.len() && messages[i].role == crate::types::Role::Assistant {
-            i += 1;
-        }
-    }
-    turns
-}
-
-/// Find the start index of the last `n` turns in the message slice.
-/// Returns `messages.len()` if there are fewer than `n` turns (i.e., all
-/// messages are retained).
-fn retained_start_index(messages: &[Message], n: usize) -> usize {
-    if n == 0 || messages.is_empty() {
-        return 0;
-    }
-    let total = count_turns(messages);
-    let skip = total.saturating_sub(n);
-    let mut turn_start = 0;
-    let mut turns_seen = 0;
-    let mut i = 0;
-    while i < messages.len() && turns_seen < skip {
-        turn_start = i + 1;
-        turns_seen += 1;
-        i += 1;
-        while i < messages.len() && messages[i].role == crate::types::Role::Assistant {
-            turn_start = i + 1;
-            i += 1;
-        }
-    }
-    turn_start
-}
-
-/// Strip non-text blocks from a message, returning `None` if the result is empty.
-fn strip_non_text(msg: &Message) -> Option<Message> {
-    let stripped: Vec<ContentBlock> = msg
-        .content
-        .iter()
-        .filter(|b| matches!(b, ContentBlock::Text(_)))
-        .cloned()
-        .collect();
-    if stripped.is_empty() {
-        None
-    } else {
-        Some(Message {
-            role: msg.role.clone(),
-            content: stripped,
-        })
     }
 }
 
@@ -315,6 +254,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compact_helpers::count_turns;
     use crate::types::{ContentBlock, Role};
 
     #[test]
