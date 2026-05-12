@@ -407,17 +407,23 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
         if !tc.enabled {
             return None;
         }
+        let display = match tc.display {
+            Some(crate::types::ThinkingDisplay::Omitted) => "omitted",
+            _ => "summarized",
+        };
         match &tc.mode {
             crate::types::ThinkingMode::Budget { tokens } => {
                 let budget = *tokens as u64;
                 max_tokens += budget;
                 Some(serde_json::json!({
                     "type": "enabled",
-                    "budget_tokens": budget
+                    "budget_tokens": budget,
+                    "display": display
                 }))
             }
             crate::types::ThinkingMode::Adaptive => Some(serde_json::json!({
-                "type": "adaptive"
+                "type": "adaptive",
+                "display": display
             })),
         }
     });
@@ -962,6 +968,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
+                display: None,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -978,6 +985,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
+                display: None,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -993,6 +1001,7 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
+                display: None,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
@@ -1023,6 +1032,105 @@ mod tests {
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: false,
+                display: None,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must not be in the request body when disabled"
+        );
+    }
+
+    #[test]
+    fn build_request_body_adaptive_thinking_defaults_display_to_summarized() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: true,
+                display: None,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn build_request_body_budget_thinking_defaults_display_to_summarized() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
+                enabled: true,
+                display: None,
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn build_request_body_thinking_explicit_omitted_serializes_omitted() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: true,
+                display: Some(crate::types::ThinkingDisplay::Omitted),
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["display"], "omitted");
+    }
+
+    #[test]
+    fn build_request_body_thinking_explicit_summarized_serializes_summarized() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: true,
+                display: Some(crate::types::ThinkingDisplay::Summarized),
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["display"], "summarized");
+    }
+
+    #[test]
+    fn build_request_body_no_thinking_has_no_display_field() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must not be in the request body when None"
+        );
+    }
+
+    #[test]
+    fn build_request_body_disabled_thinking_has_no_display_field() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Adaptive,
+                enabled: false,
+                display: None,
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");

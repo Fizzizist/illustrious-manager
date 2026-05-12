@@ -28,12 +28,22 @@ pub enum ThinkingMode {
     Adaptive,
 }
 
+/// Controls whether the API emits thinking content in the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingDisplay {
+    Summarized,
+    Omitted,
+}
+
 /// Thinking configuration for requests that support extended thinking.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     pub mode: ThinkingMode,
     #[serde(default = "default_thinking_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub display: Option<ThinkingDisplay>,
 }
 
 fn default_thinking_enabled() -> bool {
@@ -45,6 +55,7 @@ impl Default for ThinkingConfig {
         Self {
             mode: ThinkingMode::Adaptive,
             enabled: true,
+            display: None,
         }
     }
 }
@@ -762,6 +773,7 @@ mod tests {
         let config = ThinkingConfig::default();
         assert_eq!(config.enabled, true);
         assert_eq!(config.mode, ThinkingMode::Adaptive);
+        assert!(config.display.is_none());
     }
 
     #[test]
@@ -804,6 +816,7 @@ mod tests {
         let config = ThinkingConfig {
             mode: ThinkingMode::Budget { tokens: 16384 },
             enabled: true,
+            display: None,
         };
         let toml_str = toml::to_string(&config).expect("serialize to TOML");
         let deserialized: ThinkingConfig = toml::from_str(&toml_str).expect("parse from TOML");
@@ -826,5 +839,22 @@ mod tests {
         if let AgentEvent::ThinkingReceived(text) = event {
             assert_eq!(text, "Let me reason about this.");
         }
+    }
+
+    #[test]
+    fn thinking_display_summarized_serializes_as_snake_case() {
+        let json = serde_json::to_string(&ThinkingDisplay::Summarized).expect("serialize");
+        assert_eq!(json, r#""summarized""#);
+    }
+
+    #[test]
+    fn thinking_display_omitted_serializes_as_snake_case() {
+        let json = serde_json::to_string(&ThinkingDisplay::Omitted).expect("serialize");
+        assert_eq!(json, r#""omitted""#);
+    }
+
+    #[test]
+    fn thinking_config_default_display_is_none() {
+        assert!(ThinkingConfig::default().display.is_none());
     }
 }
