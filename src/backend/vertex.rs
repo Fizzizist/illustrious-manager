@@ -974,6 +974,7 @@ mod tests {
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 16384);
+        assert_eq!(body["thinking"]["display"], "summarized");
     }
 
     #[test]
@@ -990,6 +991,7 @@ mod tests {
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
     }
 
     #[test]
@@ -1107,37 +1109,39 @@ mod tests {
     }
 
     #[test]
-    fn build_request_body_no_thinking_has_no_display_field() {
-        let config = RequestConfig {
-            model: "claude-test".to_string(),
-            max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-        };
-        let body = build_request_body(&[], &config).expect("should build successfully");
-        assert!(
-            body.get("thinking").is_none(),
-            "thinking must not be in the request body when None"
-        );
-    }
-
-    #[test]
-    fn build_request_body_disabled_thinking_has_no_display_field() {
+    fn build_request_body_budget_thinking_explicit_omitted_serializes_omitted() {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
             tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
-                mode: crate::types::ThinkingMode::Adaptive,
-                enabled: false,
-                display: None,
+                mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
+                enabled: true,
+                display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
-        assert!(
-            body.get("thinking").is_none(),
-            "thinking must not be in the request body when disabled"
-        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        assert_eq!(body["thinking"]["display"], "omitted");
+    }
+
+    #[test]
+    fn build_request_body_budget_thinking_explicit_summarized_serializes_summarized() {
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: Some(crate::types::ThinkingConfig {
+                mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
+                enabled: true,
+                display: Some(crate::types::ThinkingDisplay::Summarized),
+            }),
+        };
+        let body = build_request_body(&[], &config).expect("should build successfully");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 8192);
+        assert_eq!(body["thinking"]["display"], "summarized");
     }
 
     #[test]

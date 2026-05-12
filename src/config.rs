@@ -188,6 +188,10 @@ model = "glm-5.1"
 #   mode = { type = "budget", tokens = 8192 }
 # For adaptive mode:
 #   mode = { type = "adaptive" }
+# Whether the API emits thinking content: "summarized" (default) or "omitted".
+# Vertex defaults to "summarized" for visibility on models that would otherwise
+# suppress thinking_delta events (e.g. Opus 4.7).
+# display = "summarized"
 
 # Named model roles for multi-agent workflows.
 # When absent, a "default" role is synthesized from the top-level backend
@@ -1778,6 +1782,24 @@ mod tests {
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         assert!(config.thinking.expect("thinking present").display.is_none());
+    }
+
+    #[test]
+    fn thinking_section_with_unknown_display_value_fails_to_parse() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+            [thinking]
+            mode = { type = "adaptive" }
+            display = "hidden"
+        "#;
+        let result: Result<AppConfig, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown display value must fail deserialization, got {:?}",
+            result
+        );
     }
 
     #[test]

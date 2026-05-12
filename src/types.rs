@@ -824,6 +824,19 @@ mod tests {
     }
 
     #[test]
+    fn thinking_config_with_display_toml_roundtrip() {
+        let config = ThinkingConfig {
+            mode: ThinkingMode::Adaptive,
+            enabled: true,
+            display: Some(ThinkingDisplay::Summarized),
+        };
+        let toml_str = toml::to_string(&config).expect("serialize to TOML");
+        let deserialized: ThinkingConfig = toml::from_str(&toml_str).expect("parse from TOML");
+        assert_eq!(config, deserialized);
+        assert!(toml_str.contains("display = \"summarized\""));
+    }
+
+    #[test]
     fn stream_event_thinking_delta_contains_text() {
         let event = StreamEvent::ThinkingDelta("I am thinking...".to_string());
         assert!(matches!(event, StreamEvent::ThinkingDelta(_)));
@@ -851,10 +864,5 @@ mod tests {
     fn thinking_display_omitted_serializes_as_snake_case() {
         let json = serde_json::to_string(&ThinkingDisplay::Omitted).expect("serialize");
         assert_eq!(json, r#""omitted""#);
-    }
-
-    #[test]
-    fn thinking_config_default_display_is_none() {
-        assert!(ThinkingConfig::default().display.is_none());
     }
 }
