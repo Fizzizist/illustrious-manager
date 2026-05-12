@@ -100,53 +100,44 @@ impl<'a> ConversationRepo<'a> {
         Ok(())
     }
 
-    /// Atomically deactivate all active entries and insert a summary message.
-    /// Wrapped in a transaction so that a crash between the two operations
-    /// cannot leave the database with zero active rows and no summary.
-    pub async fn compact(&self, summary: &Message) -> Result<()> {
+    async fn begin_transaction(&self) -> Result<()> {
         self.session
             .conn
             .execute("BEGIN TRANSACTION", ())
             .await
-            .context("Failed to begin compaction transaction")?;
+            .context("Failed to begin transaction")?;
+        Ok(())
+    }
 
-        if let Err(e) = self.deactivate_all().await {
-            let _ = self.session.conn.execute("ROLLBACK", ()).await;
-            return Err(e);
-        }
-
-        if let Err(e) = self.insert_message(summary).await {
-            let _ = self.session.conn.execute("ROLLBACK", ()).await;
-            return Err(e);
-        }
-
+    async fn commit_transaction(&self) -> Result<()> {
         self.session
             .conn
             .execute("COMMIT", ())
             .await
-            .context("Failed to commit compaction transaction")?;
-
+            .context("Failed to commit transaction")?;
         Ok(())
     }
 
-    /// Compact with retained turns: deactivate all rows, insert summary, then
-    /// insert cleaned versions of the last `retain_count` turns.
-    ///
-    /// A "turn" is a user message plus its immediately following assistant
-    /// message(s). Turns are counted from the end of the conversation. If the
-    /// last message is a user message with no assistant reply yet, that partial
-    /// turn is still retained.
-    ///
-    /// Tool-use, tool-result, thinking, and redacted-thinking blocks are
-    /// stripped from retained messages — only text blocks are preserved.
-    /// Messages that become empty after stripping are dropped entirely.
-    ///
-    /// Returns `Ok(true)` if compaction was performed, or `Ok(false)` if it
-    /// was a no-op (retain_count >= total turns, meaning there's nothing to
-    /// compact).
+    async fn rollback_transaction(&self) {
+        let _ = self.session.conn.execute("ROLLBACK", ()).await;
+    }
+
+    pub async fn compact(&self, summary: &Message) -> Result<()> {
+        self.begin_transaction().await?;
+        if let Err(e) = self.deactivate_all().await {
+            self.rollback_transaction().await;
+            return Err(e);
+        }
+        if let Err(e) = self.insert_message(summary).await {
+            self.rollback_transaction().await;
+            return Err(e);
+        }
+        self.commit_transaction().await?;
+        Ok(())
+    }
+
     pub async fn compact_retaining(&self, summary: &Message, retain_count: u32) -> Result<bool> {
         let history = self.load_history().await?;
-
         let total_turns = count_turns(&history);
         if retain_count as usize >= total_turns {
             return Ok(false);
@@ -158,35 +149,22 @@ impl<'a> ConversationRepo<'a> {
             retained_turns(&history, retain_count as usize)
         };
 
-        self.session
-            .conn
-            .execute("BEGIN TRANSACTION", ())
-            .await
-            .context("Failed to begin compaction transaction")?;
-
+        self.begin_transaction().await?;
         if let Err(e) = self.deactivate_all().await {
-            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            self.rollback_transaction().await;
             return Err(e);
         }
-
         if let Err(e) = self.insert_message(summary).await {
-            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            self.rollback_transaction().await;
             return Err(e);
         }
-
         for msg in &retained_messages {
             if let Err(e) = self.insert_message(msg).await {
-                let _ = self.session.conn.execute("ROLLBACK", ()).await;
+                self.rollback_transaction().await;
                 return Err(e);
             }
         }
-
-        self.session
-            .conn
-            .execute("COMMIT", ())
-            .await
-            .context("Failed to commit compaction transaction")?;
-
+        self.commit_transaction().await?;
         Ok(true)
     }
 

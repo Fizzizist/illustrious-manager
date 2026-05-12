@@ -1,9 +1,5 @@
 use crate::types::{ContentBlock, Message, Role};
 
-/// Count the number of turns in a message slice.
-///
-/// A "turn" starts with a user message and includes all immediately following
-/// assistant messages. Orphan assistant messages at the start form their own turn.
 pub fn count_turns(messages: &[Message]) -> usize {
     if messages.is_empty() {
         return 0;
@@ -20,10 +16,6 @@ pub fn count_turns(messages: &[Message]) -> usize {
     turns
 }
 
-/// Find the start index of the last `n` turns in the message slice.
-///
-/// Returns `0` if there are fewer than `n` turns (i.e., all messages are retained)
-/// or if `n` is 0.
 pub fn retained_start_index(messages: &[Message], n: usize) -> usize {
     if n == 0 || messages.is_empty() {
         return 0;
@@ -48,11 +40,6 @@ pub fn retained_start_index(messages: &[Message], n: usize) -> usize {
     turn_start
 }
 
-/// Strip non-text blocks from a message, returning `None` if the result is empty.
-///
-/// Tool-use, tool-result, thinking, and redacted-thinking blocks are removed.
-/// Only `Text` blocks are preserved. Messages that become empty after stripping
-/// are filtered out entirely.
 pub fn strip_non_text(msg: &Message) -> Option<Message> {
     let stripped: Vec<ContentBlock> = msg
         .content
@@ -70,8 +57,6 @@ pub fn strip_non_text(msg: &Message) -> Option<Message> {
     }
 }
 
-/// Extract the last `n` turns from the history, returning the messages
-/// that belong to those turns with non-text blocks stripped.
 pub fn retained_turns(messages: &[Message], n: usize) -> Vec<Message> {
     let start = retained_start_index(messages, n);
     if start >= messages.len() {
