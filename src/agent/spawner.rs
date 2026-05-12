@@ -77,6 +77,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::Warn(_) => {}
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
+            AgentEvent::AutoCompactTriggered { .. } => {}
         }
     }
 
@@ -252,5 +253,6 @@ pub async fn spawn_agent_with_selection(
     Ok(Agent::new(selection.backend, request_config, session)
         .await
         .with_tools(tools)
-        .with_tool_config(tool_config))
+        .with_tool_config(tool_config)
+        .with_compaction_config(&crate::config::CompactionConfig::default()))
 }

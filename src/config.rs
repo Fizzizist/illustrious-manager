@@ -47,6 +47,31 @@ fn default_sessions_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./illustrious-manager-sessions"))
 }
 
+fn default_max_context_window_len() -> u32 {
+    0
+}
+
+fn default_compaction_role() -> String {
+    "compaction".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CompactionConfig {
+    #[serde(default = "default_compaction_role")]
+    pub role: String,
+    #[serde(default = "default_max_context_window_len")]
+    pub max_context_window_len: u32,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        CompactionConfig {
+            role: default_compaction_role(),
+            max_context_window_len: default_max_context_window_len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
@@ -134,6 +159,14 @@ model = "glm-5.1"
 # Reasoning style: "none", "zai_enable_thinking", "qwen_chat_template", "default"
 # reasoning = "qwen_chat_template"
 
+# [compaction]
+# Role name used for compaction sub-agents. Defaults to "compaction".
+# If the role isn't defined in [models], falls back to "default".
+# role = "compaction"
+# Context window length threshold for auto-compaction (0 = disabled).
+# When input_tokens exceeds this value, the agent automatically compacts the conversation.
+# max_context_window_len = 0
+
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
 # confirmation = "WriteOnly"
@@ -168,10 +201,6 @@ model = "glm-5.1"
 # [models.compaction]
 # backend = "vertex"
 # model = "claude-haiku-4-5"
-
-# Role name used for compaction sub-agents. Defaults to "compaction".
-# If the role isn't defined in [models], falls back to "default".
-# compaction_role = "compaction"
 "#;
 
 /// A named model role binding a backend to a specific model string.
@@ -209,14 +238,8 @@ pub struct AppConfig {
     pub models: BTreeMap<String, ModelRole>,
     #[serde(default)]
     pub thinking: Option<crate::types::ThinkingConfig>,
-    /// Role name used for compaction sub-agents. Defaults to `"compaction"`.
-    /// If the role isn't defined in `[models]`, falls back to `"default"`.
-    #[serde(default = "default_compaction_role")]
-    pub compaction_role: String,
-}
-
-fn default_compaction_role() -> String {
-    "compaction".to_string()
+    #[serde(default)]
+    pub compaction: CompactionConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -692,6 +715,47 @@ mod tests {
     }
 
     #[test]
+    fn default_compaction_config_includes_max_context_window_len() {
+        let config = CompactionConfig::default();
+        assert_eq!(config.max_context_window_len, 0);
+    }
+
+    #[test]
+    fn max_context_window_len_deserializes_from_toml() {
+        let toml_str = r#"
+            max_context_window_len = 50000
+        "#;
+        let config: CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 50000);
+    }
+
+    #[test]
+    fn max_context_window_len_zero_by_default_in_toml() {
+        let toml_str = r#"
+            role = "fast"
+        "#;
+        let config: CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_context_window_len, 0);
+    }
+
+    #[test]
+    fn compaction_config_role_defaults_to_compaction() {
+        let config = CompactionConfig::default();
+        assert_eq!(config.role, "compaction");
+    }
+
+    #[test]
+    fn compaction_config_role_overrides_from_toml() {
+        let toml_str = r#"
+            role = "fast"
+            max_context_window_len = 50000
+        "#;
+        let config: CompactionConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.role, "fast");
+        assert_eq!(config.max_context_window_len, 50000);
+    }
+
+    #[test]
     fn missing_tools_section_uses_all_defaults() {
         let toml_str = r#"
             backend = "vertex"
@@ -726,7 +790,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -749,7 +813,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -771,7 +835,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -797,7 +861,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -823,7 +887,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -845,7 +909,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -868,7 +932,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
@@ -899,7 +963,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
@@ -928,7 +992,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
@@ -953,7 +1017,7 @@ mod tests {
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(
@@ -978,7 +1042,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
@@ -1034,7 +1098,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
         assert!(
@@ -1083,7 +1147,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
         assert_eq!(
@@ -1137,7 +1201,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let resolved = config.resolve_role("fast").expect("should resolve");
         assert_eq!(resolved.backend_name, "vertex");
@@ -1160,7 +1224,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = config.resolve_role("nonexistent");
         assert!(result.is_err());
@@ -1191,7 +1255,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1229,7 +1293,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1256,7 +1320,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1283,7 +1347,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1310,7 +1374,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1336,7 +1400,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1362,7 +1426,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
@@ -1396,7 +1460,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1430,7 +1494,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1462,7 +1526,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1498,7 +1562,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1537,7 +1601,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok(), "ollama role with valid config should pass");
@@ -1596,7 +1660,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
@@ -1676,19 +1740,20 @@ mod tests {
             project = "my-project"
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
-        assert_eq!(config.compaction_role, "compaction");
+        assert_eq!(config.compaction.role, "compaction");
     }
 
     #[test]
     fn compaction_role_overrides_from_toml() {
         let toml_str = r#"
             backend = "vertex"
-            compaction_role = "fast"
+            [compaction]
+            role = "fast"
             [vertex]
             project = "my-project"
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
-        assert_eq!(config.compaction_role, "fast");
+        assert_eq!(config.compaction.role, "fast");
     }
 
     // ── openai_compat config tests ────────────────────────────────────────
@@ -1709,7 +1774,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1741,7 +1806,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1773,7 +1838,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(
@@ -1805,7 +1870,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
         assert!(
@@ -1882,7 +1947,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         config.normalize_back_compat();
         apply_overrides(&mut config, None, None, Some("Qwen/Qwen3-235B"));
@@ -1926,7 +1991,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1959,7 +2024,7 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());

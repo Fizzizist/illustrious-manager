@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
@@ -44,6 +45,14 @@ pub struct Agent {
     /// Spawner for creating compaction sub-agents. Set after construction via
     /// `with_compaction_spawner()`.
     compaction_spawner: Option<Arc<AgentSpawner>>,
+    /// Maximum context window length in tokens. When the API's reported
+    /// `input_tokens` exceeds this threshold after a complete assistant turn,
+    /// auto-compaction is triggered. A value of 0 disables auto-compaction.
+    max_context_window_len: u32,
+    /// Whether the previous turn auto-compacted. Prevents consecutive compaction
+    /// loops: if the previous turn already auto-compacted and the threshold is
+    /// still exceeded, a warning is emitted instead.
+    last_auto_compacted: Arc<AtomicBool>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -77,6 +86,8 @@ impl Agent {
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
             compaction_spawner: None,
+            max_context_window_len: 0,
+            last_auto_compacted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -88,6 +99,11 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self
+    }
+
+    pub fn with_compaction_config(mut self, config: &crate::config::CompactionConfig) -> Self {
+        self.max_context_window_len = config.max_context_window_len;
         self
     }
 
@@ -163,6 +179,11 @@ impl Agent {
     }
 
     #[cfg(test)]
+    pub fn max_context_window_len_for_test(&self) -> u32 {
+        self.max_context_window_len
+    }
+
+    #[cfg(test)]
     pub fn confirmation_mode_for_test(&self) -> &ConfirmationMode {
         &self.confirmation_mode
     }
@@ -234,6 +255,7 @@ impl Agent {
             history.extend(new_history);
         }
         *self.session.lock().await = session;
+        self.last_auto_compacted.store(false, Ordering::SeqCst);
     }
 
     pub fn load_context_files(&self, files: Vec<ContextFile>) {
@@ -280,6 +302,8 @@ impl Agent {
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
+        let max_context_window_len = self.max_context_window_len;
+        let last_auto_compacted = Arc::clone(&self.last_auto_compacted);
 
         self.session
             .lock()
@@ -322,6 +346,7 @@ impl Agent {
                 let mut thinking_signature = String::new();
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
+                let mut peak_input_tokens: u32 = 0;
                 let mut stream = backend_stream;
 
                 loop {
@@ -399,6 +424,7 @@ impl Agent {
                             output_tokens,
                             stop_reason,
                         })) => {
+                            peak_input_tokens = peak_input_tokens.max(input_tokens);
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
@@ -455,6 +481,16 @@ impl Agent {
                         .insert_message(&assistant_msg)
                         .await;
                     let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
+
+                    // Auto-compact check: runs after every completed iteration,
+                    // whether the response included tool calls or not.
+                    compact::check_auto_compact(
+                        peak_input_tokens,
+                        max_context_window_len,
+                        &last_auto_compacted,
+                        &event_tx,
+                    );
+
                     break;
                 }
 
@@ -546,6 +582,15 @@ impl Agent {
                     .conversation()
                     .insert_message(&tool_result_msg)
                     .await;
+
+                // Auto-compact check: runs after every completed iteration,
+                // whether the response included tool calls or not.
+                compact::check_auto_compact(
+                    peak_input_tokens,
+                    max_context_window_len,
+                    &last_auto_compacted,
+                    &event_tx,
+                );
             }
         });
 
@@ -848,6 +893,7 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
     use crate::config::{ConfirmationMode, ToolsConfig};
     use crate::tools::{Tool, ToolError, ToolResult as ToolExecResult};
     use anyhow::Result;
@@ -3293,10 +3339,10 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models: std::collections::BTreeMap::new(),
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
-        let role = if config.models.contains_key(&config.compaction_role) {
-            config.compaction_role.clone()
+        let role = if config.models.contains_key(&config.compaction.role) {
+            config.compaction.role.clone()
         } else {
             "default".to_string()
         };
@@ -3331,16 +3377,488 @@ mod tests {
             sessions_dir: std::env::temp_dir(),
             models,
             thinking: None,
-            compaction_role: "compaction".to_string(),
+            compaction: CompactionConfig::default(),
         };
-        let role = if config.models.contains_key(&config.compaction_role) {
-            config.compaction_role.clone()
+        let role = if config.models.contains_key(&config.compaction.role) {
+            config.compaction.role.clone()
         } else {
             "default".to_string()
         };
         assert_eq!(
             role, "compaction",
             "should use compaction role when defined in models"
+        );
+    }
+
+    // ── Auto-compact threshold tests ─────────────────────────────────────
+
+    fn text_with_usage_response(
+        text: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::TextDelta(text.to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]
+    }
+
+    #[tokio::test]
+    async fn auto_compact_not_triggered_when_threshold_zero() {
+        let backend = SequencedBackend::new(vec![text_with_usage_response("hello", 100_000, 50)]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 0,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should not be emitted when threshold is 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_not_triggered_when_tokens_below_threshold() {
+        let backend = SequencedBackend::new(vec![text_with_usage_response("hello", 40_000, 50)]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should not be emitted when tokens below threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_triggered_when_tokens_exceed_threshold() {
+        let backend = SequencedBackend::new(vec![text_with_usage_response("hello", 60_000, 50)]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let triggered = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. }));
+        assert!(
+            triggered.is_some(),
+            "expected AutoCompactTriggered event when tokens exceed threshold"
+        );
+        if let AgentEvent::AutoCompactTriggered {
+            current_tokens,
+            threshold,
+        } = triggered.expect("checked above")
+        {
+            assert_eq!(
+                *current_tokens, 60_000,
+                "current_tokens should match input_tokens"
+            );
+            assert_eq!(*threshold, 50_000, "threshold should match config");
+        }
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected ResponseComplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_consecutive_guard_emits_warning() {
+        let combined = SequencedBackend::new(vec![
+            text_with_usage_response("first", 60_000, 50),
+            text_with_usage_response("second", 55_000, 50),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        // First send: above threshold -> AutoCompactTriggered
+        let stream1 = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("first send should succeed");
+        let events1 = collect_events(stream1).await;
+        assert!(
+            events1
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "first send should trigger AutoCompactTriggered"
+        );
+
+        // Second send: still above threshold -> Warn instead of AutoCompactTriggered
+        let stream2 = agent
+            .send("hi again".to_string(), None, None)
+            .await
+            .expect("second send should succeed");
+        let events2 = collect_events(stream2).await;
+
+        // Should NOT have AutoCompactTriggered
+        assert!(
+            !events2
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "second consecutive send above threshold should NOT trigger AutoCompactTriggered"
+        );
+        let warn_events: Vec<_> = events2
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Warn(_)))
+            .collect();
+        assert!(
+            !warn_events.is_empty(),
+            "second consecutive send above threshold should emit Warn"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_compact_guard_resets_when_tokens_drop_below_threshold() {
+        let combined = SequencedBackend::new(vec![
+            text_with_usage_response("above", 60_000, 50),
+            text_with_usage_response("below", 30_000, 50),
+            text_with_usage_response("above again", 60_000, 50),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        // First send: above threshold -> AutoCompactTriggered
+        let stream1 = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("first send should succeed");
+        let events1 = collect_events(stream1).await;
+        assert!(
+            events1
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "first send should trigger AutoCompactTriggered"
+        );
+
+        // Second send: below threshold -> guard resets
+        let stream2 = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("second send should succeed");
+        let events2 = collect_events(stream2).await;
+        assert!(
+            !events2
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "second send below threshold should not trigger AutoCompactTriggered"
+        );
+
+        // Third send: above threshold again -> AutoCompactTriggered (guard was reset)
+        let stream3 = agent
+            .send("hi again".to_string(), None, None)
+            .await
+            .expect("third send should succeed");
+        let events3 = collect_events(stream3).await;
+        assert!(
+            events3
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "third send above threshold should trigger AutoCompactTriggered again after guard reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_compaction_config_sets_max_context_window_len() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 42_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+        assert_eq!(
+            agent.max_context_window_len_for_test(),
+            42_000,
+            "max_context_window_len should be set from compaction_config"
+        );
+    }
+
+    // Regression: auto-compact must trigger on tool-use turns, not just text-only turns.
+    // When the LLM emits tool calls, the threshold check must still run after tool
+    // results are persisted and the loop continues.
+    #[tokio::test]
+    async fn auto_compact_triggers_on_tool_use_turn() {
+        // First turn: tool call with high input_tokens.
+        // Second turn: text-only response (triggers after loop iteration).
+        // The tool-use turn should emit AutoCompactTriggered before the loop
+        // continues to the second iteration.
+        let combined = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta("{}".to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 60_000,
+                    output_tokens: 100,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("run".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Must see AutoCompactTriggered even though the first turn had tool calls.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should be emitted on tool-use turns"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_session_resets_auto_compact_flag() {
+        let backend = SequencedBackend::new(vec![text_with_usage_response("hi", 60_000, 50)]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 50_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        // Trigger auto-compact to set the flag
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+        assert!(
+            agent.last_auto_compacted.load(Ordering::SeqCst),
+            "flag should be set after AutoCompactTriggered"
+        );
+
+        // Load a new session — should reset the flag
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let new_session = Session::new(None, dir.keep()).await.expect("session");
+        agent.load_session(new_session).await;
+        assert!(
+            !agent.last_auto_compacted.load(Ordering::SeqCst),
+            "flag should be reset after load_session"
+        );
+    }
+
+    // Regression: when multiple Usage events arrive in a single turn (e.g. tool-use
+    // loops), the API reports the *total* context size per request, not incremental
+    // tokens. We must track the peak, not the sum, so that a context of 12.8k across
+    // two iterations doesn't falsely accumulate to 27.8k.
+    #[tokio::test]
+    async fn auto_compact_uses_peak_input_tokens_not_sum() {
+        // Simulate two Usage events in one response (can happen with tool-use turns).
+        // Both report the total context size (~12k), but the peak is 12k, not 24k.
+        let combined = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("hello".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 12_000,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            // Second Usage event (some backends send a final summary)
+            Ok(StreamEvent::Usage {
+                input_tokens: 12_800,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let compaction_config = crate::config::CompactionConfig {
+            max_context_window_len: 15_000,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(combined), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config)
+            .with_compaction_config(&compaction_config);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Peak is 12800, which is below 15000, so auto-compact should NOT trigger.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
+            "AutoCompactTriggered should not be emitted when peak (12800) is below threshold (15000)"
         );
     }
 }

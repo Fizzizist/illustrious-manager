@@ -163,6 +163,7 @@ async fn main() -> Result<()> {
             registry,
         )
         .await?
+        .with_compaction_config(&app_config.compaction)
         .with_thinking(app_config.thinking.clone())
         // This ordering is because both `with_skills` and `with_context_files` PREPEND to history.
         // because initial history is set from the input session
