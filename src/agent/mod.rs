@@ -53,6 +53,11 @@ pub struct Agent {
     /// loops: if the previous turn already auto-compacted and the threshold is
     /// still exceeded, a warning is emitted instead.
     last_auto_compacted: Arc<AtomicBool>,
+    /// Maximum size (in bytes) of a single tool result that is stored in
+    /// conversation history. Results exceeding this are truncated with a
+    /// sentinel so that the agent prompt does not explode. The untruncated
+    /// version is still sent to the TUI via `AgentEvent::ToolResult`.
+    max_tool_result_bytes: u64,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -88,6 +93,7 @@ impl Agent {
             compaction_spawner: None,
             max_context_window_len: 0,
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
+            max_tool_result_bytes: 65_536,
         }
     }
 
@@ -99,6 +105,7 @@ impl Agent {
     pub fn with_tool_config(mut self, tool_config: &ToolsConfig) -> Self {
         self.max_tool_iterations = tool_config.max_tool_iterations;
         self.confirmation_mode = tool_config.confirmation.clone();
+        self.max_tool_result_bytes = tool_config.max_tool_result_bytes;
         self
     }
 
@@ -181,6 +188,11 @@ impl Agent {
     #[cfg(test)]
     pub fn max_context_window_len_for_test(&self) -> u32 {
         self.max_context_window_len
+    }
+
+    #[cfg(test)]
+    pub fn max_tool_result_bytes_for_test(&self) -> u64 {
+        self.max_tool_result_bytes
     }
 
     #[cfg(test)]
@@ -304,6 +316,7 @@ impl Agent {
         let session = Arc::clone(&self.session);
         let max_context_window_len = self.max_context_window_len;
         let last_auto_compacted = Arc::clone(&self.last_auto_compacted);
+        let max_tool_result_bytes = self.max_tool_result_bytes;
 
         self.session
             .lock()
@@ -525,6 +538,7 @@ impl Agent {
                     &mut confirmation_rx,
                     &event_tx,
                     cancel_token.clone(),
+                    max_tool_result_bytes,
                 )
                 .await;
 
@@ -659,6 +673,7 @@ async fn execute_tool_calls(
     confirmation_rx: &mut Option<mpsc::UnboundedReceiver<ConfirmationResponse>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel_token: Option<CancellationToken>,
+    max_tool_result_bytes: u64,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !thinking_prefix.is_empty() {
@@ -878,14 +893,57 @@ async fn execute_tool_calls(
             is_error,
             index,
         });
+        let truncated = truncate_tool_result(&content, max_tool_result_bytes);
         tool_result_blocks.push(ContentBlock::ToolResult {
             tool_use_id: id,
-            content,
+            content: truncated,
             is_error,
         });
     }
 
     (assistant_content, tool_result_blocks)
+}
+
+fn truncate_tool_result(content: &str, max_bytes: u64) -> String {
+    if max_bytes == 0 || content.len() <= max_bytes as usize {
+        return content.to_string();
+    }
+
+    let max = max_bytes as usize;
+    let total_bytes = content.len();
+    let sentinel = format!(
+        "\n\n[... output truncated: {total_bytes} bytes elided (cap = {max} bytes). \
+         Re-run with a narrower scope if more detail is needed ...]\n\n"
+    );
+    let sentinel_len = sentinel.len();
+
+    // If even the sentinel alone exceeds max, hard-truncate at char boundary
+    if sentinel_len >= max {
+        let idx = content.floor_char_boundary(max);
+        return content[..idx].to_string();
+    }
+
+    let available = max - sentinel_len;
+    let head_target = available / 2;
+    let tail_target = available - head_target;
+
+    let head_end = content.floor_char_boundary(head_target);
+    let tail_start_min = total_bytes.saturating_sub(tail_target);
+    let tail_start = content.floor_char_boundary(tail_start_min).max(head_end);
+
+    let mut result = String::with_capacity(max);
+    result.push_str(&content[..head_end]);
+    result.push_str(&sentinel);
+    result.push_str(&content[tail_start..]);
+
+    // If UTF-8 boundary rounding pushed us slightly over max, trim until it fits.
+    while result.len() > max {
+        let target = result.len().saturating_sub(1);
+        let idx = result.as_str().floor_char_boundary(target);
+        result.truncate(idx);
+    }
+
+    result
 }
 
 pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
@@ -3859,6 +3917,214 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::AutoCompactTriggered { .. })),
             "AutoCompactTriggered should not be emitted when peak (12800) is below threshold (15000)"
+        );
+    }
+
+    #[test]
+    fn test_truncate_tool_result_under_cap() {
+        let content = "short";
+        let result = truncate_tool_result(content, 100);
+        assert_eq!(
+            result, "short",
+            "content under cap should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_truncate_tool_result_at_exact_cap() {
+        let content = "exactly ten";
+        let result = truncate_tool_result(content, 11);
+        assert_eq!(
+            result, content,
+            "content exactly at cap should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn test_truncate_tool_result_zero_cap_means_unlimited() {
+        let content = "anything at all";
+        let result = truncate_tool_result(content, 0);
+        assert_eq!(result, content, "max_bytes = 0 should disable truncation");
+    }
+
+    #[test]
+    fn test_truncate_tool_result_over_cap() {
+        let cap: u64 = 200;
+        let content = "a".repeat(10_000);
+        let result = truncate_tool_result(&content, cap);
+
+        assert!(
+            result.len() <= cap as usize,
+            "truncated result ({}) should be ≤ cap ({})",
+            result.len(),
+            cap
+        );
+        assert!(
+            result.contains("[... output truncated:"),
+            "truncated result should contain the sentinel"
+        );
+
+        // Verify both head and tail are present
+        assert!(
+            result.starts_with("aaa"),
+            "truncated result should start with head portion"
+        );
+        assert!(
+            result.ends_with("aaa"),
+            "truncated result should end with tail portion"
+        );
+    }
+
+    #[test]
+    fn test_truncate_tool_result_multibyte_utf8() {
+        // 3-byte UTF-8 characters repeated many times
+        let content: String = "🎉".repeat(10_000);
+        let cap: u64 = 200;
+        let result = truncate_tool_result(&content, cap);
+
+        assert!(
+            result.len() <= cap as usize,
+            "truncated result ({}) should be ≤ cap ({})",
+            result.len(),
+            cap
+        );
+        assert!(
+            result.contains("[... output truncated:"),
+            "truncated result should contain the sentinel"
+        );
+        // Verify the result is valid UTF-8 by checking it doesn't panic on operations
+        assert!(
+            result.chars().count() > 0,
+            "result should contain valid chars"
+        );
+        // No panic means valid UTF-8
+    }
+
+    struct VariableSizeEchoTool {
+        name: String,
+        byte_count: usize,
+        schema: serde_json::Value,
+    }
+
+    impl VariableSizeEchoTool {
+        fn new(name: &str, byte_count: usize) -> Self {
+            Self {
+                name: name.to_string(),
+                byte_count,
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for VariableSizeEchoTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "Variable-size echo tool"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn is_write_tool(&self) -> bool {
+            false
+        }
+        async fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+            let output = "x".repeat(self.byte_count);
+            Ok(ToolExecResult {
+                content: vec![ContentBlock::Text(output)],
+                is_error: false,
+                agent_events: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_truncated_in_history_but_full_in_event() {
+        // 1 MiB+ tool result
+        let byte_count = 1_048_576 + 100;
+        let cap: u64 = 65_536;
+
+        let backend = SequencedBackend::new(vec![
+            tool_call_response("t1", "echo_large", r#"{}"#),
+            text_response("done"),
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(VariableSizeEchoTool::new(
+                "echo_large",
+                byte_count,
+            )))
+            .expect("register tool");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            max_tool_result_bytes: cap,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+
+        let stream = agent
+            .send("run".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // AgentEvent::ToolResult should contain the full, untruncated content
+        let tool_result_event = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }))
+            .expect("should have ToolResult event");
+        if let AgentEvent::ToolResult { content, .. } = tool_result_event {
+            assert_eq!(
+                content.len(),
+                byte_count,
+                "AgentEvent::ToolResult should contain the full {}-byte content",
+                byte_count
+            );
+        }
+
+        // The history (ContentBlock::ToolResult) should be truncated
+        let history = agent.history();
+        let tool_result_msg = history
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .expect("history should contain a User message with ToolResult");
+        let truncated = tool_result_msg
+            .content
+            .iter()
+            .find_map(|b| {
+                if let ContentBlock::ToolResult { content, .. } = b {
+                    Some(content.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("should find ToolResult content");
+
+        assert!(
+            truncated.len() <= cap as usize,
+            "history ToolResult should be ≤ {} bytes, was {}",
+            cap,
+            truncated.len()
+        );
+        assert!(
+            truncated.contains("[... output truncated:"),
+            "truncated history content should contain the sentinel"
         );
     }
 }

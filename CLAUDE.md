@@ -51,7 +51,7 @@ Four-layer decoupled design:
 
 1. **Backend Layer** (`src/backend/`) — `LlmBackend` trait abstraction over LLM providers. Four implementations: `vertex` (Vertex AI + Claude via SSE, with `sse.rs` for SSE stream parsing), `zai` (z.ai — thin shim over `openai_compat`), `ollama` (Ollama Cloud/self-hosted via NDJSON, with `ndjson.rs` for NDJSON stream parsing), and `openai_compat` (generic OpenAI Chat Completions client — SSE, message serialisation, tool calls). `openai_compat` exposes `ReasoningStyle` (`None` | `ZaiEnableThinking` | `QwenChatTemplate` | `Default`) to control how extended-thinking is expressed per-provider. The `zai` backend is a back-compat shim that constructs an `OpenAiCompatBackend` with `ReasoningStyle::ZaiEnableThinking` and the z.ai base URL. The constructor strips trailing `/` from `base_url` and rejects URLs that already include `/chat/completions`. When `api_key` is `None` or empty, no `Authorization` header is sent. Emits `StreamEvent` (TextDelta | ToolUseStart/Delta/Done | Usage | Done).
 
-2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Tool calls within a single assistant turn run concurrently via `join_all`; confirmations are gathered sequentially first, then approved calls execute in parallel. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
+2. **Agent Core** (`src/agent.rs`) — Owns conversation history, context files, and skills. Wraps backend streams into `AgentEvent` (TokenReceived | ToolUseReceived | ToolResult | ToolConfirmationRequired | ResponseComplete | Error | Usage). Display-agnostic. Drives agentic tool-use loops up to `max_tool_iterations`. Tool calls within a single assistant turn run concurrently via `join_all`; confirmations are gathered sequentially first, then approved calls execute in parallel. Tool results exceeding `max_tool_result_bytes` are truncated with head+tail preserved and a sentinel message before being added to history; the untruncated content is still sent to the TUI via `AgentEvent::ToolResult`. Supports session switching (`load_session`) while preserving non-persisted context prefix (context files, skill definitions).
 
 3. **Tools Layer** (`src/tools/`) — `Tool` trait + `ToolRegistry`. Built-in tools: `bash` (allowlist/denylist enforced), `edit_file`, `write_file`, `skill` (loads skill prompts by name), `search` (semantic code search), `agent` (spawns sub-agents). File tools are sandboxed to `sandbox_root` via `SandboxPolicy` (`sandbox.rs`). `is_write_tool()` determines whether confirmation is required under `WriteOnly` mode.
 
@@ -104,6 +104,9 @@ model = "gpt-oss:120b"
 # confirmation = "WriteOnly"          # Always | WriteOnly | Never
 # sandbox_root = "."                  # Directory tools are allowed to read/write
 # max_tool_iterations = 25
+# Maximum byte cap for tool results. Results exceeding this are truncated
+# with head+tail preserved and a sentinel message. Set to 0 for unlimited.
+# max_tool_result_bytes = 65536
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # bash_denylist = ["rm", "wget", "sudo", "chmod", "chown"]
 ```
