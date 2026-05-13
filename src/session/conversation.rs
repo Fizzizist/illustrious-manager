@@ -124,11 +124,11 @@ impl<'a> ConversationRepo<'a> {
 
     pub async fn compact(&self, summary: &Message) -> Result<()> {
         self.begin_transaction().await?;
-        if let Err(e) = self.deactivate_all().await {
-            self.rollback_transaction().await;
-            return Err(e);
-        }
-        if let Err(e) = self.insert_message(summary).await {
+        if let Err(e) = {
+            self.deactivate_all().await?;
+            self.insert_message(summary).await?;
+            Ok(())
+        } {
             self.rollback_transaction().await;
             return Err(e);
         }
