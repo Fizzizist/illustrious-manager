@@ -48,9 +48,14 @@ Read ALL PR comments and the PR body to get complete context:
 gh pr view <pr-number> --json title,body,comments
 ```
 
-Find the plan comment (contains `<!-- mach6-plan -->` marker) from the comments. If no plan comment exists, tell the user and suggest running `/skill:mach6-plan` first.
+**Inline review comments (comments on specific lines of the diff) are NOT included in the above output.** Fetch them separately:
+```bash
+gh api repos/{owner}/{repo}/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, path: .path, line: (.original_line // .line // "?"), body: .body, diff_hunk: .diff_hunk, url: .html_url}'
+```
 
-Also read any progress updates, prior review findings, assessments, and discussion — all of this context informs implementation.
+Find the plan comment (contains `<!-- mach6-plan -->` marker) from the regular comments. If no plan comment exists, tell the user and suggest running `/skill:mach6-plan` first.
+
+Also read any progress updates, prior review findings, assessments, inline review comments, and discussion — all of this context informs implementation.
 
 ### Step 4i: Set up task tracking
 
@@ -125,11 +130,16 @@ Read ALL PR comments to get full context:
 gh pr view <pr-number> --json title,body,comments
 ```
 
-Find the review (`<!-- mach6-review -->`) and assessment (`<!-- mach6-assessment -->`) comments, then extract the specific findings to fix. Prior progress comments and discussion may also provide useful context.
+**Inline review comments (comments on specific lines of the diff) are NOT included in the above output.** Fetch them separately:
+```bash
+gh api repos/{owner}/{repo}/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, path: .path, line: (.original_line // .line // "?"), body: .body, diff_hunk: .diff_hunk, url: .html_url}'
+```
+
+Find the review (`<!-- mach6-review -->`) and assessment (`<!-- mach6-assessment -->`) comments, then extract the specific findings to fix. Also review inline review comments for any additional context or feedback. Prior progress comments and discussion may also provide useful context.
 
 #### If no finding numbers and not `ci`:
 
-Read ALL PR comments, find review/assessment comments, present genuine findings, and ask which to fix.
+Read ALL PR comments AND inline review comments, find review/assessment comments, present genuine findings, and ask which to fix. Use both commands above.
 
 ### Step 5f: Batch sizing
 

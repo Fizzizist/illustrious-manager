@@ -30,17 +30,19 @@ argument-hint: "<pr-number>"
 gh pr checkout <pr-number>
 git pull
 gh pr view <pr-number> --json mergeable,mergeStateStatus,statusCheckRollup,reviewDecision,comments,body
+gh api repos/{owner}/{repo}/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, path: .path, line: (.original_line // .line // "?"), body: .body, diff_hunk: .diff_hunk, url: .html_url}'
 gh pr checks <pr-number>
 ```
 
 **Note:** `gh pr checks` returns exit code 8 while checks are still pending — this is expected, not a failure. Wait and re-run if needed.
 
-Read ALL PR comments to understand the full history — plans, reviews, assessments, progress updates, and discussion.
+Read ALL PR comments AND inline review comments to understand the full history — plans, reviews, assessments, progress updates, and discussion. **Inline review comments (comments on specific lines of the diff) are NOT included in `gh pr view --json comments` output** — they are fetched separately via the `gh api` command above.
 
 Verify:
 - [ ] CI is passing
 - [ ] No merge conflicts
 - [ ] All review findings addressed (check for genuine items in latest assessment)
+- [ ] No unresolved inline review comments requiring changes
 
 If there are blocking issues, report them and suggest fixes:
 - **Failed CI**: `/skill:mach6-implement <pr-number> ci`
