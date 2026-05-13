@@ -27,6 +27,10 @@ fn default_max_tool_iterations() -> u32 {
     25
 }
 
+fn default_max_tool_result_bytes() -> u64 {
+    65536
+}
+
 fn default_bash_allowlist() -> Vec<String> {
     ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
         .iter()
@@ -80,6 +84,8 @@ pub struct ToolsConfig {
     pub sandbox_root: String,
     #[serde(default = "default_max_tool_iterations")]
     pub max_tool_iterations: u32,
+    #[serde(default = "default_max_tool_result_bytes")]
+    pub max_tool_result_bytes: u64,
     #[serde(default = "default_bash_allowlist")]
     pub bash_allowlist: Vec<String>,
     #[serde(default = "default_bash_denylist")]
@@ -92,6 +98,7 @@ impl Default for ToolsConfig {
             confirmation: default_confirmation(),
             sandbox_root: default_sandbox_root(),
             max_tool_iterations: default_max_tool_iterations(),
+            max_tool_result_bytes: default_max_tool_result_bytes(),
             bash_allowlist: default_bash_allowlist(),
             bash_denylist: default_bash_denylist(),
         }
@@ -174,6 +181,9 @@ model = "glm-5.1"
 # sandbox_root = "."
 # Maximum number of tool-use iterations per agent turn
 # max_tool_iterations = 25
+# Maximum byte cap for tool results. Results exceeding this cap are truncated
+# with head+tail preserved and a sentinel message. Set to 0 for unlimited.
+# max_tool_result_bytes = 65536
 # Shell commands that may be executed without a denylist match
 # bash_allowlist = ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
 # Shell commands that are always blocked
@@ -707,6 +717,7 @@ mod tests {
             confirmation = "Always"
             sandbox_root = "/tmp/sandbox"
             max_tool_iterations = 10
+            max_tool_result_bytes = 0
             bash_allowlist = ["echo"]
             bash_denylist = ["curl"]
         "#;
@@ -714,8 +725,24 @@ mod tests {
         assert_eq!(config.confirmation, ConfirmationMode::Always);
         assert_eq!(config.sandbox_root, "/tmp/sandbox");
         assert_eq!(config.max_tool_iterations, 10);
+        assert_eq!(config.max_tool_result_bytes, 0);
         assert_eq!(config.bash_allowlist, vec!["echo"]);
         assert_eq!(config.bash_denylist, vec!["curl"]);
+    }
+
+    #[test]
+    fn default_tools_config_has_max_tool_result_bytes() {
+        let config = ToolsConfig::default();
+        assert_eq!(config.max_tool_result_bytes, 65536);
+    }
+
+    #[test]
+    fn custom_max_tool_result_bytes_overrides_default() {
+        let toml_str = r#"
+            max_tool_result_bytes = 0
+        "#;
+        let config: ToolsConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_tool_result_bytes, 0);
     }
 
     #[test]
