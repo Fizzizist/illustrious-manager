@@ -52,10 +52,13 @@ gh pr ready <pr-number>
 Gather PR context — read ALL comments, not just specific markers:
 ```bash
 gh pr view <pr-number> --json title,body,comments,files
+gh api repos/{owner}/{repo}/pulls/<pr-number>/comments --jq '.[] | {user: .user.login, path: .path, line: (.original_line // .line // "?"), body: .body, diff_hunk: .diff_hunk, url: .html_url}'
 gh pr diff <pr-number>
 ```
 
-Read the PR description, ALL comments (plans, progress updates, prior reviews, discussion), and the linked issue. This full context must be provided to review agents so they understand what was intended and what has already been discussed.
+**Note:** `gh pr view --json comments` only returns regular PR comments (issue-level). Inline review comments (comments on specific lines of the diff) are a separate resource and must be fetched via the `gh api` command above. Both are important context.
+
+Read the PR description, ALL comments (plans, progress updates, prior reviews, discussion), inline review comments, and the linked issue. This full context must be provided to review agents so they understand what was intended and what has already been discussed.
 
 Update task: prepare → completed, review → in_progress.
 
@@ -134,7 +137,7 @@ Launch the `independent-assessor` subagent (MD file available in .claude/skills/
 
 Provide the assessor with:
 - The full review text
-- The PR context (title, body, comments)
+- The PR context (title, body, comments, inline review comments)
 - Instructions to **read the actual code** for each finding and verify independently
 
 The assessor classifies each finding as:
