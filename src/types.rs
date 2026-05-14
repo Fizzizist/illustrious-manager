@@ -311,6 +311,9 @@ pub enum StreamEvent {
         output_tokens: u32,
         stop_reason: String,
     },
+    /// Non-fatal warning emitted by the backend (e.g. malformed history blocks
+    /// dropped before sending). Routed by the agent layer to `AgentEvent::Warn`.
+    Warn(String),
     Done,
 }
 

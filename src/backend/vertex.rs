@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use tokio::sync::OnceCell;
 
@@ -333,9 +334,6 @@ impl LlmBackend for VertexBackend {
 
         let url = self.endpoint(&config.model);
         let (body, warnings) = build_request_body(messages, config)?;
-        for w in warnings {
-            tracing::warn!("{}", w);
-        }
         let thinking_enabled = config.thinking.as_ref().is_some_and(|tc| tc.enabled);
 
         let mut request = self
@@ -370,7 +368,17 @@ impl LlmBackend for VertexBackend {
             let events = std::mem::take(&mut sse_parser.event_buffer);
             Ok(events)
         });
-        Ok(event_stream)
+        if warnings.is_empty() {
+            Ok(event_stream)
+        } else {
+            let warn_events = stream::iter(
+                warnings
+                    .into_iter()
+                    .map(|w| Ok(StreamEvent::Warn(w)))
+                    .collect::<Vec<_>>(),
+            );
+            Ok(Box::pin(warn_events.chain(event_stream)))
+        }
     }
 }
 

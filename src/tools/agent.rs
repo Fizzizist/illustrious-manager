@@ -163,6 +163,12 @@ impl Tool for AgentTool {
             .spawn(&role, confirmation, tool_allowlist.as_deref(), prompt)
             .await;
 
+        let warn_events: Vec<crate::types::AgentEvent> = outcome
+            .warnings
+            .into_iter()
+            .map(crate::types::AgentEvent::Warn)
+            .collect();
+
         if outcome.is_error {
             let msg = outcome
                 .error_message
@@ -170,7 +176,7 @@ impl Tool for AgentTool {
             Ok(ToolResult {
                 content: vec![ContentBlock::Text(msg)],
                 is_error: true,
-                agent_events: vec![],
+                agent_events: warn_events,
             })
         } else {
             let usage_event = crate::types::AgentEvent::SubAgentUsage {
@@ -178,10 +184,12 @@ impl Tool for AgentTool {
                 output_tokens: outcome.output_tokens,
                 role: role.clone(),
             };
+            let mut agent_events = warn_events;
+            agent_events.push(usage_event);
             Ok(ToolResult {
                 content: vec![ContentBlock::Text(outcome.text)],
                 is_error: false,
-                agent_events: vec![usage_event],
+                agent_events,
             })
         }
     }
@@ -238,6 +246,7 @@ mod tests {
                 output_tokens: self.outcome.output_tokens,
                 is_error: self.outcome.is_error,
                 error_message: self.outcome.error_message.clone(),
+                warnings: self.outcome.warnings.clone(),
             }
         }
 
@@ -253,6 +262,7 @@ mod tests {
             output_tokens: 5,
             is_error: false,
             error_message: None,
+            warnings: vec![],
         }
     }
 
@@ -263,6 +273,18 @@ mod tests {
             output_tokens: 0,
             is_error: true,
             error_message: Some(msg.to_string()),
+            warnings: vec![],
+        }
+    }
+
+    fn ok_outcome_with_warnings(text: &str, warnings: Vec<String>) -> HeadlessOutcome {
+        HeadlessOutcome {
+            text: text.to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+            is_error: false,
+            error_message: None,
+            warnings,
         }
     }
 
@@ -451,6 +473,7 @@ mod tests {
                             output_tokens: 0,
                             is_error: true,
                             error_message: Some(e.to_string()),
+                            warnings: vec![],
                         };
                     }
                 };
@@ -481,6 +504,7 @@ mod tests {
                             output_tokens: 0,
                             is_error: true,
                             error_message: Some(e.to_string()),
+                            warnings: vec![],
                         };
                     }
                 };
@@ -605,6 +629,60 @@ mod tests {
         assert_eq!(
             captured, "implement",
             "explicit valid role should be forwarded to spawner"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_surfaces_outcome_warnings_as_warn_agent_events() {
+        let outcome = ok_outcome_with_warnings(
+            "ok",
+            vec![
+                "allowlist matched no tools".to_string(),
+                "another warning".to_string(),
+            ],
+        );
+        let (tool, _) = agent_tool_with_spawner(outcome, ConfirmationMode::Never);
+        let input = serde_json::json!({"prompt": "do it"});
+        let result = tool.execute(input).await.expect("execute should succeed");
+
+        let warn_events: Vec<&str> = result
+            .agent_events
+            .iter()
+            .filter_map(|e| match e {
+                crate::types::AgentEvent::Warn(msg) => Some(msg.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            warn_events,
+            vec!["allowlist matched no tools", "another warning"],
+            "outcome.warnings must be forwarded as AgentEvent::Warn entries in agent_events, in order"
+        );
+        assert!(
+            result
+                .agent_events
+                .iter()
+                .any(|e| matches!(e, crate::types::AgentEvent::SubAgentUsage { .. })),
+            "SubAgentUsage event must still be present alongside warnings"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_tool_surfaces_outcome_warnings_even_on_error_outcome() {
+        let mut outcome = err_outcome("backend exploded");
+        outcome.warnings.push("misconfigured allowlist".to_string());
+        let (tool, _) = agent_tool_with_spawner(outcome, ConfirmationMode::Never);
+        let input = serde_json::json!({"prompt": "do it"});
+        let result = tool.execute(input).await.expect("execute should succeed");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .agent_events
+                .iter()
+                .any(|e| matches!(e, crate::types::AgentEvent::Warn(msg) if msg == "misconfigured allowlist")),
+            "warnings must be surfaced even when outcome.is_error is true"
         );
     }
 }

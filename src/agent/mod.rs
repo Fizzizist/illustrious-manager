@@ -445,6 +445,9 @@ impl Agent {
                             });
                         }
                         Some(Ok(StreamEvent::Done)) => break,
+                        Some(Ok(StreamEvent::Warn(msg))) => {
+                            let _ = event_tx.unbounded_send(AgentEvent::Warn(msg));
+                        }
                         Some(Err(e)) => {
                             if !text_accumulated.is_empty() {
                                 persist_partial(&text_accumulated, &history_arc, &session).await;
@@ -4125,6 +4128,31 @@ mod tests {
         assert!(
             truncated.contains("[... output truncated:"),
             "truncated history content should contain the sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_warn_event_is_routed_to_agent_warn_event() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::Warn("dropped a malformed block".to_string())),
+            Ok(StreamEvent::TextDelta("hi".to_string())),
+            Ok(StreamEvent::Done),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("go".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let warn_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Warn(msg) if msg == "dropped a malformed block"))
+            .count();
+        assert_eq!(
+            warn_count, 1,
+            "StreamEvent::Warn should be forwarded to AgentEvent::Warn exactly once; got events: {events:?}"
         );
     }
 }

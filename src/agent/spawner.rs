@@ -18,6 +18,9 @@ pub struct HeadlessOutcome {
     pub output_tokens: u32,
     pub is_error: bool,
     pub error_message: Option<String>,
+    /// Non-fatal warnings produced while preparing or running the sub-agent.
+    /// Surfaced to the parent agent's event stream by `AgentTool::execute`.
+    pub warnings: Vec<String>,
 }
 
 /// Drive an `Agent` to completion without a human in the loop.
@@ -34,6 +37,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 output_tokens: 0,
                 is_error: true,
                 error_message: Some(e.to_string()),
+                warnings: vec![],
             };
         }
     };
@@ -44,6 +48,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
     let mut output_tokens: u32 = 0;
     let mut is_error = false;
     let mut error_message: Option<String> = None;
+    let mut warnings: Vec<String> = Vec::new();
 
     while let Some(event) = stream.next().await {
         match event {
@@ -74,7 +79,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             }
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Interrupted { .. } => {}
-            AgentEvent::Warn(_) => {}
+            AgentEvent::Warn(msg) => warnings.push(msg),
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
@@ -87,6 +92,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
         output_tokens,
         is_error,
         error_message,
+        warnings,
     }
 }
 
@@ -137,6 +143,8 @@ impl AgentSpawner {
         tool_allowlist: Option<&[String]>,
         prompt: String,
     ) -> HeadlessOutcome {
+        let mut spawn_warnings: Vec<String> = Vec::new();
+
         let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
             Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
             Err(e) => {
@@ -146,6 +154,7 @@ impl AgentSpawner {
                     output_tokens: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to create sub-agent session: {e}")),
+                    warnings: spawn_warnings,
                 };
             }
         };
@@ -159,15 +168,14 @@ impl AgentSpawner {
                     output_tokens: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to build sub-agent registry: {e}")),
+                    warnings: spawn_warnings,
                 };
             }
         };
 
         let registry = if let Some(allowlist) = tool_allowlist {
             let (filtered, warnings) = registry.into_filtered(allowlist);
-            for w in warnings {
-                tracing::warn!("{}", w);
-            }
+            spawn_warnings.extend(warnings);
             filtered
         } else {
             registry
@@ -187,6 +195,7 @@ impl AgentSpawner {
                     output_tokens: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to resolve role '{role}': {e}")),
+                    warnings: spawn_warnings,
                 };
             }
         };
@@ -201,6 +210,7 @@ impl AgentSpawner {
                         output_tokens: 0,
                         is_error: true,
                         error_message: Some(format!("Failed to spawn sub-agent: {e}")),
+                        warnings: spawn_warnings,
                     };
                 }
             };
@@ -214,12 +224,18 @@ impl AgentSpawner {
                     output_tokens: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to load context files: {e}")),
+                    warnings: spawn_warnings,
                 };
             }
         };
 
         let agent = agent.with_skills(&self.skills);
-        run_headless(&agent, prompt).await
+        let mut outcome = run_headless(&agent, prompt).await;
+        // Prepend pre-spawn warnings (e.g. allowlist mismatches) before any
+        // warnings the sub-agent itself produced during the run.
+        spawn_warnings.append(&mut outcome.warnings);
+        outcome.warnings = spawn_warnings;
+        outcome
     }
 }
 
