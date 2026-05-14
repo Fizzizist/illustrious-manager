@@ -18,6 +18,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 - Always run `cargo fmt` before committing code.
 - Always run `cargo clippy` before committing code.
 - Keep code comments to a minimum. Only comment in cases where something is unable to be gleaned from the code itself.
+- `eprintln!` and `println!` are forbidden in library and agent code (`src/backend/`, `src/tools/`, `src/agent/`). Return warnings as part of function return values and emit them via `tracing::warn!()` at the call site, or surface them as `AgentEvent::Warn` where an event channel is available.
 
 ### Testing
 

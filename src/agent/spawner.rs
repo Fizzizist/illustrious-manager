@@ -164,7 +164,11 @@ impl AgentSpawner {
         };
 
         let registry = if let Some(allowlist) = tool_allowlist {
-            registry.into_filtered(allowlist)
+            let (filtered, warnings) = registry.into_filtered(allowlist);
+            for w in warnings {
+                tracing::warn!("{}", w);
+            }
+            filtered
         } else {
             registry
         };

@@ -332,7 +332,10 @@ impl LlmBackend for VertexBackend {
         let token_str = token.as_str().to_owned();
 
         let url = self.endpoint(&config.model);
-        let body = build_request_body(messages, config)?;
+        let (body, warnings) = build_request_body(messages, config)?;
+        for w in warnings {
+            tracing::warn!("{}", w);
+        }
         let thinking_enabled = config.thinking.as_ref().is_some_and(|tc| tc.enabled);
 
         let mut request = self
@@ -371,7 +374,11 @@ impl LlmBackend for VertexBackend {
     }
 }
 
-fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<serde_json::Value> {
+fn build_request_body(
+    messages: &[Message],
+    config: &RequestConfig,
+) -> Result<(serde_json::Value, Vec<String>)> {
+    let mut warnings: Vec<String> = Vec::new();
     let messages_json: Vec<serde_json::Value> = messages
         .iter()
         .filter_map(|m| {
@@ -382,9 +389,8 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
                     if let crate::types::ContentBlock::Thinking { signature, .. } = block
                         && signature.is_empty()
                     {
-                        eprintln!(
-                            "WARNING: dropping thinking block with empty signature from history \
-                             (corrupted session data); it cannot be replayed."
+                        warnings.push(
+                            "dropping thinking block with empty signature from history (corrupted session data); it cannot be replayed.".to_string()
                         );
                         return false;
                     }
@@ -448,7 +454,7 @@ fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<se
         });
     }
 
-    Ok(body)
+    Ok((body, warnings))
 }
 
 /// Convenience wrapper for single-event parsing without state.
@@ -470,7 +476,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["max_tokens"], 32768);
         assert_eq!(body["anthropic_version"], ANTHROPIC_VERSION);
     }
@@ -483,7 +489,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert!(
             body.get("model").is_none() || body["model"].is_null(),
             "model must not be in the request body; Vertex AI embeds it in the URL"
@@ -502,7 +508,7 @@ mod tests {
             }],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         let tools = body["tools"].as_array().expect("tools should be an array");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "bash");
@@ -521,7 +527,7 @@ mod tests {
             }],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["tool_choice"]["type"], "auto");
         assert_eq!(body["tool_choice"]["disable_parallel_tool_use"], false);
     }
@@ -534,7 +540,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert!(
             body.get("tools").is_none() || body["tools"].is_null(),
             "tools must not be in the request body when empty"
@@ -888,7 +894,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&[message], &config).expect("build");
+        let (body, _) = build_request_body(&[message], &config).expect("build");
         let content = &body["messages"][0]["content"];
         let block = &content[0];
         assert_eq!(block["type"], "thinking");
@@ -913,7 +919,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&messages, &config).expect("build");
+        let (body, warnings) = build_request_body(&messages, &config).expect("build");
         let content = body["messages"][0]["content"]
             .as_array()
             .expect("content array");
@@ -923,6 +929,11 @@ mod tests {
             "empty-signature thinking block must be dropped"
         );
         assert_eq!(content[0]["type"], "text");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "dropping thinking block with empty signature from history (corrupted session data); it cannot be replayed."
+        );
     }
 
     #[test]
@@ -946,7 +957,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&messages, &config).expect("build");
+        let (body, _) = build_request_body(&messages, &config).expect("build");
         let content = body["messages"][0]["content"]
             .as_array()
             .expect("content array");
@@ -971,7 +982,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 16384);
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -989,7 +1000,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "adaptive");
         assert_eq!(body["thinking"]["display"], "summarized");
     }
@@ -1006,7 +1017,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["max_tokens"], 24576);
     }
 
@@ -1018,7 +1029,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert!(
             body.get("thinking").is_none(),
             "thinking must not be in the request body when None"
@@ -1037,7 +1048,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert!(
             body.get("thinking").is_none(),
             "thinking must not be in the request body when disabled"
@@ -1056,7 +1067,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
     }
 
@@ -1072,7 +1083,7 @@ mod tests {
                 display: None,
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
     }
 
@@ -1088,7 +1099,7 @@ mod tests {
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "omitted");
     }
 
@@ -1104,7 +1115,7 @@ mod tests {
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
     }
 
@@ -1120,7 +1131,7 @@ mod tests {
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
         assert_eq!(body["thinking"]["display"], "omitted");
@@ -1138,7 +1149,7 @@ mod tests {
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
         };
-        let body = build_request_body(&[], &config).expect("should build successfully");
+        let (body, _) = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 8192);
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -1215,7 +1226,7 @@ mod tests {
             tools: vec![],
             thinking: None,
         };
-        let body = build_request_body(&messages, &config).expect("build");
+        let (body, warnings) = build_request_body(&messages, &config).expect("build");
         let msgs = body["messages"].as_array().expect("messages array");
         assert_eq!(
             msgs.len(),
@@ -1223,5 +1234,10 @@ mod tests {
             "message with only empty-signature thinking blocks must be dropped"
         );
         assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            "dropping thinking block with empty signature from history (corrupted session data); it cannot be replayed."
+        );
     }
 }

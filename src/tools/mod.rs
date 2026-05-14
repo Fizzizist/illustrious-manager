@@ -137,19 +137,20 @@ impl ToolRegistry {
 
     /// Consume this registry and return a new one containing only the tools
     /// whose names appear in `allowlist`. Names not found in the registry are
-    /// silently skipped; a warning is printed if the result is empty.
-    pub fn into_filtered(mut self, allowlist: &[String]) -> Self {
+    /// silently skipped; warnings are returned if the result is empty.
+    pub fn into_filtered(mut self, allowlist: &[String]) -> (Self, Vec<String>) {
         let allowed: std::collections::HashSet<&str> =
             allowlist.iter().map(String::as_str).collect();
         self.tools.retain(|name, _| allowed.contains(name.as_str()));
+        let mut warnings = Vec::new();
         if self.tools.is_empty() && !allowlist.is_empty() {
-            eprintln!(
-                "WARNING: agent tool allowlist [{list}] matched no registered tools; \
+            warnings.push(format!(
+                "agent tool allowlist [{}] matched no registered tools; \
                  sub-agent will run with an empty tool set",
-                list = allowlist.join(", ")
-            );
+                allowlist.join(", ")
+            ));
         }
-        self
+        (self, warnings)
     }
 }
 
@@ -431,5 +432,33 @@ mod tests {
             md.contains("executed with:"),
             "should contain execution result text"
         );
+    }
+
+    #[test]
+    fn into_filtered_with_nonmatching_allowlist_returns_warning() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool {
+            name: "bash".to_string(),
+            description: "runs bash".to_string(),
+            schema: serde_json::json!({}),
+        }));
+        let (filtered, warnings) = registry.into_filtered(&["nonexistent".to_string()]);
+        assert!(filtered.tools.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("nonexistent"));
+        assert!(warnings[0].contains("matched no registered tools"));
+    }
+
+    #[test]
+    fn into_filtered_with_matching_allowlist_returns_no_warnings() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(MockTool {
+            name: "bash".to_string(),
+            description: "runs bash".to_string(),
+            schema: serde_json::json!({}),
+        }));
+        let (filtered, warnings) = registry.into_filtered(&["bash".to_string()]);
+        assert_eq!(filtered.tools.len(), 1);
+        assert!(warnings.is_empty());
     }
 }
