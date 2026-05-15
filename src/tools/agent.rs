@@ -267,14 +267,7 @@ mod tests {
     }
 
     fn err_outcome(msg: &str) -> HeadlessOutcome {
-        HeadlessOutcome {
-            text: String::new(),
-            input_tokens: 0,
-            output_tokens: 0,
-            is_error: true,
-            error_message: Some(msg.to_string()),
-            warnings: vec![],
-        }
+        HeadlessOutcome::error(msg, vec![])
     }
 
     fn ok_outcome_with_warnings(text: &str, warnings: Vec<String>) -> HeadlessOutcome {
@@ -467,14 +460,7 @@ mod tests {
                 let session = match Session::new(None, self.dir_path.clone()).await {
                     Ok(s) => Arc::new(TokioMutex::new(s)),
                     Err(e) => {
-                        return HeadlessOutcome {
-                            text: String::new(),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            is_error: true,
-                            error_message: Some(e.to_string()),
-                            warnings: vec![],
-                        };
+                        return HeadlessOutcome::error(e.to_string(), vec![]);
                     }
                 };
 
@@ -498,14 +484,7 @@ mod tests {
                 {
                     Ok(a) => a,
                     Err(e) => {
-                        return HeadlessOutcome {
-                            text: String::new(),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            is_error: true,
-                            error_message: Some(e.to_string()),
-                            warnings: vec![],
-                        };
+                        return HeadlessOutcome::error(e.to_string(), vec![]);
                     }
                 };
 

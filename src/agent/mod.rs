@@ -4155,4 +4155,44 @@ mod tests {
             "StreamEvent::Warn should be forwarded to AgentEvent::Warn exactly once; got events: {events:?}"
         );
     }
+
+    #[tokio::test]
+    async fn run_headless_collects_warn_events_into_outcome() {
+        use crate::agent::run_headless;
+
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::Warn("bad config".to_string())),
+            Ok(StreamEvent::Warn("another issue".to_string())),
+            Ok(StreamEvent::TextDelta("hello".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config);
+
+        let outcome = run_headless(&agent, "hi".to_string()).await;
+
+        assert!(!outcome.is_error, "outcome should not be an error");
+        assert_eq!(outcome.text, "hello");
+        assert_eq!(
+            outcome.warnings,
+            vec!["bad config", "another issue"],
+            "run_headless should collect all AgentEvent::Warn into outcome.warnings"
+        );
+    }
 }

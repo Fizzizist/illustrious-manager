@@ -23,6 +23,19 @@ pub struct HeadlessOutcome {
     pub warnings: Vec<String>,
 }
 
+impl HeadlessOutcome {
+    pub fn error(message: impl Into<String>, warnings: Vec<String>) -> Self {
+        Self {
+            text: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            is_error: true,
+            error_message: Some(message.into()),
+            warnings,
+        }
+    }
+}
+
 /// Drive an `Agent` to completion without a human in the loop.
 ///
 /// Any `ToolConfirmationRequired` event causes an immediate error — sub-agents
@@ -31,14 +44,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
     let stream = match agent.send(prompt, None, None).await {
         Ok(s) => s,
         Err(e) => {
-            return HeadlessOutcome {
-                text: String::new(),
-                input_tokens: 0,
-                output_tokens: 0,
-                is_error: true,
-                error_message: Some(e.to_string()),
-                warnings: vec![],
-            };
+            return HeadlessOutcome::error(e.to_string(), vec![]);
         }
     };
 
@@ -148,34 +154,28 @@ impl AgentSpawner {
         let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
             Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
             Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
-                    warnings: spawn_warnings,
-                };
+                return HeadlessOutcome::error(
+                    format!("Failed to create sub-agent session: {e}"),
+                    spawn_warnings,
+                );
             }
         };
 
         let registry = match (self.registry_builder)(Arc::clone(&session)) {
             Ok(r) => r,
             Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to build sub-agent registry: {e}")),
-                    warnings: spawn_warnings,
-                };
+                return HeadlessOutcome::error(
+                    format!("Failed to build sub-agent registry: {e}"),
+                    spawn_warnings,
+                );
             }
         };
 
         let registry = if let Some(allowlist) = tool_allowlist {
-            let (filtered, warnings) = registry.into_filtered(allowlist);
-            spawn_warnings.extend(warnings);
+            let (filtered, warning) = registry.into_filtered(allowlist);
+            if let Some(w) = warning {
+                spawn_warnings.push(w);
+            }
             filtered
         } else {
             registry
@@ -189,14 +189,10 @@ impl AgentSpawner {
         let selection = match self.factory.for_role(role).await {
             Ok(s) => s,
             Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
-                    warnings: spawn_warnings,
-                };
+                return HeadlessOutcome::error(
+                    format!("Failed to resolve role '{role}': {e}"),
+                    spawn_warnings,
+                );
             }
         };
 
@@ -204,28 +200,20 @@ impl AgentSpawner {
             match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
                 Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
                 Err(e) => {
-                    return HeadlessOutcome {
-                        text: String::new(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        is_error: true,
-                        error_message: Some(format!("Failed to spawn sub-agent: {e}")),
-                        warnings: spawn_warnings,
-                    };
+                    return HeadlessOutcome::error(
+                        format!("Failed to spawn sub-agent: {e}"),
+                        spawn_warnings,
+                    );
                 }
             };
 
         let agent = match agent.with_context_files() {
             Ok(a) => a,
             Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to load context files: {e}")),
-                    warnings: spawn_warnings,
-                };
+                return HeadlessOutcome::error(
+                    format!("Failed to load context files: {e}"),
+                    spawn_warnings,
+                );
             }
         };
 
@@ -233,8 +221,7 @@ impl AgentSpawner {
         let mut outcome = run_headless(&agent, prompt).await;
         // Prepend pre-spawn warnings (e.g. allowlist mismatches) before any
         // warnings the sub-agent itself produced during the run.
-        spawn_warnings.append(&mut outcome.warnings);
-        outcome.warnings = spawn_warnings;
+        outcome.warnings.splice(0..0, spawn_warnings);
         outcome
     }
 }
