@@ -130,6 +130,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mode = determine_mode(&cli)?;
 
+    // init_global before load_config so the first-run "Created default config at:"
+    // notice (logged at info) actually reaches the log file when --debug is set.
+    logging::init_global(cli.debug.then(create_log_path).transpose()?)?;
+
     let mut app_config = config::load_config(cli.config.as_deref())?;
     config::apply_overrides(
         &mut app_config,
@@ -138,12 +142,6 @@ async fn main() -> Result<()> {
         cli.model.as_deref(),
     );
     config::validate(&app_config, cli.config.as_deref())?;
-
-    logging::init_global(if cli.debug {
-        Some(create_log_path()?)
-    } else {
-        None
-    })?;
 
     let factory = Arc::new(BackendFactory::new(app_config.clone()));
     let app_config_arc = Arc::new(app_config.clone());

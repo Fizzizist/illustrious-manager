@@ -133,8 +133,13 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
             AgentEvent::ThinkingReceived(text) => {
-                write!(writer, "// {}", text)?;
-                writer.flush()?;
+                // Gated on --debug so single-shot stdout stays pipe-friendly by
+                // default; thinking text would otherwise interleave with the
+                // assistant response and break downstream JSON/jq parsers.
+                if crate::logging::is_enabled() {
+                    write!(writer, "// {}", text)?;
+                    writer.flush()?;
+                }
             }
             AgentEvent::Interrupted { .. } => {
                 writeln!(writer, "\n*(interrupted)*")?;

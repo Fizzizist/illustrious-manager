@@ -9,14 +9,25 @@ static GLOBAL_LOGGER: OnceLock<Mutex<Logger>> = OnceLock::new();
 
 /// Initialise the process-global logger. Call exactly once from `main`.
 ///
-/// When `log_path` is `None` all free functions are silent no-ops.
+/// When `log_path` is `None` the global is left uninitialised and all free
+/// functions remain silent no-ops. A second call is silently ignored (the
+/// first call wins) so this never panics — duplicate-init is a programming
+/// error but the policy forbids `.unwrap()`/panic.
 pub fn init_global(log_path: Option<PathBuf>) -> Result<()> {
-    let logger = Logger::new(log_path)?;
-    GLOBAL_LOGGER
-        .set(Mutex::new(logger))
-        .ok()
-        .expect("init_global called more than once");
+    let Some(path) = log_path else {
+        return Ok(());
+    };
+    let logger = Logger::new(Some(path))?;
+    let _ = GLOBAL_LOGGER.set(Mutex::new(logger));
     Ok(())
+}
+
+/// Returns `true` when the global logger has been initialised with a real
+/// log file (i.e. `--debug` was passed). Used by callers that need to gate
+/// optional output (e.g. streaming thinking text to stdout) on debug mode
+/// without re-threading the `cli.debug` flag through every layer.
+pub fn is_enabled() -> bool {
+    GLOBAL_LOGGER.get().is_some()
 }
 
 // ── Free functions — all silent no-ops when the global is uninitialised ──────
@@ -65,11 +76,23 @@ pub fn flush() {
     with_global(|l| l.flush());
 }
 
+/// Forward `f` to the locked global logger.
+///
+/// Silently absorbs three failure modes by design:
+/// 1. Global uninitialised (no `--debug`) → no-op.
+/// 2. Mutex poisoned by a panicking thread → no-op for all subsequent calls.
+/// 3. The closure's `Result` (typically a `writeln!` `io::Error`) is dropped.
+///
+/// This is intentional: the entire purpose of routing diagnostics through
+/// this module is to prevent stray stdout/stderr writes from corrupting the
+/// TUI's alternate-screen render. Propagating an IO error from a logging
+/// call would force every callsite to either swallow it or terminate the
+/// app, both of which are worse than silently dropping a debug log line.
 fn with_global(f: impl FnOnce(&mut Logger) -> Result<()>) {
-    if let Some(mutex) = GLOBAL_LOGGER.get() {
-        if let Ok(mut guard) = mutex.lock() {
-            let _ = f(&mut guard);
-        }
+    if let Some(mutex) = GLOBAL_LOGGER.get()
+        && let Ok(mut guard) = mutex.lock()
+    {
+        let _ = f(&mut guard);
     }
 }
 
@@ -464,12 +487,13 @@ mod tests {
         assert!(content.contains("before flush"));
     }
 
-    /// Exercises the global logger free functions via a Logger instance directly
-    /// (avoids OnceLock collisions across parallel tests).
+    /// Exercises `Logger` instance methods (`log_warn`/`log_info`/`log_error`)
+    /// directly. Does NOT touch the process-global; for global+free-function
+    /// coverage see `init_global_then_free_functions_write_to_log_file` below.
     #[test]
-    fn init_global_writes_warn_to_file() {
+    fn logger_instance_warn_info_error_methods_write_to_file() {
         let temp_dir = TempDir::new().expect("temp dir");
-        let log_path = temp_dir.path().join("global.log");
+        let log_path = temp_dir.path().join("instance.log");
         let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
 
         logger.log_warn("test warning").expect("log_warn");
@@ -484,5 +508,59 @@ mod tests {
         assert!(content.contains("test info"));
         assert!(content.contains("[ERROR]"));
         assert!(content.contains("test error"));
+    }
+
+    /// End-to-end test of the global logger path. `OnceLock` permits exactly
+    /// one initialisation per process, so this is the *only* test in the lib
+    /// test binary that calls `init_global`. It exercises:
+    ///   - `init_global(Some(_))` actually sets the global
+    ///   - `is_enabled()` reports `true` after initialisation
+    ///   - `init_global` is idempotent on second call (silent no-op, no panic)
+    ///   - free functions (`log_warn`, `log_event`) reach the underlying file
+    ///   - `flush()` forces buffered output to disk
+    ///
+    /// The TempDir is leaked so the open file descriptor in `GLOBAL_LOGGER`
+    /// outlives the test (other tests that route through `with_global` would
+    /// otherwise fail with EBADF on cleanup).
+    #[test]
+    fn init_global_then_free_functions_write_to_log_file() {
+        // Use a leaked path so the file outlives this test — the global keeps
+        // the BufWriter for the rest of the process.
+        let dir = TempDir::new().expect("temp dir").keep();
+        let log_path = dir.join("global.log");
+
+        init_global(Some(log_path.clone())).expect("first init_global");
+        assert!(is_enabled(), "is_enabled() must be true after init_global");
+
+        // Idempotent: second call must not panic and must not change the
+        // existing logger (still writes to the original log_path).
+        init_global(Some(dir.join("ignored.log")))
+            .expect("second init_global must be a silent no-op");
+
+        log_warn("global warn message");
+
+        let event = AgentEvent::ToolUseReceived {
+            id: "tool-1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            index: 1,
+        };
+        log_event(&event);
+
+        flush();
+
+        let content = std::fs::read_to_string(&log_path).expect("read file");
+        assert!(
+            content.contains("[WARN]") && content.contains("global warn message"),
+            "free fn log_warn must reach file; got: {content}"
+        );
+        assert!(
+            content.contains("[TOOL CALL]") && content.contains("name: bash"),
+            "free fn log_event must reach file; got: {content}"
+        );
+        assert!(
+            !content.contains("ignored.log"),
+            "second init_global must not have replaced the logger"
+        );
     }
 }
