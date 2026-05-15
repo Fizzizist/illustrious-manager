@@ -17,7 +17,6 @@ use std::time::SystemTime;
 
 use agent::spawn_agent;
 use backend::BackendFactory;
-use logging::Logger;
 use session::Session;
 use tools::ToolRegistry;
 use tools::agent::AgentTool;
@@ -140,6 +139,12 @@ async fn main() -> Result<()> {
     );
     config::validate(&app_config, cli.config.as_deref())?;
 
+    logging::init_global(if cli.debug {
+        Some(create_log_path()?)
+    } else {
+        None
+    })?;
+
     let factory = Arc::new(BackendFactory::new(app_config.clone()));
     let app_config_arc = Arc::new(app_config.clone());
 
@@ -172,17 +177,8 @@ async fn main() -> Result<()> {
         .with_compaction_spawner(spawner),
     );
 
-    let mut logger = if cli.debug {
-        let log_path = create_log_path()?;
-        Some(Logger::new(Some(log_path))?)
-    } else {
-        None
-    };
-
-    if let Some(ref mut log) = logger {
-        log.log_config(&app_config)?;
-        log.flush()?;
-    }
+    logging::log_config(&app_config);
+    logging::flush();
 
     let frontend_result = match mode {
         Mode::SingleShot {
@@ -199,32 +195,29 @@ async fn main() -> Result<()> {
             } else {
                 prompt
             };
-            if let Some(ref mut log) = logger {
-                log.log_user_input(&effective_prompt)?;
-            }
+            logging::log_user_input(&effective_prompt);
             frontend::stdout::run(
                 agent.clone(),
                 effective_prompt,
                 cli.output_format,
                 json_schema,
                 max_schema_retries,
-                logger.as_mut(),
             )
             .await
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await
+            frontend::tui::run(agent.clone(), initial_prompt, &app_config).await
         }
     };
 
     if let Err(e) = agent.checkpoint_session().await {
-        eprintln!("checkpoint_session failed: {e}");
+        logging::log_error(&format!("checkpoint_session failed: {e}"));
     }
 
     if let Err(e) = agent.cleanup_empty_session().await
         && cli.debug
     {
-        eprintln!("cleanup_empty_session failed: {e}");
+        logging::log_error(&format!("cleanup_empty_session failed: {e}"));
     }
 
     eprintln!("Session ID: {}", agent.session_id().await);

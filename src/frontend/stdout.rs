@@ -5,7 +5,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::sync::Arc;
 
 use crate::agent::Agent;
-use crate::logging::Logger;
+use crate::logging;
 use crate::types::{AgentEvent, BoxStream, ConfirmationResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
@@ -37,7 +37,6 @@ pub async fn run(
     format: OutputFormat,
     json_schema: Option<JsonSchema>,
     max_schema_retries: u32,
-    logger: Option<&mut Logger>,
 ) -> Result<()> {
     let is_tty = std::io::stdin().is_terminal();
     let stdout = io::stdout();
@@ -52,7 +51,6 @@ pub async fn run(
         max_schema_retries,
         is_tty,
         &mut stdin,
-        logger,
     )
     .await
 }
@@ -67,13 +65,12 @@ async fn run_with_writer<W: Write, R: BufRead>(
     max_schema_retries: u32,
     is_tty: bool,
     stdin: &mut R,
-    mut logger: Option<&mut Logger>,
 ) -> Result<()> {
     match format {
         OutputFormat::Text => {
             let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
             let mut stream = agent.send(prompt, Some(confirm_rx), None).await?;
-            run_text(&mut stream, writer, confirm_tx, is_tty, stdin, &mut logger).await
+            run_text(&mut stream, writer, confirm_tx, is_tty, stdin).await
         }
         OutputFormat::Json => {
             run_json(
@@ -84,7 +81,6 @@ async fn run_with_writer<W: Write, R: BufRead>(
                 max_schema_retries,
                 is_tty,
                 stdin,
-                &mut logger,
             )
             .await
         }
@@ -97,13 +93,10 @@ async fn run_text<W: Write, R: BufRead>(
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
     is_tty: bool,
     stdin: &mut R,
-    logger: &mut Option<&mut Logger>,
 ) -> Result<()> {
     while let Some(event) = stream.next().await {
-        if let Some(log) = logger.as_deref_mut() {
-            log.log_event(&event)?;
-            log.flush()?;
-        }
+        logging::log_event(&event);
+        logging::flush();
         match event {
             AgentEvent::TokenReceived(text) => {
                 write!(writer, "{}", text)?;
@@ -140,10 +133,8 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
             AgentEvent::ThinkingReceived(text) => {
-                if logger.is_some() {
-                    write!(writer, "// {}", text)?;
-                    writer.flush()?;
-                }
+                write!(writer, "// {}", text)?;
+                writer.flush()?;
             }
             AgentEvent::Interrupted { .. } => {
                 writeln!(writer, "\n*(interrupted)*")?;
@@ -170,17 +161,14 @@ async fn collect_response<R: BufRead>(
     confirm_tx: mpsc::UnboundedSender<ConfirmationResponse>,
     is_tty: bool,
     stdin: &mut R,
-    logger: &mut Option<&mut Logger>,
 ) -> Result<(String, bool)> {
     let mut result_text = String::new();
     let mut is_error = false;
     let mut in_tool_iteration = false;
 
     while let Some(event) = stream.next().await {
-        if let Some(log) = logger.as_deref_mut() {
-            log.log_event(&event)?;
-            log.flush()?;
-        }
+        logging::log_event(&event);
+        logging::flush();
         match event {
             AgentEvent::TokenReceived(text) => {
                 if !in_tool_iteration {
@@ -247,11 +235,10 @@ async fn run_json<W: Write, R: BufRead>(
     max_schema_retries: u32,
     is_tty: bool,
     stdin: &mut R,
-    logger: &mut Option<&mut Logger>,
 ) -> Result<()> {
     let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
     let mut stream = agent.send(initial_prompt, Some(confirm_rx), None).await?;
-    let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin, logger).await?;
+    let initial = collect_response(&mut stream, confirm_tx, is_tty, stdin).await?;
 
     let (result, is_error) = apply_schema_retry(
         initial,
@@ -260,7 +247,6 @@ async fn run_json<W: Write, R: BufRead>(
         &agent,
         is_tty,
         stdin,
-        logger,
     )
     .await?;
 
@@ -297,7 +283,6 @@ async fn apply_schema_retry<R: BufRead>(
     agent: &Agent,
     is_tty: bool,
     stdin: &mut R,
-    logger: &mut Option<&mut Logger>,
 ) -> Result<(serde_json::Value, bool)> {
     let (mut result_text, mut is_error) = initial;
 
@@ -323,8 +308,7 @@ async fn apply_schema_retry<R: BufRead>(
                     let (retry_tx, retry_rx) = mpsc::unbounded::<ConfirmationResponse>();
                     let mut retry_stream = agent.send(reprompt, Some(retry_rx), None).await?;
                     let (new_text, new_error) =
-                        collect_response(&mut retry_stream, retry_tx, is_tty, stdin, logger)
-                            .await?;
+                        collect_response(&mut retry_stream, retry_tx, is_tty, stdin).await?;
                     result_text = new_text;
                     is_error = new_error;
                     if is_error {
@@ -406,14 +390,14 @@ mod tests {
         let mut s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let mut buf = Vec::new();
         let (tx, _rx) = make_confirm_channel();
-        let result = run_text(&mut s, &mut buf, tx, is_tty, &mut io::empty(), &mut None).await;
+        let result = run_text(&mut s, &mut buf, tx, is_tty, &mut io::empty()).await;
         (result, buf)
     }
 
     async fn run_json_collect(events: Vec<AgentEvent>, is_tty: bool) -> (String, bool) {
         let mut s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let (tx, _rx) = make_confirm_channel();
-        collect_response(&mut s, tx, is_tty, &mut io::empty(), &mut None)
+        collect_response(&mut s, tx, is_tty, &mut io::empty())
             .await
             .expect("collect should not fail")
     }
@@ -565,7 +549,7 @@ mod tests {
         let mut s: BoxStream<AgentEvent> = Box::pin(stream::iter(events));
         let mut buf = Vec::new();
         let (tx, mut rx) = make_confirm_channel();
-        let result = run_text(&mut s, &mut buf, tx, false, &mut io::empty(), &mut None).await;
+        let result = run_text(&mut s, &mut buf, tx, false, &mut io::empty()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("non-TTY"));
         let response = rx.try_recv().expect("channel should have a value");
@@ -587,7 +571,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, mut rx) = make_confirm_channel();
         let mut fake_stdin = io::Cursor::new(b"y\n".as_ref());
-        run_text(&mut s, &mut buf, tx, true, &mut fake_stdin, &mut None)
+        run_text(&mut s, &mut buf, tx, true, &mut fake_stdin)
             .await
             .expect("should succeed in TTY mode");
         let response = rx.try_recv().expect("channel should have a value");
@@ -609,7 +593,7 @@ mod tests {
         let mut buf = Vec::new();
         let (tx, mut rx) = make_confirm_channel();
         let mut fake_stdin = io::Cursor::new(b"n\n".as_ref());
-        run_text(&mut s, &mut buf, tx, true, &mut fake_stdin, &mut None)
+        run_text(&mut s, &mut buf, tx, true, &mut fake_stdin)
             .await
             .expect("should succeed in TTY mode");
         let response = rx.try_recv().expect("channel should have a value");
@@ -703,10 +687,9 @@ mod tests {
         let mut s: BoxStream<AgentEvent> = Box::pin(futures::stream::iter(events));
         let (tx, mut rx) = mpsc::unbounded::<ConfirmationResponse>();
 
-        let (result_text, is_error) =
-            collect_response(&mut s, tx, false, &mut io::empty(), &mut None)
-                .await
-                .expect("collect_response should not propagate error");
+        let (result_text, is_error) = collect_response(&mut s, tx, false, &mut io::empty())
+            .await
+            .expect("collect_response should not propagate error");
 
         // collect_response sets is_error=true and sends Rejected in non-TTY mode.
         assert!(is_error);
@@ -871,8 +854,7 @@ mod tests {
         // Collect initial response from stream.
         let mut first_stream: BoxStream<AgentEvent> = Box::pin(futures::stream::iter(first_events));
         let (tx, _rx) = mpsc::unbounded::<ConfirmationResponse>();
-        let initial =
-            collect_response(&mut first_stream, tx, false, &mut io::empty(), &mut None).await?;
+        let initial = collect_response(&mut first_stream, tx, false, &mut io::empty()).await?;
 
         // Build agent with remaining responses for retries.
         let agent = make_sequenced_agent(all).await;
@@ -884,7 +866,6 @@ mod tests {
             &agent,
             false,
             &mut io::empty(),
-            &mut None,
         )
         .await
     }
@@ -1004,7 +985,6 @@ mod tests {
             &agent,
             false,
             &mut io::empty(),
-            &mut None,
         )
         .await
         .expect("should not propagate");

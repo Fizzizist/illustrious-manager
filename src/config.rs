@@ -369,7 +369,7 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
         }
         fs::write(&path, CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to write default config: {}", path.display()))?;
-        eprintln!("Created default config at: {}", path.display());
+        crate::logging::log_info(&format!("Created default config at: {}", path.display()));
     }
 
     load_config_from_path(&path)

@@ -27,7 +27,6 @@ use super::status_line::{self, StatusLineInfo, TokenUsage};
 use super::tasks_picker::{TasksPicker, TasksPickerAction};
 use crate::agent::Agent;
 use crate::config::AppConfig;
-use crate::logging::Logger;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -458,15 +457,9 @@ pub fn handle_esc(app: &mut App) {
     }
 }
 
-pub fn handle_agent_event(
-    app: &mut App,
-    event: AgentEvent,
-    logger: Option<&mut Logger>,
-) -> Result<()> {
-    if let Some(log) = logger {
-        log.log_event(&event)?;
-        log.flush()?;
-    }
+pub fn handle_agent_event(app: &mut App, event: AgentEvent) -> Result<()> {
+    crate::logging::log_event(&event);
+    crate::logging::flush();
     match event {
         AgentEvent::TokenReceived(text) => {
             app.current_response.push_str(&text);
@@ -610,7 +603,6 @@ pub fn handle_agent_event(
 pub async fn run(
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
-    logger: Option<Logger>,
     config: &AppConfig,
 ) -> Result<()> {
     enable_raw_mode()?;
@@ -619,7 +611,7 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt, logger, config).await;
+    let result = run_app(&mut terminal, agent, initial_prompt, config).await;
 
     disable_raw_mode()?;
     execute!(
@@ -636,7 +628,6 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     agent: Arc<Agent>,
     initial_prompt: Option<String>,
-    mut logger: Option<Logger>,
     config: &AppConfig,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
@@ -652,9 +643,7 @@ async fn run_app(
     let cmd_registry = default_registry();
 
     if let Some(prompt) = initial_prompt {
-        if let Some(ref mut log) = logger {
-            log.log_user_input(&prompt)?;
-        }
+        crate::logging::log_user_input(&prompt);
         app.set_input(&prompt);
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
@@ -717,7 +706,7 @@ async fn run_app(
                     });
                     app.compaction_task = Some(compact_task);
                 } else {
-                    handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+                    handle_agent_event(&mut app, agent_event)?;
                 }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
@@ -749,9 +738,7 @@ async fn run_app(
                                         };
                                         let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
                                         if dispatch == DispatchResult::Passthrough {
-                                            if let Some(ref mut log) = logger {
-                                                log.log_user_input(&text)?;
-                                            }
+                                            crate::logging::log_user_input(&text);
                                             stream_task = Some(
                                                 submit_message(&mut app, agent.clone(), &event_tx)
                                                     .await?,
@@ -1123,13 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_agent_event_logs_tool_use_to_logger() {
-        use crate::logging::Logger;
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().expect("temp dir");
-        let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
+    fn handle_agent_event_tool_use_received_adds_conversation_entry() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
         let event = AgentEvent::ToolUseReceived {
@@ -1139,37 +1120,30 @@ mod tests {
             index: 1,
         };
 
-        handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
-        drop(logger);
+        handle_agent_event(&mut app, event).expect("handle event");
 
-        let content = std::fs::read_to_string(&log_path).expect("read log");
-        assert!(content.contains("[TOOL CALL]"), "should log tool call");
-        assert!(content.contains("name: bash"), "should log tool name");
+        assert!(
+            !app.conversation.is_empty(),
+            "ToolUseReceived should add a conversation entry"
+        );
     }
 
     #[test]
-    fn handle_agent_event_logs_response_complete_to_logger() {
-        use crate::logging::Logger;
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().expect("temp dir");
-        let log_path = temp_dir.path().join("test.log");
-        let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
+    fn handle_agent_event_response_complete_adds_conversation_entry() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
         let event = AgentEvent::ResponseComplete("hello world".to_string());
 
-        handle_agent_event(&mut app, event, Some(&mut logger)).expect("handle event");
-        drop(logger);
+        handle_agent_event(&mut app, event).expect("handle event");
 
-        let content = std::fs::read_to_string(&log_path).expect("read log");
+        let texts: Vec<&str> = app
+            .conversation
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
         assert!(
-            content.contains("[ASSISTANT RESPONSE]"),
-            "should log response"
-        );
-        assert!(
-            content.contains("hello world"),
-            "should log response content"
+            texts.iter().any(|t| t.contains("hello world")),
+            "ResponseComplete should add the response text to conversation"
         );
     }
 
@@ -1177,7 +1151,7 @@ mod tests {
     fn handle_agent_event_with_no_logger_does_not_panic() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let event = AgentEvent::ResponseComplete("test".to_string());
-        handle_agent_event(&mut app, event, None).expect("should not error without logger");
+        handle_agent_event(&mut app, event).expect("should not error without logger");
     }
 
     #[test]
@@ -1185,7 +1159,7 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.git_branch = Some("old-branch".to_string());
         let event = AgentEvent::ResponseComplete("done".to_string());
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
         let current = status_line::detect_git_branch();
         assert_eq!(
             app.git_branch, current,
@@ -1198,7 +1172,7 @@ mod tests {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.git_branch = Some("old-branch".to_string());
         let event = AgentEvent::Error("oops".to_string());
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
         let current = status_line::detect_git_branch();
         assert_eq!(app.git_branch, current, "Error should refresh git branch");
     }
@@ -1215,7 +1189,7 @@ mod tests {
             output_tokens: 50,
             stop_reason: "end_turn".to_string(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle usage event");
+        handle_agent_event(&mut app, event).expect("handle usage event");
 
         assert_eq!(app.usage.input_tokens, 100);
         assert_eq!(app.usage.output_tokens, 50);
@@ -1228,7 +1202,7 @@ mod tests {
             output_tokens: 75,
             stop_reason: "end_turn".to_string(),
         };
-        handle_agent_event(&mut app, event2, None).expect("handle second usage event");
+        handle_agent_event(&mut app, event2).expect("handle second usage event");
 
         assert_eq!(
             app.usage.input_tokens, 300,
@@ -1251,7 +1225,6 @@ mod tests {
                 output_tokens: 100,
                 stop_reason: "end_turn".to_string(),
             },
-            None,
         )
         .expect("turn 1");
 
@@ -1263,7 +1236,6 @@ mod tests {
                 output_tokens: 150,
                 stop_reason: "end_turn".to_string(),
             },
-            None,
         )
         .expect("turn 2");
 
@@ -1275,7 +1247,6 @@ mod tests {
                 output_tokens: 80,
                 stop_reason: "end_turn".to_string(),
             },
-            None,
         )
         .expect("turn 3");
 
@@ -1299,7 +1270,7 @@ mod tests {
             output_tokens: 80,
             role: "default".to_string(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle SubAgentUsage");
+        handle_agent_event(&mut app, event).expect("handle SubAgentUsage");
 
         // SubAgentUsage must NOT touch app.usage
         assert_eq!(app.usage.input_tokens, 0, "parent usage must stay zero");
@@ -1316,7 +1287,7 @@ mod tests {
             output_tokens: 30,
             role: "fast".to_string(),
         };
-        handle_agent_event(&mut app, event2, None).expect("handle second SubAgentUsage");
+        handle_agent_event(&mut app, event2).expect("handle second SubAgentUsage");
 
         assert_eq!(app.subagent_usage.input_tokens, 250);
         assert_eq!(app.subagent_usage.output_tokens, 110);
@@ -1333,7 +1304,7 @@ mod tests {
             output_tokens: 50,
             stop_reason: "end_turn".to_string(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle Usage");
+        handle_agent_event(&mut app, event).expect("handle Usage");
 
         assert_eq!(app.usage.input_tokens, 100);
         assert_eq!(
@@ -1568,7 +1539,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             index: 1,
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         let assistant_entries: Vec<_> = app
             .conversation
@@ -1607,7 +1578,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             index: 1,
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         let assistant_entries: Vec<_> = app
             .conversation
@@ -1631,7 +1602,7 @@ mod tests {
             input: serde_json::json!({"path": "/tmp/test.txt"}),
             index: 1,
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         let assistant_entries: Vec<_> = app
             .conversation
@@ -1830,7 +1801,7 @@ mod tests {
             input: serde_json::json!({"command": "ls"}),
             index: 3,
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         // The app is now in ToolConfirmation state with index=3.
         assert!(matches!(
@@ -1905,7 +1876,7 @@ mod tests {
             output_tokens: 30,
             stop_reason: "end_turn".to_string(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         assert!(
             !app.usage.is_estimated,
@@ -2247,7 +2218,7 @@ mod tests {
             }),
             index: 1,
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, ConversationRole::ToolUse);
@@ -2438,7 +2409,7 @@ mod tests {
         let event = AgentEvent::Interrupted {
             partial_text: "partial response".to_string(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         assert_eq!(
             app.state,
@@ -2471,7 +2442,7 @@ mod tests {
         let event = AgentEvent::Interrupted {
             partial_text: String::new(),
         };
-        handle_agent_event(&mut app, event, None).expect("handle event");
+        handle_agent_event(&mut app, event).expect("handle event");
 
         assert_eq!(app.state, AppState::Input);
         assert!(
@@ -2494,7 +2465,6 @@ mod tests {
             AgentEvent::Interrupted {
                 partial_text: String::new(),
             },
-            None,
         )
         .expect("handle event");
 
@@ -2722,7 +2692,6 @@ mod tests {
                 summary: "test".to_string(),
                 is_error: false,
             },
-            None,
         )
         .expect("handle event should not error");
 
@@ -2747,7 +2716,6 @@ mod tests {
                 current_tokens: 60000,
                 threshold: 50000,
             },
-            None,
         )
         .expect("handle event should not error");
 
@@ -2777,7 +2745,6 @@ mod tests {
         handle_agent_event(
             &mut app,
             AgentEvent::ThinkingReceived("reasoning step 1".to_string()),
-            None,
         )
         .expect("handle event");
         assert_eq!(app.current_thinking, "reasoning step 1");
@@ -2785,7 +2752,6 @@ mod tests {
         handle_agent_event(
             &mut app,
             AgentEvent::ThinkingReceived(" reasoning step 2".to_string()),
-            None,
         )
         .expect("handle event");
         assert_eq!(
@@ -2801,13 +2767,11 @@ mod tests {
         handle_agent_event(
             &mut app,
             AgentEvent::ThinkingReceived("my thoughts".to_string()),
-            None,
         )
         .expect("handle thinking");
         handle_agent_event(
             &mut app,
             AgentEvent::ResponseComplete("my answer".to_string()),
-            None,
         )
         .expect("handle complete");
 
@@ -2844,13 +2808,11 @@ mod tests {
         handle_agent_event(
             &mut app,
             AgentEvent::ThinkingReceived("partial thinking".to_string()),
-            None,
         )
         .expect("handle thinking");
         assert!(!app.current_thinking.is_empty());
 
-        handle_agent_event(&mut app, AgentEvent::Error("error".to_string()), None)
-            .expect("handle error");
+        handle_agent_event(&mut app, AgentEvent::Error("error".to_string())).expect("handle error");
 
         assert!(
             app.current_thinking.is_empty(),
@@ -2865,7 +2827,6 @@ mod tests {
         handle_agent_event(
             &mut app,
             AgentEvent::ThinkingReceived("thinking before interrupt".to_string()),
-            None,
         )
         .expect("handle thinking");
 
@@ -2874,7 +2835,6 @@ mod tests {
             AgentEvent::Interrupted {
                 partial_text: "partial".to_string(),
             },
-            None,
         )
         .expect("handle interrupted");
 

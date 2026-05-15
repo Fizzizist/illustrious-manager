@@ -18,6 +18,9 @@ These are _strict_ policies that must be followed by all engineers and developer
 - Always run `cargo fmt` before committing code.
 - Always run `cargo clippy` before committing code.
 - Keep code comments to a minimum. Only comment in cases where something is unable to be gleaned from the code itself.
+- The use of `eprintln!`, `println!`, `print!`, `eprint!`, and `dbg!` macros is forbidden in `src/`. All diagnostic output must go through the `logging` module's free functions (`logging::log_warn`, `logging::log_error`, `logging::log_info`, etc.). Direct stdout/stderr writes corrupt the TUI's alternate-screen render. Two narrowly-scoped exceptions exist and must not be expanded:
+  - `main.rs` prints the final `Session ID:` line on exit, after the frontend has released the terminal.
+  - `frontend/stdout.rs` uses `eprintln!`/`eprint!` for interactive single-shot mode confirmation prompts and error reporting (no TUI is active).
 
 ### Testing
 

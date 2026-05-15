@@ -3,6 +3,77 @@ use anyhow::Result;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+static GLOBAL_LOGGER: OnceLock<Mutex<Logger>> = OnceLock::new();
+
+/// Initialise the process-global logger. Call exactly once from `main`.
+///
+/// When `log_path` is `None` all free functions are silent no-ops.
+pub fn init_global(log_path: Option<PathBuf>) -> Result<()> {
+    let logger = Logger::new(log_path)?;
+    GLOBAL_LOGGER
+        .set(Mutex::new(logger))
+        .ok()
+        .expect("init_global called more than once");
+    Ok(())
+}
+
+// ── Free functions — all silent no-ops when the global is uninitialised ──────
+
+pub fn log_user_input(input: &str) {
+    with_global(|l| l.log_user_input(input));
+}
+
+pub fn log_tool_use(name: &str, input: &serde_json::Value) {
+    with_global(|l| l.log_tool_use(name, input));
+}
+
+pub fn log_tool_result(name: &str, content: &str, is_error: bool) {
+    with_global(|l| l.log_tool_result(name, content, is_error));
+}
+
+pub fn log_assistant_response(response: &str) {
+    with_global(|l| l.log_assistant_response(response));
+}
+
+pub fn log_usage(input_tokens: u32, output_tokens: u32, stop_reason: &str) {
+    with_global(|l| l.log_usage(input_tokens, output_tokens, stop_reason));
+}
+
+pub fn log_config(config: &dyn std::fmt::Debug) {
+    with_global(|l| l.log_config(config));
+}
+
+pub fn log_event(event: &AgentEvent) {
+    with_global(|l| l.log_event(event));
+}
+
+pub fn log_warn(message: &str) {
+    with_global(|l| l.log_warn(message));
+}
+
+pub fn log_error(message: &str) {
+    with_global(|l| l.log_error(message));
+}
+
+pub fn log_info(message: &str) {
+    with_global(|l| l.log_info(message));
+}
+
+pub fn flush() {
+    with_global(|l| l.flush());
+}
+
+fn with_global(f: impl FnOnce(&mut Logger) -> Result<()>) {
+    if let Some(mutex) = GLOBAL_LOGGER.get() {
+        if let Ok(mut guard) = mutex.lock() {
+            let _ = f(&mut guard);
+        }
+    }
+}
+
+// ── Logger struct (stays constructible for tests) ─────────────────────────────
 
 pub struct Logger {
     log_file: Option<BufWriter<File>>,
@@ -103,6 +174,15 @@ impl Logger {
     pub fn log_warn(&mut self, message: &str) -> Result<()> {
         if let Some(ref mut writer) = self.log_file {
             writeln!(writer, "[WARN]")?;
+            writeln!(writer, "{}", message)?;
+            writeln!(writer)?;
+        }
+        Ok(())
+    }
+
+    pub fn log_info(&mut self, message: &str) -> Result<()> {
+        if let Some(ref mut writer) = self.log_file {
+            writeln!(writer, "[INFO]")?;
             writeln!(writer, "{}", message)?;
             writeln!(writer)?;
         }
@@ -382,5 +462,27 @@ mod tests {
 
         let content = std::fs::read_to_string(&log_path).expect("Failed to read log file");
         assert!(content.contains("before flush"));
+    }
+
+    /// Exercises the global logger free functions via a Logger instance directly
+    /// (avoids OnceLock collisions across parallel tests).
+    #[test]
+    fn init_global_writes_warn_to_file() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let log_path = temp_dir.path().join("global.log");
+        let mut logger = Logger::new(Some(log_path.clone())).expect("logger");
+
+        logger.log_warn("test warning").expect("log_warn");
+        logger.log_info("test info").expect("log_info");
+        logger.log_error("test error").expect("log_error");
+        logger.flush().expect("flush");
+
+        let content = std::fs::read_to_string(&log_path).expect("read file");
+        assert!(content.contains("[WARN]"));
+        assert!(content.contains("test warning"));
+        assert!(content.contains("[INFO]"));
+        assert!(content.contains("test info"));
+        assert!(content.contains("[ERROR]"));
+        assert!(content.contains("test error"));
     }
 }
