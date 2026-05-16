@@ -32,7 +32,7 @@ struct PendingToolCall {
 }
 
 pub struct Agent {
-    backend: Arc<dyn LlmBackend>,
+    backend: Mutex<Arc<dyn LlmBackend>>,
     history: Arc<Mutex<Vec<Message>>>,
     /// Number of messages prepended to `history` that are never persisted to the DB
     /// (context files, skill definitions). Preserved across session switches.
@@ -82,7 +82,7 @@ impl Agent {
             .unwrap_or_default();
 
         Self {
-            backend: Arc::from(backend),
+            backend: Mutex::new(Arc::from(backend)),
             history: Arc::new(Mutex::new(history)),
             context_prefix_len: Arc::new(Mutex::new(0)),
             config: Mutex::new(config),
@@ -177,6 +177,12 @@ impl Agent {
     }
 
     pub fn set_model(&self, model: String) {
+        self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
+    }
+
+    /// Replace the backend and model simultaneously (used by `/role` command).
+    pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String) {
+        *self.backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
@@ -304,7 +310,7 @@ impl Agent {
 
         let (event_tx, event_rx) = mpsc::unbounded::<AgentEvent>();
         let history_arc = Arc::clone(&self.history);
-        let backend = Arc::clone(&self.backend);
+        let backend = Arc::clone(&self.backend.lock().unwrap_or_else(|e| e.into_inner()));
         let tools = Arc::clone(&self.tools);
         let config = self
             .config
@@ -4263,5 +4269,41 @@ mod tests {
             truncated.contains("[... output truncated:"),
             "truncated history content should contain the sentinel"
         );
+    }
+
+    #[tokio::test]
+    async fn set_backend_replaces_backend_and_model() {
+        let backend1 = SequencedBackend::new(vec![text_response("from-backend-one")]);
+        let config = RequestConfig {
+            model: "model-one".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
+        assert_eq!(agent.model(), "model-one");
+
+        let backend2 = SequencedBackend::new(vec![text_response("from-backend-two")]);
+        agent.set_backend(
+            Arc::new(backend2) as Arc<dyn LlmBackend>,
+            "model-two".to_string(),
+        );
+        assert_eq!(agent.model(), "model-two");
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let response = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::ResponseComplete(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("expected ResponseComplete");
+
+        assert_eq!(response, "from-backend-two");
     }
 }
