@@ -361,6 +361,8 @@ impl OpenAiCompatBackend {
             body["parallel_tool_calls"] = serde_json::json!(true);
         }
 
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+
         match self.reasoning {
             ReasoningStyle::ZaiEnableThinking => {
                 if let Some(ref thinking_config) = config.thinking
@@ -1090,6 +1092,16 @@ mod tests {
     }
 
     // --- build_request_body: thinking/null regression ---
+
+    #[test]
+    fn build_request_body_includes_stream_options_when_streaming() {
+        let b = make_backend(ReasoningStyle::None);
+        let body = b.build_request_body(&[user_text("hi")], &simple_config());
+        assert_eq!(
+            body["stream_options"]["include_usage"], true,
+            "stream_options.include_usage must be true in every streaming request"
+        );
+    }
 
     #[test]
     fn build_request_body_assistant_thinking_blocks_not_serialised_as_null() {
