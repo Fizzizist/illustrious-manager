@@ -69,7 +69,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 output_tokens: ot,
                 ..
             } => {
-                input_tokens = input_tokens.saturating_add(it);
+                input_tokens = input_tokens.max(it);
                 output_tokens = output_tokens.saturating_add(ot);
             }
             AgentEvent::SubAgentUsage { .. } => {}
