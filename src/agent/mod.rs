@@ -4136,7 +4136,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_backend_replaces_backend_and_model() {
-        let backend1 = SequencedBackend::new(vec![text_response("first")]);
+        let backend1 = SequencedBackend::new(vec![text_response("from-backend-one")]);
         let config = RequestConfig {
             model: "model-one".to_string(),
             max_tokens: 100,
@@ -4146,11 +4146,27 @@ mod tests {
         let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
         assert_eq!(agent.model(), "model-one");
 
-        let backend2 = SequencedBackend::new(vec![text_response("second")]);
+        let backend2 = SequencedBackend::new(vec![text_response("from-backend-two")]);
         agent.set_backend(
             Arc::new(backend2) as Arc<dyn LlmBackend>,
             "model-two".to_string(),
         );
         assert_eq!(agent.model(), "model-two");
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let response = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::ResponseComplete(text) => Some(text.clone()),
+                _ => None,
+            })
+            .expect("expected ResponseComplete");
+
+        assert_eq!(response, "from-backend-two");
     }
 }
