@@ -933,6 +933,17 @@ mod tests {
             "old message".to_string(),
         ));
         app.model = "test-model".to_string();
+        // Pre-populate App state that should be reset
+        app.current_response = "partial response".to_string();
+        app.current_thinking = "partial thinking".to_string();
+        app.scroll_offset = 42;
+        app.usage = crate::frontend::tui::TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            is_estimated: false,
+        };
+        // Capture original session ID
+        let original_session_id = agent.session_id().await;
         let cmd = NewCommand;
         let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
         let mut ctx = CommandContext {
@@ -946,7 +957,7 @@ mod tests {
         assert_eq!(result, DispatchResult::Handled);
         // Model should be preserved
         assert_eq!(ctx.app.model, "test-model");
-        // Should have info message about new session (conversation was cleared then info added)
+        // Should have info message about new session
         assert!(
             ctx.app
                 .conversation
@@ -961,6 +972,158 @@ mod tests {
                 .iter()
                 .any(|e| e.content == "old message"),
             "old conversation should be cleared"
+        );
+        // Session ID should have changed
+        let new_session_id = ctx.agent.session_id().await;
+        assert_ne!(
+            original_session_id, new_session_id,
+            "session ID should change after /new"
+        );
+        // Agent history should reflect the new empty session
+        let history = ctx.agent.history();
+        assert!(
+            history.is_empty(),
+            "new session should have empty history, got {} messages",
+            history.len()
+        );
+        // Full App state should be reset
+        assert!(
+            ctx.app.current_response.is_empty(),
+            "current_response should be cleared after /new"
+        );
+        assert!(
+            ctx.app.current_thinking.is_empty(),
+            "current_thinking should be cleared after /new"
+        );
+        assert_eq!(
+            ctx.app.scroll_offset, 0,
+            "scroll_offset should be reset after /new"
+        );
+        assert_eq!(
+            ctx.app.usage.input_tokens, 0,
+            "usage should be reset after /new"
+        );
+        assert_eq!(
+            ctx.app.usage.output_tokens, 0,
+            "usage should be reset after /new"
+        );
+    }
+
+    #[tokio::test]
+    async fn role_command_with_valid_role_switches_backend_and_model() {
+        use crate::config::{ModelRole, OpenAiCompatConfigToml, ReasoningStyleConfig};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "original-model".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+
+        let mut config = make_config();
+        config.openai_compat = Some(OpenAiCompatConfigToml {
+            base_url: "https://example.com/v1".to_string(),
+            api_key: None,
+            model: "fast-model".to_string(),
+            max_tokens: None,
+            reasoning: ReasoningStyleConfig::None,
+        });
+        config.models.insert(
+            "fast".to_string(),
+            ModelRole {
+                backend: "openai_compat".to_string(),
+                model: "fast-model".to_string(),
+            },
+        );
+        let factory = Arc::new(BackendFactory::new(config.clone()));
+
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        app.model = "original-model".to_string();
+        let cmd = RoleCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: factory,
+        };
+        let result = cmd.execute("fast", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(
+            ctx.app.model, "fast-model",
+            "app.model should be updated to the role's model"
+        );
+        assert_eq!(
+            ctx.agent.model(),
+            "fast-model",
+            "agent model should be updated to the role's model"
+        );
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info
+                    && e.content.contains("Switched to role 'fast'")),
+            "should show success message for valid role switch"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_command_session_creation_failure_returns_error() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test-model".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let mut config = make_config();
+        config.sessions_dir = std::path::PathBuf::from("/nonexistent/path/that/does/not/exist");
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = NewCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await;
+        assert!(
+            result.is_err(),
+            "/new with invalid sessions_dir should return Err"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to create new session"),
+            "error should mention session creation failure, got: {err_msg}"
         );
     }
 }
