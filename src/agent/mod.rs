@@ -2773,6 +2773,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_headless_peak_input_tokens_across_multi_turn_tool_use() {
+        use super::run_headless;
+
+        // Multi-turn: first turn emits a tool call with input_tokens=12_000,
+        // second turn is a text response with input_tokens=15_000.
+        // The API reports cumulative context size per turn, so peak-tracking
+        // must yield 15_000 (not 27_000).
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{"command":"ls"}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 12_000,
+                    output_tokens: 100,
+                    stop_reason: "tool_calls".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            vec![
+                Ok(StreamEvent::TextDelta("done".to_string())),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 15_000,
+                    output_tokens: 150,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+        ]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "output")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        let outcome = run_headless(&agent, "run tool".to_string()).await;
+
+        assert!(!outcome.is_error, "should not have error");
+        assert_eq!(
+            outcome.input_tokens, 15_000,
+            "input_tokens should track peak across turns (15000), not sum (27000)"
+        );
+        assert_eq!(
+            outcome.output_tokens, 250,
+            "output_tokens should accumulate across turns (100 + 150 = 250)"
+        );
+    }
+
     // ── CancellationToken tests ───────────────────────────────────────────
 
     /// A backend that emits a configurable set of text deltas, then blocks
