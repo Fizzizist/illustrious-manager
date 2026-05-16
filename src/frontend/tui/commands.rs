@@ -1,4 +1,5 @@
 use crate::agent::Agent;
+use crate::backend::BackendFactory;
 use crate::config::AppConfig;
 use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
@@ -41,6 +42,7 @@ pub struct CommandContext<'a> {
     pub agent: Arc<Agent>,
     pub config: &'a AppConfig,
     pub event_tx: &'a mpsc::Sender<AgentEvent>,
+    pub backend_factory: Arc<BackendFactory>,
 }
 
 /// Trait implemented by every registered slash command.
@@ -228,6 +230,115 @@ impl SlashCommand for TasksCommand {
     }
 }
 
+/// Built-in `/new` command — starts a fresh session.
+pub struct NewCommand;
+
+impl SlashCommand for NewCommand {
+    fn name(&self) -> &str {
+        "new"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            // Checkpoint current session WAL
+            if let Err(e) = ctx.agent.checkpoint_session().await {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Error,
+                    format!("Failed to checkpoint session: {e}"),
+                ));
+            }
+            // Clean up current session if empty
+            if let Err(e) = ctx.agent.cleanup_empty_session().await {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Error,
+                    format!("Failed to clean up empty session: {e}"),
+                ));
+            }
+            // Create a new session
+            let new_session = crate::session::Session::new(None, ctx.config.sessions_dir.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create new session: {e}"))?;
+            let new_history = new_session
+                .conversation()
+                .load_history()
+                .await
+                .unwrap_or_default();
+            // Reload context files and skills into the new session
+            ctx.agent.load_session(new_session).await;
+            // Preserve the current model
+            let model = ctx.agent.model();
+            ctx.app.conversation.clear();
+            ctx.app.current_response.clear();
+            ctx.app.current_thinking.clear();
+            ctx.app.scroll_offset = 0;
+            ctx.app.reset_for_session_switch();
+            ctx.app.load_history(&new_history);
+            ctx.app.model = model;
+            ctx.app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                "Started new session.".to_string(),
+            ));
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
+/// Built-in `/role <name>` command — switches backend and model by named role.
+/// With no arguments, displays current backend/model configuration.
+pub struct RoleCommand;
+
+impl SlashCommand for RoleCommand {
+    fn name(&self) -> &str {
+        "role"
+    }
+
+    fn execute<'a>(
+        &self,
+        args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        let role_name = args.to_string();
+        let factory = Arc::clone(&ctx.backend_factory);
+        Box::pin(async move {
+            ctx.app.input.clear();
+            if role_name.is_empty() {
+                let model = ctx.agent.model();
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    format!("Current model: {model}"),
+                ));
+                return Ok(DispatchResult::Handled);
+            }
+            match factory.for_role(&role_name).await {
+                Ok(selection) => {
+                    let new_model = selection.model.clone();
+                    let backend: Arc<dyn crate::backend::LlmBackend> = Arc::from(selection.backend);
+                    ctx.agent.set_backend(backend, new_model.clone());
+                    ctx.app.model = new_model.clone();
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Info,
+                        format!("Switched to role '{role_name}' (model: {new_model})"),
+                    ));
+                }
+                Err(e) => {
+                    ctx.app.conversation.push(ConversationEntry::new(
+                        ConversationRole::Error,
+                        format!("Unknown role '{role_name}': {e}"),
+                    ));
+                }
+            }
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -235,6 +346,8 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(ModelCommand));
     registry.register(Box::new(TasksCommand));
     registry.register(Box::new(CompactCommand));
+    registry.register(Box::new(NewCommand));
+    registry.register(Box::new(RoleCommand));
     registry
 }
 
@@ -263,6 +376,10 @@ mod tests {
             thinking: None,
             compaction: CompactionConfig::default(),
         }
+    }
+
+    fn make_factory() -> Arc<BackendFactory> {
+        Arc::new(BackendFactory::new(make_config()))
     }
 
     #[test]
@@ -325,6 +442,7 @@ mod tests {
                 agent,
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = registry
                 .dispatch("/code-review 42", &mut ctx)
@@ -367,6 +485,7 @@ mod tests {
                 agent,
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = registry
                 .dispatch("hello there", &mut ctx)
@@ -409,6 +528,7 @@ mod tests {
                 agent,
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -450,6 +570,7 @@ mod tests {
                 agent: Arc::clone(&agent),
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = cmd.execute("claude-new", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -491,6 +612,7 @@ mod tests {
                 agent: Arc::clone(&agent),
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -555,6 +677,7 @@ mod tests {
                 agent,
                 config: &config,
                 event_tx: &event_tx,
+                backend_factory: make_factory(),
             };
             let result = cmd.execute("", &mut ctx).await.expect("execute");
             assert_eq!(result, DispatchResult::Handled);
@@ -609,6 +732,7 @@ mod tests {
             agent,
             config: &config,
             event_tx: &event_tx,
+            backend_factory: make_factory(),
         };
         let result = cmd.execute("", &mut ctx).await.expect("execute");
         assert_eq!(result, DispatchResult::Handled);
@@ -650,6 +774,7 @@ mod tests {
             agent,
             config: &config,
             event_tx: &event_tx,
+            backend_factory: make_factory(),
         };
         let result = cmd.execute("", &mut ctx).await.expect("execute");
         assert_eq!(result, DispatchResult::Handled);
@@ -667,5 +792,175 @@ mod tests {
     fn parse_command_compact_with_args() {
         let parsed = parse_command("/compact ").expect("should parse");
         assert_eq!(parsed.name, "compact");
+    }
+
+    #[test]
+    fn parse_command_recognizes_new() {
+        let parsed = parse_command("/new").expect("should parse");
+        assert_eq!(parsed.name, "new");
+        assert_eq!(parsed.args, "");
+    }
+
+    #[test]
+    fn parse_command_recognizes_role() {
+        let parsed = parse_command("/role fast").expect("should parse");
+        assert_eq!(parsed.name, "role");
+        assert_eq!(parsed.args, "fast");
+    }
+
+    #[test]
+    fn parse_command_role_with_no_args() {
+        let parsed = parse_command("/role").expect("should parse");
+        assert_eq!(parsed.name, "role");
+        assert_eq!(parsed.args, "");
+    }
+
+    #[tokio::test]
+    async fn role_command_with_no_args_shows_current_model() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "claude-sonnet-4-20250514".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = RoleCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info
+                    && e.content.contains("claude-sonnet-4-20250514")),
+            "should show current model in info message"
+        );
+    }
+
+    #[tokio::test]
+    async fn role_command_with_unknown_role_shows_error() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = RoleCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd
+            .execute("nonexistent_role", &mut ctx)
+            .await
+            .expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(
+            ctx.app.conversation.iter().any(
+                |e| e.role == ConversationRole::Error && e.content.contains("nonexistent_role")
+            ),
+            "should show error for unknown role"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_command_creates_new_session_and_clears_conversation() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test-model".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        // Pre-populate conversation
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "old message".to_string(),
+        ));
+        app.model = "test-model".to_string();
+        let cmd = NewCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        // Model should be preserved
+        assert_eq!(ctx.app.model, "test-model");
+        // Should have info message about new session (conversation was cleared then info added)
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info && e.content.contains("new session")),
+            "should have info message about new session"
+        );
+        // Old message should be gone
+        assert!(
+            !ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.content == "old message"),
+            "old conversation should be cleared"
+        );
     }
 }

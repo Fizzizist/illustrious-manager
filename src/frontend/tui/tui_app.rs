@@ -26,6 +26,7 @@ use super::session_picker::{SessionPicker, SessionPickerAction};
 use super::status_line::{self, StatusLineInfo, TokenUsage};
 use super::tasks_picker::{TasksPicker, TasksPickerAction};
 use crate::agent::Agent;
+use crate::backend::BackendFactory;
 use crate::config::AppConfig;
 use crate::logging::Logger;
 use crate::tools::ToolRegistry;
@@ -612,6 +613,7 @@ pub async fn run(
     initial_prompt: Option<String>,
     logger: Option<Logger>,
     config: &AppConfig,
+    backend_factory: Arc<BackendFactory>,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -619,7 +621,15 @@ pub async fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, agent, initial_prompt, logger, config).await;
+    let result = run_app(
+        &mut terminal,
+        agent,
+        initial_prompt,
+        logger,
+        config,
+        backend_factory,
+    )
+    .await;
 
     disable_raw_mode()?;
     execute!(
@@ -638,6 +648,7 @@ async fn run_app(
     initial_prompt: Option<String>,
     mut logger: Option<Logger>,
     config: &AppConfig,
+    backend_factory: Arc<BackendFactory>,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
     app.model = agent.model();
@@ -746,6 +757,7 @@ async fn run_app(
                                             agent: agent.clone(),
                                             config,
                                             event_tx: &event_tx,
+                                            backend_factory: backend_factory.clone(),
                                         };
                                         let dispatch = cmd_registry.dispatch(&text, &mut ctx).await?;
                                         if dispatch == DispatchResult::Passthrough {
