@@ -213,7 +213,14 @@ async fn main() -> Result<()> {
             .await
         }
         Mode::Repl { initial_prompt } => {
-            frontend::tui::run(agent.clone(), initial_prompt, logger, &app_config).await
+            frontend::tui::run(
+                agent.clone(),
+                initial_prompt,
+                logger,
+                &app_config,
+                factory.clone(),
+            )
+            .await
         }
     };
 
