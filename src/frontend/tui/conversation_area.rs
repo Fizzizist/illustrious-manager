@@ -395,10 +395,9 @@ impl<'a> ConversationArea<'a> {
             text_width,
         );
 
-        let highlighted_lines = if let Some((matches, current_idx)) = search_matches {
+        let highlighted_lines = if let Some((matches, _current_idx)) = search_matches {
             let info = SearchHighlightInfo {
                 matches,
-                current_index: current_idx,
                 entries: self.entries,
                 scroll_row,
                 visible_height,
@@ -537,8 +536,6 @@ impl<'a> ConversationArea<'a> {
 /// and wraps matched substrings with highlight style (yellow bg, black fg).
 struct SearchHighlightInfo<'a> {
     matches: &'a [SearchMatch],
-    #[allow(dead_code)]
-    current_index: usize,
     entries: &'a [ConversationEntry],
     scroll_row: u16,
     visible_height: u16,
@@ -1970,7 +1967,6 @@ mod tests {
 
         let info = SearchHighlightInfo {
             matches: &matches,
-            current_index: 0,
             entries: &entries,
             scroll_row: 0,
             visible_height: 20,
@@ -2132,5 +2128,86 @@ mod tests {
             "unmatched line should remain unchanged"
         );
         assert_eq!(result.spans[0].content.as_ref(), "hello world");
+    }
+
+    #[test]
+    fn highlight_line_cross_span_boundary() {
+        use ratatui::style::Color;
+
+        // Two spans where the match straddles the boundary: "hel" | "lo world"
+        // Searching for "hello" should highlight across both spans
+        let line = Line::from(vec![Span::raw("hel"), Span::raw("lo world")]);
+        let result = highlight_line(
+            &line,
+            "hello",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            highlighted, "hello",
+            "match crossing span boundary should be highlighted, got: {highlighted:?}"
+        );
+
+        let full: String = result.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            full, "hello world",
+            "full text should be preserved, got: {full:?}"
+        );
+    }
+
+    #[test]
+    fn highlight_line_match_within_second_span() {
+        use ratatui::style::Color;
+
+        // Role prefix span + content span where match is in the content
+        let line = Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::raw("find me here"),
+        ]);
+        let result = highlight_line(
+            &line,
+            "find",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            highlighted, "find",
+            "match within second span should be highlighted"
+        );
+    }
+
+    #[test]
+    fn highlight_line_multiple_spans_multiple_matches() {
+        use ratatui::style::Color;
+
+        // "abc | def abc | ghi" with match "abc" appearing in first and second spans
+        let line = Line::from(vec![Span::raw("abc de"), Span::raw("f abc gh")]);
+        let result = highlight_line(
+            &line,
+            "abc",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_count = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .count();
+        assert_eq!(
+            highlighted_count, 2,
+            "should highlight both occurrences of abc"
+        );
     }
 }

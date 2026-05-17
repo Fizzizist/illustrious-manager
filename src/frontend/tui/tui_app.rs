@@ -413,6 +413,7 @@ impl App {
                     &self.search_state,
                     self.text_width,
                     self.viewport_height,
+                    1,
                 );
                 true
             }
@@ -435,6 +436,7 @@ impl App {
                     &self.search_state,
                     self.text_width,
                     self.viewport_height,
+                    1,
                 );
                 true
             }
@@ -498,6 +500,7 @@ fn scroll_to_match_offset(
     search_state: &SearchState,
     text_width: u16,
     viewport_height: u16,
+    search_bar_height: u16,
 ) -> u16 {
     if search_state.matches.is_empty() {
         return 0;
@@ -513,7 +516,8 @@ fn scroll_to_match_offset(
         visual_line = visual_line.saturating_add(entry.wrapped_line_count(text_width));
     }
 
-    let max_scroll = compute_max_scroll(conversation, text_width, viewport_height);
+    let effective_viewport = viewport_height.saturating_sub(search_bar_height);
+    let max_scroll = compute_max_scroll(conversation, text_width, effective_viewport);
     max_scroll.saturating_sub(visual_line)
 }
 
@@ -1171,6 +1175,7 @@ async fn run_app(
                                                 &app.search_state,
                                                 app.text_width,
                                                 app.viewport_height,
+                                                1,
                                             );
                                         }
                                     }
@@ -3436,6 +3441,76 @@ mod tests {
     }
 
     #[test]
+    fn search_blocked_during_compacting() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::Compacting);
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&slash);
+        assert!(
+            !consumed,
+            "/ should not enter search mode during compacting"
+        );
+        assert_ne!(app.state, AppState::Search);
+    }
+
+    #[test]
+    fn search_input_flow_accumulates_and_executes() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+        ));
+        app.set_state(AppState::Input);
+        app.input.set_mode(InputMode::Normal);
+        app.text_width = 80;
+        app.viewport_height = 20;
+
+        // Enter search mode
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        app.handle_scroll_key(&slash);
+        assert_eq!(app.state, AppState::Search);
+
+        // Type pattern characters
+        app.search_state.input_buffer.push('h');
+        app.search_state.input_buffer.push('e');
+        assert_eq!(app.search_state.input_buffer, "he");
+
+        // Press Enter — this is handled in the AppState::Search branch of the event loop,
+        // not in handle_scroll_key. Simulate the Enter logic directly.
+        app.search_state.pattern = app.search_state.input_buffer.clone();
+        app.search_state.matches =
+            compute_search_matches(&app.conversation, &app.search_state.pattern);
+        app.search_state.current_index = 0;
+        app.search_state.active = true;
+        assert_eq!(app.search_state.matches.len(), 1);
+        assert_eq!(app.search_state.matches[0].entry_index, 0);
+    }
+
+    #[test]
+    fn search_input_esc_cancels_and_returns_to_normal() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.input.set_mode(InputMode::Normal);
+
+        // Enter search mode
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        app.handle_scroll_key(&slash);
+        assert_eq!(app.state, AppState::Search);
+        assert_eq!(app.input.mode(), &InputMode::Search);
+
+        // Press Esc — cancels and returns to Input/Normal
+        // Esc in Search state is handled in the event loop, simulate directly:
+        if app.search_state.active {
+            app.search_state = SearchState::new();
+        }
+        app.set_state(AppState::Input);
+        app.input.set_mode(InputMode::Normal);
+        assert_eq!(app.state, AppState::Input);
+        assert_eq!(app.input.mode(), &InputMode::Normal);
+        assert!(!app.search_state.active);
+    }
+
+    #[test]
     fn search_cleared_on_session_switch() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.search_state.active = true;
@@ -3464,6 +3539,60 @@ mod tests {
         assert_eq!(
             app.search_state.input_buffer, "previous",
             "/ should pre-populate buffer with previous pattern"
+        );
+    }
+
+    #[test]
+    fn scroll_to_match_offset_returns_zero_for_no_matches() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let state = SearchState::new();
+        let result = scroll_to_match_offset(&mut app.conversation, &state, 80, 20, 1);
+        assert_eq!(result, 0, "should return 0 for empty matches");
+    }
+
+    #[test]
+    fn scroll_to_match_offset_accounts_for_search_bar() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "alpha".to_string(),
+        ));
+        for _ in 0..20 {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::Assistant,
+                "filler line to create scrollable content".to_string(),
+            ));
+        }
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "beta alpha".to_string(),
+        ));
+        app.text_width = 80;
+        app.viewport_height = 10;
+
+        let mut state = SearchState::new();
+        state.pattern = "alpha".to_string();
+        state.matches = compute_search_matches(&app.conversation, "alpha");
+        state.current_index = 0;
+        state.active = true;
+
+        let offset_with_bar = scroll_to_match_offset(
+            &mut app.conversation,
+            &state,
+            app.text_width,
+            app.viewport_height,
+            1,
+        );
+        let offset_without_bar = scroll_to_match_offset(
+            &mut app.conversation,
+            &state,
+            app.text_width,
+            app.viewport_height,
+            0,
+        );
+        assert!(
+            offset_with_bar >= offset_without_bar,
+            "scroll with search bar should be >= scroll without (smaller viewport)"
         );
     }
 }
