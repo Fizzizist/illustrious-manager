@@ -408,13 +408,7 @@ impl App {
                     } else {
                         self.search_state.current_index + 1
                     };
-                self.scroll_offset = scroll_to_match_offset(
-                    &mut self.conversation,
-                    &self.search_state,
-                    self.text_width,
-                    self.viewport_height,
-                    1,
-                );
+                self.scroll_offset = self.scroll_to_match_offset();
                 true
             }
             KeyEvent {
@@ -431,13 +425,7 @@ impl App {
                 } else {
                     self.search_state.current_index - 1
                 };
-                self.scroll_offset = scroll_to_match_offset(
-                    &mut self.conversation,
-                    &self.search_state,
-                    self.text_width,
-                    self.viewport_height,
-                    1,
-                );
+                self.scroll_offset = self.scroll_to_match_offset();
                 true
             }
             KeyEvent {
@@ -495,57 +483,31 @@ fn compute_search_matches(conversation: &[ConversationEntry], pattern: &str) -> 
     matches
 }
 
-fn scroll_to_match_offset(
-    conversation: &mut [ConversationEntry],
-    search_state: &SearchState,
-    text_width: u16,
-    viewport_height: u16,
-    search_bar_height: u16,
-) -> u16 {
-    if search_state.matches.is_empty() {
-        return 0;
-    }
-    if text_width == 0 {
-        return 0;
-    }
-
-    let match_entry = &search_state.matches[search_state.current_index];
-    let target_entry = match_entry.entry_index;
-
-    // Compute the visual line number where the target entry starts
-    let mut entry_start_line: u16 = 0;
-    for (i, entry) in conversation.iter_mut().enumerate() {
-        if i == target_entry {
-            break;
-        }
-        entry_start_line = entry_start_line.saturating_add(entry.wrapped_line_count(text_width));
-    }
-
-    // Also compute the total line count (excluding thinking and current_response,
-    // which should be empty when search is active since we're in Input state)
-    let total_lines: u16 = conversation
-        .iter_mut()
-        .map(|e| e.wrapped_line_count(text_width))
-        .sum();
-
-    let effective_viewport = viewport_height.saturating_sub(search_bar_height);
-    if effective_viewport == 0 {
-        return 0;
-    }
-    let max_scroll = total_lines.saturating_sub(effective_viewport);
-    if max_scroll == 0 {
-        return 0;
-    }
-
-    // Place the matched entry near the top of the viewport.
-    // scroll_row is the first visible line: scroll_row = max_scroll - scroll_offset.
-    // To place entry at visual line `entry_start_line`, set scroll_row = entry_start_line.
-    // So: scroll_offset = max_scroll - entry_start_line.
-    // Clamp to [0, max_scroll].
-    max_scroll.saturating_sub(entry_start_line).min(max_scroll)
-}
-
 impl App {
+    fn scroll_to_match_offset(&mut self) -> u16 {
+        if self.search_state.matches.is_empty() || self.text_width == 0 {
+            return 0;
+        }
+
+        let target_entry = self.search_state.matches[self.search_state.current_index].entry_index;
+
+        let mut entry_start_line: u16 = 0;
+        for (i, entry) in self.conversation.iter_mut().enumerate() {
+            if i == target_entry {
+                break;
+            }
+            entry_start_line =
+                entry_start_line.saturating_add(entry.wrapped_line_count(self.text_width));
+        }
+
+        let max_scroll = self.max_scroll();
+        if max_scroll == 0 {
+            return 0;
+        }
+
+        max_scroll.saturating_sub(entry_start_line).min(max_scroll)
+    }
+
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
@@ -1182,13 +1144,7 @@ async fn run_app(
                                         app.search_state.current_index = 0;
                                         app.search_state.active = true;
                                         if !app.search_state.matches.is_empty() {
-                                            app.scroll_offset = scroll_to_match_offset(
-                                                &mut app.conversation,
-                                                &app.search_state,
-                                                app.text_width,
-                                                app.viewport_height,
-                                                1,
-                                            );
+                                            app.scroll_offset = app.scroll_to_match_offset();
                                         }
                                     }
                                     app.set_state(AppState::Input);
@@ -3557,54 +3513,47 @@ mod tests {
     #[test]
     fn scroll_to_match_offset_returns_zero_for_no_matches() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        let state = SearchState::new();
-        let result = scroll_to_match_offset(&mut app.conversation, &state, 80, 20, 1);
+        app.search_state = SearchState::new();
+        app.text_width = 80;
+        app.viewport_height = 20;
+        let result = app.scroll_to_match_offset();
         assert_eq!(result, 0, "should return 0 for empty matches");
     }
 
     #[test]
-    fn scroll_to_match_offset_accounts_for_search_bar() {
+    fn scroll_to_match_offset_navigates_to_match() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
-            "alpha".to_string(),
+            "first entry alpha".to_string(),
         ));
-        for _ in 0..20 {
+        for i in 0..30 {
             app.conversation.push(ConversationEntry::new(
                 ConversationRole::Assistant,
-                "filler line to create scrollable content".to_string(),
+                format!("filler line {i} with enough text to create scrollable content"),
             ));
         }
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
-            "beta alpha".to_string(),
+            "last entry beta alpha".to_string(),
         ));
         app.text_width = 80;
         app.viewport_height = 10;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.active = true;
 
-        let mut state = SearchState::new();
-        state.pattern = "alpha".to_string();
-        state.matches = compute_search_matches(&app.conversation, "alpha");
-        state.current_index = 0;
-        state.active = true;
+        // Navigate to first match (entry 0)
+        app.search_state.current_index = 0;
+        let offset_first = app.scroll_to_match_offset();
+        assert!(offset_first > 0, "should scroll up to show first match");
 
-        let offset_with_bar = scroll_to_match_offset(
-            &mut app.conversation,
-            &state,
-            app.text_width,
-            app.viewport_height,
-            1,
-        );
-        let offset_without_bar = scroll_to_match_offset(
-            &mut app.conversation,
-            &state,
-            app.text_width,
-            app.viewport_height,
-            0,
-        );
+        // Navigate to last match (entry 31)
+        app.search_state.current_index = app.search_state.matches.len() - 1;
+        let offset_last = app.scroll_to_match_offset();
         assert!(
-            offset_with_bar >= offset_without_bar,
-            "scroll with search bar should be >= scroll without (smaller viewport)"
+            offset_last < offset_first,
+            "last match should have smaller offset than first match, got first={offset_first} last={offset_last}"
         );
     }
 }
