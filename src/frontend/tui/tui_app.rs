@@ -3556,4 +3556,89 @@ mod tests {
             "last match should have smaller offset than first match, got first={offset_first} last={offset_last}"
         );
     }
+
+    #[test]
+    fn search_n_key_advances_to_different_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        for i in 0..5 {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::User,
+                format!(
+                    "entry {} has the word alpha here with more text to fill lines and create scrolling content that wraps"
+                    , i),
+            ));
+        }
+        app.text_width = 40; // narrow to force wrapping
+        app.viewport_height = 5; // small viewport to force scrolling
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        assert!(app.search_state.matches.len() >= 5);
+
+        // Start at first match (entry 0)
+        app.search_state.current_index = 0;
+        let offset_0 = app.scroll_to_match_offset();
+
+        // Navigate to second match (entry 1)
+        app.search_state.current_index = 1;
+        let _offset_1 = app.scroll_to_match_offset();
+
+        // Navigate to last match
+        app.search_state.current_index = app.search_state.matches.len() - 1;
+        let offset_last = app.scroll_to_match_offset();
+
+        // First entry should have the highest offset (scrolls most to show it at top)
+        assert!(
+            offset_0 >= offset_last,
+            "first entry should have >= offset than last entry, got first={offset_0} last={offset_last}"
+        );
+    }
+
+    #[test]
+    fn search_render_shows_matched_entry_after_n() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        // Create enough entries to require scrolling
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "first entry with alpha".to_string(),
+        ));
+        for i in 0..40 {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::Assistant,
+                format!("filler {} without the search term", i),
+            ));
+        }
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "last entry with alpha".to_string(),
+        ));
+        app.text_width = 60;
+        app.viewport_height = 20;
+        app.model = "test".to_string();
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.current_index = 1; // last match (entry 41)
+        app.scroll_offset = app.scroll_to_match_offset();
+
+        let backend = ratatui::backend::TestBackend::new(62, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        assert!(
+            rendered.contains("last entry with alpha"),
+            "after pressing n to navigate to last match, the matched entry should be visible. scroll_offset={}, rendered:\n{}",
+            app.scroll_offset,
+            rendered
+        );
+    }
 }
