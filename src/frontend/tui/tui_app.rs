@@ -505,32 +505,44 @@ fn scroll_to_match_offset(
     if search_state.matches.is_empty() {
         return 0;
     }
+    if text_width == 0 {
+        return 0;
+    }
+
     let match_entry = &search_state.matches[search_state.current_index];
     let target_entry = match_entry.entry_index;
 
-    let mut visual_line: u16 = 0;
+    // Compute the visual line number where the target entry starts
+    let mut entry_start_line: u16 = 0;
     for (i, entry) in conversation.iter_mut().enumerate() {
         if i == target_entry {
             break;
         }
-        visual_line = visual_line.saturating_add(entry.wrapped_line_count(text_width));
+        entry_start_line = entry_start_line.saturating_add(entry.wrapped_line_count(text_width));
     }
 
-    let effective_viewport = viewport_height.saturating_sub(search_bar_height);
-    let max_scroll = compute_max_scroll(conversation, text_width, effective_viewport);
-    max_scroll.saturating_sub(visual_line)
-}
-
-fn compute_max_scroll(
-    conversation: &mut [ConversationEntry],
-    text_width: u16,
-    viewport_height: u16,
-) -> u16 {
-    let total: u16 = conversation
+    // Also compute the total line count (excluding thinking and current_response,
+    // which should be empty when search is active since we're in Input state)
+    let total_lines: u16 = conversation
         .iter_mut()
         .map(|e| e.wrapped_line_count(text_width))
         .sum();
-    total.saturating_sub(viewport_height)
+
+    let effective_viewport = viewport_height.saturating_sub(search_bar_height);
+    if effective_viewport == 0 {
+        return 0;
+    }
+    let max_scroll = total_lines.saturating_sub(effective_viewport);
+    if max_scroll == 0 {
+        return 0;
+    }
+
+    // Place the matched entry near the top of the viewport.
+    // scroll_row is the first visible line: scroll_row = max_scroll - scroll_offset.
+    // To place entry at visual line `entry_start_line`, set scroll_row = entry_start_line.
+    // So: scroll_offset = max_scroll - entry_start_line.
+    // Clamp to [0, max_scroll].
+    max_scroll.saturating_sub(entry_start_line).min(max_scroll)
 }
 
 impl App {

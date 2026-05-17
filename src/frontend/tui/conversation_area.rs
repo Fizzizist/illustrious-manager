@@ -660,7 +660,8 @@ fn highlight_line(
                 }
             }
 
-            let highlighted = &span_text[local_start.min(last_end)..local_end];
+            let highlight_start = local_start.max(last_end);
+            let highlighted = &span_text[highlight_start..local_end];
             if !highlighted.is_empty() {
                 result_spans.push(Span::styled(highlighted.to_string(), highlight_style));
             }
@@ -1965,7 +1966,7 @@ mod tests {
             .map(|e| e.wrapped_line_count(58))
             .collect();
 
-        let info = SearchHighlightInfo {
+        let _info = SearchHighlightInfo {
             matches: &matches,
             entries: &entries,
             scroll_row: 0,
@@ -2208,6 +2209,66 @@ mod tests {
         assert_eq!(
             highlighted_count, 2,
             "should highlight both occurrences of abc"
+        );
+    }
+
+    #[test]
+    fn highlight_line_only_highlights_matched_substring() {
+        use ratatui::style::Color;
+
+        // Regression: searching for "test" in "You are a test" should only
+        // highlight "test", not the entire string
+        let line = Line::from(vec![Span::raw("  "), Span::raw("You are a test")]);
+        let result = highlight_line(
+            &line,
+            "test",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_text: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            highlighted_text, "test",
+            "only 'test' should be highlighted, got: {highlighted_text:?}"
+        );
+
+        let full_text: String = result.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            full_text, "  You are a test",
+            "full text should be preserved"
+        );
+    }
+
+    #[test]
+    fn highlight_line_with_indent_prefix() {
+        use ratatui::style::Color;
+
+        // Content lines have a "  " prefix. Searching for a word in the
+        // content should only highlight that word, not the prefix or surrounding text.
+        let line = Line::from(vec![
+            Span::styled("You:", Style::default().fg(Color::Green)),
+            Span::raw("  "),
+            Span::raw("some test text"),
+        ]);
+        let result = highlight_line(
+            &line,
+            "test",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_text: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            highlighted_text, "test",
+            "only 'test' should be highlighted in role-prefixed line, got: {highlighted_text:?}"
         );
     }
 }
