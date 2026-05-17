@@ -1,0 +1,25 @@
+---
+source: src/frontend/tui/conversation_area.rs
+assertion_line: 1991
+expression: terminal.backend()
+---
+"┌Conversation──────────────────────────────────────────────┐"
+"│You:                                                      │"
+"│  hello world                                             │"
+"│                                                          │"
+"│Assistant:                                                │"
+"│  Hello there                                             │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+"/hello [1/2]                                                "

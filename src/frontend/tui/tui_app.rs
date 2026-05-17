@@ -33,6 +33,40 @@ use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub entry_index: usize,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchState {
+    pub pattern: String,
+    pub input_buffer: String,
+    pub matches: Vec<SearchMatch>,
+    pub current_index: usize,
+    pub active: bool,
+}
+
+impl SearchState {
+    pub fn new() -> Self {
+        Self {
+            pattern: String::new(),
+            input_buffer: String::new(),
+            matches: Vec::new(),
+            current_index: 0,
+            active: false,
+        }
+    }
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {
     Input,
     Streaming,
@@ -44,6 +78,7 @@ pub enum AppState {
     SessionPicker,
     TasksPicker,
     Compacting,
+    Search,
 }
 
 pub struct App {
@@ -68,6 +103,7 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
+    pub search_state: SearchState,
     pending_g: bool,
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
@@ -103,6 +139,10 @@ impl App {
                 self.input.set_mode(InputMode::Compacting);
                 self.pending_g = false;
             }
+            AppState::Search => {
+                self.input.set_mode(InputMode::Search);
+                self.pending_g = false;
+            }
         }
     }
 
@@ -126,6 +166,7 @@ impl App {
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
+            search_state: SearchState::new(),
             pending_g: false,
             compaction_task: None,
             tools,
@@ -344,6 +385,65 @@ impl App {
                 self.pending_g = false;
                 true
             }
+            KeyEvent {
+                code: KeyCode::Char('/'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if is_normal && !matches!(self.state, AppState::Streaming | AppState::Compacting) => {
+                self.search_state.input_buffer.clear();
+                if !self.search_state.pattern.is_empty() {
+                    self.search_state.input_buffer = self.search_state.pattern.clone();
+                }
+                self.set_state(AppState::Search);
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if is_normal && self.search_state.active && !self.search_state.matches.is_empty() => {
+                self.search_state.current_index =
+                    if self.search_state.current_index + 1 >= self.search_state.matches.len() {
+                        0
+                    } else {
+                        self.search_state.current_index + 1
+                    };
+                self.scroll_offset = scroll_to_match_offset(
+                    &mut self.conversation,
+                    &self.search_state,
+                    self.text_width,
+                    self.viewport_height,
+                );
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Char('N'),
+                modifiers,
+                ..
+            } if is_normal
+                && modifiers.contains(KeyModifiers::SHIFT)
+                && self.search_state.active
+                && !self.search_state.matches.is_empty() =>
+            {
+                self.search_state.current_index = if self.search_state.current_index == 0 {
+                    self.search_state.matches.len() - 1
+                } else {
+                    self.search_state.current_index - 1
+                };
+                self.scroll_offset = scroll_to_match_offset(
+                    &mut self.conversation,
+                    &self.search_state,
+                    self.text_width,
+                    self.viewport_height,
+                );
+                true
+            }
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } if is_normal && self.search_state.active => {
+                self.search_state = SearchState::new();
+                true
+            }
             _ => {
                 self.pending_g = false;
                 false
@@ -358,6 +458,7 @@ impl App {
         self.tasks_picker = None;
         self.session_picker = None;
         self.pending_g = false;
+        self.search_state = SearchState::new();
     }
 }
 
@@ -365,11 +466,77 @@ fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
     thinking.lines().rev().find(|line| !line.trim().is_empty())
 }
 
+fn compute_search_matches(conversation: &[ConversationEntry], pattern: &str) -> Vec<SearchMatch> {
+    if pattern.is_empty() {
+        return Vec::new();
+    }
+    let pattern_lower = pattern.to_lowercase();
+    let mut matches = Vec::new();
+    for (entry_idx, entry) in conversation.iter().enumerate() {
+        let content_lower = entry.content.to_lowercase();
+        let mut start = 0;
+        while let Some(pos) = content_lower[start..].find(&pattern_lower) {
+            let byte_start = start + pos;
+            let byte_end = byte_start + pattern.len();
+            if entry.content.is_char_boundary(byte_start)
+                && entry.content.is_char_boundary(byte_end)
+            {
+                matches.push(SearchMatch {
+                    entry_index: entry_idx,
+                    byte_start,
+                    byte_end,
+                });
+            }
+            start = byte_start + 1;
+        }
+    }
+    matches
+}
+
+fn scroll_to_match_offset(
+    conversation: &mut [ConversationEntry],
+    search_state: &SearchState,
+    text_width: u16,
+    viewport_height: u16,
+) -> u16 {
+    if search_state.matches.is_empty() {
+        return 0;
+    }
+    let match_entry = &search_state.matches[search_state.current_index];
+    let target_entry = match_entry.entry_index;
+
+    let mut visual_line: u16 = 0;
+    for (i, entry) in conversation.iter_mut().enumerate() {
+        if i == target_entry {
+            break;
+        }
+        visual_line = visual_line.saturating_add(entry.wrapped_line_count(text_width));
+    }
+
+    let max_scroll = compute_max_scroll(conversation, text_width, viewport_height);
+    max_scroll.saturating_sub(visual_line)
+}
+
+fn compute_max_scroll(
+    conversation: &mut [ConversationEntry],
+    text_width: u16,
+    viewport_height: u16,
+) -> u16 {
+    let total: u16 = conversation
+        .iter_mut()
+        .map(|e| e.wrapped_line_count(text_width))
+        .sum();
+    total.saturating_sub(viewport_height)
+}
+
 impl App {
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
             return 0;
         }
+        let search_active = self.search_state.active || matches!(self.state, AppState::Search);
+        let search_bar_height: u16 = if search_active { 1 } else { 0 };
+        let viewport_height = self.viewport_height.saturating_sub(search_bar_height);
         let thinking_preview = extract_last_thinking_line(&self.current_thinking);
         let mut conv_area = ConversationArea::new(
             &mut self.conversation,
@@ -377,7 +544,7 @@ impl App {
             thinking_preview,
             &self.current_response,
             0,
-            self.viewport_height,
+            viewport_height,
         );
         conv_area.max_scroll(self.text_width)
     }
@@ -406,16 +573,48 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     let text_width = chunks[0].width.saturating_sub(2);
     app.text_width = text_width;
+
+    let search_active = app.search_state.active || matches!(app.state, AppState::Search);
+    let search_bar_height: u16 = if search_active { 1 } else { 0 };
+
     let thinking_preview = extract_last_thinking_line(&app.current_thinking);
+    let viewport_height = chunks[0]
+        .height
+        .saturating_sub(2)
+        .saturating_sub(search_bar_height);
     let mut conv_area = ConversationArea::new(
         &mut app.conversation,
         !app.current_thinking.is_empty(),
         thinking_preview,
         &app.current_response,
         app.scroll_offset,
-        chunks[0].height.saturating_sub(2),
+        viewport_height,
     );
-    conv_area.render(frame, chunks[0], text_width);
+
+    let search_matches: Option<(&[SearchMatch], usize)> = if app.search_state.active {
+        Some((&app.search_state.matches, app.search_state.current_index))
+    } else {
+        None
+    };
+    let search_input = if matches!(app.state, AppState::Search) {
+        Some(app.search_state.input_buffer.as_str())
+    } else {
+        None
+    };
+    let search_pattern = if app.search_state.active {
+        Some(app.search_state.pattern.as_str())
+    } else {
+        None
+    };
+
+    conv_area.render(
+        frame,
+        chunks[0],
+        text_width,
+        search_matches,
+        search_input,
+        search_pattern,
+    );
 
     app.input.render(frame, chunks[1]);
 
@@ -933,7 +1132,67 @@ async fn run_app(
                                 app.set_state(AppState::Input);
                                 app.scroll_offset = 0;
                             }
-                        },
+                        }
+                        AppState::Search => {
+                            if let KeyEvent {
+                                code: KeyCode::Char('c'),
+                                modifiers: KeyModifiers::CONTROL,
+                                ..
+                            } = key
+                            {
+                                break;
+                            }
+                            match key {
+                                KeyEvent {
+                                    code: KeyCode::Esc, ..
+                                } => {
+                                    if app.search_state.active {
+                                        app.search_state = SearchState::new();
+                                    }
+                                    app.set_state(AppState::Input);
+                                    app.input.set_mode(InputMode::Normal);
+                                }
+                                KeyEvent {
+                                    code: KeyCode::Enter,
+                                    modifiers: KeyModifiers::NONE,
+                                    ..
+                                } => {
+                                    if !app.search_state.input_buffer.is_empty() {
+                                        app.search_state.pattern = app.search_state.input_buffer.clone();
+                                        app.search_state.matches = compute_search_matches(
+                                            &app.conversation,
+                                            &app.search_state.pattern,
+                                        );
+                                        app.search_state.current_index = 0;
+                                        app.search_state.active = true;
+                                        if !app.search_state.matches.is_empty() {
+                                            app.scroll_offset = scroll_to_match_offset(
+                                                &mut app.conversation,
+                                                &app.search_state,
+                                                app.text_width,
+                                                app.viewport_height,
+                                            );
+                                        }
+                                    }
+                                    app.set_state(AppState::Input);
+                                    app.input.set_mode(InputMode::Normal);
+                                }
+                                KeyEvent {
+                                    code: KeyCode::Backspace,
+                                    ..
+                                } => {
+                                    app.search_state.input_buffer.pop();
+                                }
+                                KeyEvent {
+                                    code: KeyCode::Char(c),
+                                    modifiers: KeyModifiers::NONE,
+                                    ..
+                                } => {
+                                    app.search_state.input_buffer.push(c);
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {
                             if let
                                 KeyEvent {
@@ -2925,5 +3184,286 @@ mod tests {
     #[test]
     fn extract_last_thinking_line_single_line() {
         assert_eq!(extract_last_thinking_line("only line"), Some("only line"));
+    }
+
+    // ── Search state tests ──────────────────────────────────────────────
+
+    #[test]
+    fn search_state_new_is_empty() {
+        let state = SearchState::new();
+        assert!(state.pattern.is_empty());
+        assert!(state.input_buffer.is_empty());
+        assert!(state.matches.is_empty());
+        assert_eq!(state.current_index, 0);
+        assert!(!state.active);
+    }
+
+    #[test]
+    fn slash_key_enters_search_mode() {
+        let mut app = app_with_content(10);
+        app.input.set_mode(InputMode::Normal);
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&slash);
+        assert!(consumed, "/ should be consumed in Normal mode");
+        assert_eq!(app.state, AppState::Search);
+        assert_eq!(app.input.mode(), &InputMode::Search);
+        assert!(!app.search_state.active);
+        assert!(app.search_state.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn search_input_accumulates_chars() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Search);
+        assert_eq!(app.state, AppState::Search);
+
+        // Simulate character input in Search state
+        app.search_state.input_buffer.push('h');
+        app.search_state.input_buffer.push('e');
+        app.search_state.input_buffer.push('l');
+        app.search_state.input_buffer.push('l');
+        app.search_state.input_buffer.push('o');
+        assert_eq!(app.search_state.input_buffer, "hello");
+    }
+
+    #[test]
+    fn search_enter_computes_matches() {
+        let mut app = app_with_content(10);
+        app.conversation.clear();
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            "Hello there".to_string(),
+        ));
+
+        let matches = compute_search_matches(&app.conversation, "hello");
+        assert_eq!(matches.len(), 2, "should find 2 case-insensitive matches");
+        assert_eq!(matches[0].entry_index, 0);
+        assert_eq!(matches[1].entry_index, 1);
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "Hello World".to_string(),
+        ));
+
+        let matches = compute_search_matches(&app.conversation, "hello");
+        assert_eq!(matches.len(), 1);
+
+        let matches = compute_search_matches(&app.conversation, "HELLO");
+        assert_eq!(matches.len(), 1);
+
+        let matches = compute_search_matches(&app.conversation, "world");
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn search_multiple_matches_in_one_entry() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "abc abc abc".to_string(),
+        ));
+
+        let matches = compute_search_matches(&app.conversation, "abc");
+        assert_eq!(matches.len(), 3, "should find 3 matches in one entry");
+        assert_eq!(matches[0].entry_index, 0);
+        assert_eq!(matches[1].entry_index, 0);
+        assert_eq!(matches[2].entry_index, 0);
+    }
+
+    #[test]
+    fn search_empty_pattern_returns_no_matches() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "hello".to_string(),
+        ));
+
+        let matches = compute_search_matches(&app.conversation, "");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn search_n_navigates_forward() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "alpha beta gamma".to_string(),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            "delta alpha".to_string(),
+        ));
+        app.text_width = 80;
+        app.viewport_height = 20;
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.current_index = 0;
+        assert_eq!(app.search_state.matches.len(), 2);
+
+        let n_key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&n_key);
+        assert!(consumed, "n should be consumed during active search");
+        assert_eq!(
+            app.search_state.current_index, 1,
+            "n should advance to next match"
+        );
+    }
+
+    #[test]
+    fn search_n_wraps_to_first() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "alpha beta".to_string(),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            "alpha gamma".to_string(),
+        ));
+        app.text_width = 80;
+        app.viewport_height = 20;
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.current_index = 1;
+
+        let n_key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        app.handle_scroll_key(&n_key);
+        assert_eq!(
+            app.search_state.current_index, 0,
+            "n should wrap from last to first match"
+        );
+    }
+
+    #[test]
+    fn search_big_n_navigates_backward() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "alpha beta".to_string(),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            "alpha gamma".to_string(),
+        ));
+        app.text_width = 80;
+        app.viewport_height = 20;
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.current_index = 1;
+
+        let big_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        app.handle_scroll_key(&big_n);
+        assert_eq!(
+            app.search_state.current_index, 0,
+            "N should navigate to previous match"
+        );
+    }
+
+    #[test]
+    fn search_big_n_wraps_to_last() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::User,
+            "alpha beta".to_string(),
+        ));
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Assistant,
+            "alpha gamma".to_string(),
+        ));
+        app.text_width = 80;
+        app.viewport_height = 20;
+        app.input.set_mode(InputMode::Normal);
+
+        app.search_state.active = true;
+        app.search_state.pattern = "alpha".to_string();
+        app.search_state.matches = compute_search_matches(&app.conversation, "alpha");
+        app.search_state.current_index = 0;
+
+        let big_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        app.handle_scroll_key(&big_n);
+        assert_eq!(
+            app.search_state.current_index, 1,
+            "N should wrap from first to last match"
+        );
+    }
+
+    #[test]
+    fn esc_clears_active_search() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.input.set_mode(InputMode::Normal);
+        app.search_state.active = true;
+        app.search_state.pattern = "test".to_string();
+        app.search_state.matches = vec![SearchMatch {
+            entry_index: 0,
+            byte_start: 0,
+            byte_end: 4,
+        }];
+        app.search_state.current_index = 0;
+
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&esc);
+        assert!(consumed, "Esc should be consumed to clear search");
+        assert!(!app.search_state.active);
+        assert!(app.search_state.pattern.is_empty());
+        assert!(app.search_state.matches.is_empty());
+    }
+
+    #[test]
+    fn search_blocked_during_streaming() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::Streaming);
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        let consumed = app.handle_scroll_key(&slash);
+        assert!(!consumed, "/ should not enter search mode during streaming");
+        assert_ne!(app.state, AppState::Search);
+    }
+
+    #[test]
+    fn search_cleared_on_session_switch() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.search_state.active = true;
+        app.search_state.pattern = "test".to_string();
+        app.search_state.matches = vec![SearchMatch {
+            entry_index: 0,
+            byte_start: 0,
+            byte_end: 4,
+        }];
+        app.search_state.current_index = 0;
+        app.reset_for_session_switch();
+        assert!(!app.search_state.active);
+        assert!(app.search_state.pattern.is_empty());
+        assert!(app.search_state.matches.is_empty());
+    }
+
+    #[test]
+    fn slash_repopulates_buffer_with_previous_pattern() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.input.set_mode(InputMode::Normal);
+        app.search_state.pattern = "previous".to_string();
+        app.search_state.active = false;
+
+        let slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE);
+        app.handle_scroll_key(&slash);
+        assert_eq!(
+            app.search_state.input_buffer, "previous",
+            "/ should pre-populate buffer with previous pattern"
+        );
     }
 }

@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use tui_markdown::from_str as markdown_to_text;
 
 use super::markdown_tables::preprocess_tables;
+use crate::frontend::tui::tui_app::SearchMatch;
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
@@ -339,7 +340,15 @@ impl<'a> ConversationArea<'a> {
         total_visual.saturating_sub(self.viewport_height)
     }
 
-    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
+    pub fn render(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        text_width: u16,
+        search_matches: Option<(&[SearchMatch], usize)>,
+        search_input: Option<&str>,
+        search_pattern: Option<&str>,
+    ) {
         let visible_height = area.height.saturating_sub(2);
 
         let entry_counts = self.compute_entry_counts(text_width);
@@ -377,8 +386,6 @@ impl<'a> ConversationArea<'a> {
         let auto_scroll = total_visual.saturating_sub(visible_height);
         let scroll_row = auto_scroll.saturating_sub(self.scroll_offset.min(auto_scroll));
 
-        // Windowed approach: find which entries are visible and only collect those lines,
-        // plus compute how many wrapped lines to skip at the top of the window.
         let (window_lines, lines_to_skip) = self.collect_window_lines(
             &entry_counts,
             &thinking_lines,
@@ -388,7 +395,32 @@ impl<'a> ConversationArea<'a> {
             text_width,
         );
 
-        let conversation = Paragraph::new(window_lines)
+        let highlighted_lines = if let Some((matches, current_idx)) = search_matches {
+            let info = SearchHighlightInfo {
+                matches,
+                current_index: current_idx,
+                entries: self.entries,
+                scroll_row,
+                visible_height,
+                entry_counts: &entry_counts,
+            };
+            apply_search_highlights(&window_lines, &info)
+        } else {
+            window_lines
+        };
+
+        let search_active = search_input.is_some() || search_pattern.is_some();
+        let conv_height = if search_active {
+            area.height.saturating_sub(1)
+        } else {
+            area.height
+        };
+        let conv_area = Rect {
+            height: conv_height,
+            ..area
+        };
+
+        let conversation = Paragraph::new(highlighted_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -396,7 +428,32 @@ impl<'a> ConversationArea<'a> {
             )
             .wrap(Wrap { trim: false })
             .scroll((lines_to_skip, 0));
-        frame.render_widget(conversation, area);
+        frame.render_widget(conversation, conv_area);
+
+        if search_active {
+            let search_bar_area = Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            };
+            let search_text = if let Some(input) = search_input {
+                format!("/{}", input)
+            } else if let Some(pattern) = search_pattern {
+                let matches_ref = search_matches.expect("active search should have matches");
+                let total = matches_ref.0.len();
+                let current = matches_ref.1 + 1;
+                format!("/{} [{}/{}]", pattern, current, total)
+            } else {
+                String::new()
+            };
+            let search_line = Line::from(Span::styled(
+                search_text,
+                Style::default().fg(Color::Yellow),
+            ));
+            let search_bar = Paragraph::new(search_line);
+            frame.render_widget(search_bar, search_bar_area);
+        }
     }
 
     fn collect_window_lines(
@@ -473,6 +530,154 @@ impl<'a> ConversationArea<'a> {
 
         (result, lines_to_skip)
     }
+}
+
+/// Apply search highlights to rendered lines.
+/// Scans each line's text for case-insensitive occurrences of the pattern,
+/// and wraps matched substrings with highlight style (yellow bg, black fg).
+struct SearchHighlightInfo<'a> {
+    matches: &'a [SearchMatch],
+    #[allow(dead_code)]
+    current_index: usize,
+    entries: &'a [ConversationEntry],
+    scroll_row: u16,
+    visible_height: u16,
+    entry_counts: &'a [u16],
+}
+
+fn apply_search_highlights(
+    lines: &[Line<'static>],
+    info: &SearchHighlightInfo<'_>,
+) -> Vec<Line<'static>> {
+    if info.matches.is_empty() {
+        return lines.to_vec();
+    }
+
+    let pattern = &info.entries[info.matches[0].entry_index].content
+        [info.matches[0].byte_start..info.matches[0].byte_end];
+    let pattern_lower = pattern.to_lowercase();
+
+    let highlight_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+
+    // Build entry visual line ranges to determine which entry each window line belongs to
+    let mut entry_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut cum: usize = 0;
+    for &count in info.entry_counts.iter() {
+        let start = cum;
+        cum += count as usize;
+        entry_ranges.push((start, cum));
+    }
+
+    // Determine which entries are visible in the window
+    let window_start = info.scroll_row as usize;
+    let _window_end = (info.scroll_row as usize).saturating_add(info.visible_height as usize);
+
+    // For each line in the window, determine which entry it belongs to and
+    // which content line within that entry, then check if any match falls on that line.
+    let mut result_lines = Vec::with_capacity(lines.len());
+    for (line_in_window, line) in lines.iter().enumerate() {
+        let global_line = window_start + line_in_window;
+
+        // Find which entry this global line belongs to
+        let mut entry_idx: Option<usize> = None;
+        for (idx, &(start, end)) in entry_ranges.iter().enumerate() {
+            if global_line >= start && global_line < end {
+                entry_idx = Some(idx);
+                break;
+            }
+        }
+
+        // Check if any match falls in this entry
+        let has_match_in_entry =
+            entry_idx.is_some_and(|idx| info.matches.iter().any(|m| m.entry_index == idx));
+
+        if has_match_in_entry {
+            result_lines.push(highlight_line(line, &pattern_lower, highlight_style));
+        } else {
+            result_lines.push(line.clone());
+        }
+    }
+
+    result_lines
+}
+
+/// Highlight occurrences of `pattern_lower` (already lowercased) in a line's spans.
+fn highlight_line(
+    line: &Line<'static>,
+    pattern_lower: &str,
+    highlight_style: Style,
+) -> Line<'static> {
+    let full_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let full_text_lower = full_text.to_lowercase();
+    let pattern_len = pattern_lower.len();
+
+    // Find all case-insensitive occurrences in the concatenated text
+    let mut occurrences: Vec<(usize, usize)> = Vec::new();
+    let mut search_start = 0;
+    while let Some(pos) = full_text_lower[search_start..].find(pattern_lower) {
+        let abs_start = search_start + pos;
+        let abs_end = abs_start + pattern_len;
+        if full_text.is_char_boundary(abs_start) && full_text.is_char_boundary(abs_end) {
+            occurrences.push((abs_start, abs_end));
+        }
+        search_start = abs_start + 1;
+    }
+
+    if occurrences.is_empty() {
+        return line.clone();
+    }
+
+    // Split spans at occurrence boundaries
+    let mut result_spans: Vec<Span<'static>> = Vec::new();
+    let mut global_pos: usize = 0;
+
+    for span in &line.spans {
+        let span_text = span.content.as_ref();
+        let span_start = global_pos;
+        let span_end = global_pos + span_text.len();
+
+        // Find occurrences that overlap this span
+        let mut last_end: usize = 0;
+
+        for &(occ_start, occ_end) in &occurrences {
+            if occ_end <= span_start || occ_start >= span_end {
+                continue;
+            }
+
+            // Convert to local positions within this span
+            let local_start = occ_start.saturating_sub(span_start);
+            let local_end = (occ_end).min(span_end) - span_start;
+
+            // Ensure local positions are valid character boundaries in span_text
+            if local_start > span_text.len() || local_end > span_text.len() {
+                continue;
+            }
+            if !span_text.is_char_boundary(local_start) || !span_text.is_char_boundary(local_end) {
+                continue;
+            }
+
+            if local_start > last_end {
+                let before = &span_text[last_end..local_start];
+                if !before.is_empty() {
+                    result_spans.push(Span::styled(before.to_string(), span.style));
+                }
+            }
+
+            let highlighted = &span_text[local_start.min(last_end)..local_end];
+            if !highlighted.is_empty() {
+                result_spans.push(Span::styled(highlighted.to_string(), highlight_style));
+            }
+            last_end = local_end;
+        }
+
+        if last_end < span_text.len() {
+            result_spans.push(Span::styled(span_text[last_end..].to_string(), span.style));
+        }
+
+        global_pos += span_text.len();
+    }
+
+    Line::from(result_spans)
 }
 
 fn maybe_truncate<'a>(content: &'a str, role: &ConversationRole) -> Cow<'a, str> {
@@ -580,7 +785,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
                 let mut area = ConversationArea::new(&mut entries, true, None, "the answer", 0, 18);
-                area.render(frame, rect, 56);
+                area.render(frame, rect, 56, None, None, None);
             })
             .expect("draw");
 
@@ -607,7 +812,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
                 let mut area = ConversationArea::new(&mut entries, true, None, "", 0, 18);
-                area.render(frame, rect, 56);
+                area.render(frame, rect, 56, None, None, None);
             })
             .expect("draw");
 
@@ -637,7 +842,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -706,7 +911,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -725,7 +930,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -748,7 +953,7 @@ mod tests {
                     0,
                     20,
                 );
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -795,7 +1000,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -814,7 +1019,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -833,7 +1038,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -852,7 +1057,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -872,7 +1077,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -892,7 +1097,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -912,7 +1117,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -934,7 +1139,7 @@ mod tests {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget =
                     ConversationArea::new(&mut entries, false, None, table, 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -958,7 +1163,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -980,7 +1185,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1017,7 +1222,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1036,7 +1241,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1076,7 +1281,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1135,7 +1340,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 10);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 8);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1153,7 +1358,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 12);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 20, 10);
-                area_widget.render(frame, rect, 58);
+                area_widget.render(frame, rect, 58, None, None, None);
             })
             .expect("draw");
 
@@ -1233,7 +1438,7 @@ mod tests {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                 let mut scrolled_area =
                     ConversationArea::new(&mut entries, false, None, "", max, viewport);
-                scrolled_area.render(frame, rect, text_width);
+                scrolled_area.render(frame, rect, text_width, None, None, None);
             })
             .expect("draw");
 
@@ -1262,7 +1467,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                 let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
-                area.render(frame, rect, text_width);
+                area.render(frame, rect, text_width, None, None, None);
             })
             .expect("draw");
 
@@ -1301,7 +1506,7 @@ mod tests {
                     let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
                     let mut area =
                         ConversationArea::new(&mut entries, false, None, "", scroll, viewport);
-                    area.render(frame, rect, text_width);
+                    area.render(frame, rect, text_width, None, None, None);
                 })
                 .expect("draw");
             let rendered = format!("{:?}", terminal.backend());
@@ -1361,7 +1566,7 @@ mod tests {
                 let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
                 let mut area =
                     ConversationArea::new(&mut entries, false, None, &streaming, 0, viewport);
-                area.render(frame, rect, text_width);
+                area.render(frame, rect, text_width, None, None, None);
             })
             .expect("draw");
 
@@ -1388,7 +1593,7 @@ mod tests {
                     scroll_up_amount,
                     viewport,
                 );
-                area.render(frame, rect, text_width);
+                area.render(frame, rect, text_width, None, None, None);
             })
             .expect("draw");
 
@@ -1435,7 +1640,7 @@ mod tests {
                     let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                     let mut area =
                         ConversationArea::new(entries, false, None, "", scroll, viewport);
-                    area.render(frame, rect, text_width);
+                    area.render(frame, rect, text_width, None, None, None);
                 })
                 .expect("draw");
             format!("{:?}", terminal.backend())
@@ -1464,7 +1669,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 40, 20);
                 let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
-                area_widget.render(frame, rect, 38);
+                area_widget.render(frame, rect, 38, None, None, None);
             })
             .expect("draw");
 
@@ -1713,7 +1918,7 @@ mod tests {
                     0,
                     18,
                 );
-                area.render(frame, rect, 56);
+                area.render(frame, rect, 56, None, None, None);
             })
             .expect("draw");
 
@@ -1738,5 +1943,194 @@ mod tests {
             max_no_preview + 1,
             "thinking preview should add exactly 1 to max_scroll"
         );
+    }
+
+    #[test]
+    fn render_search_highlights_in_conversation() {
+        let mut entries = vec![
+            ConversationEntry::new(ConversationRole::User, "hello world".to_string()),
+            ConversationEntry::new(ConversationRole::Assistant, "Hello there".to_string()),
+        ];
+        let matches = vec![
+            SearchMatch {
+                entry_index: 0,
+                byte_start: 0,
+                byte_end: 5,
+            },
+            SearchMatch {
+                entry_index: 1,
+                byte_start: 0,
+                byte_end: 5,
+            },
+        ];
+        let entry_counts: Vec<u16> = entries
+            .iter_mut()
+            .map(|e| e.wrapped_line_count(58))
+            .collect();
+
+        let info = SearchHighlightInfo {
+            matches: &matches,
+            current_index: 0,
+            entries: &entries,
+            scroll_row: 0,
+            visible_height: 20,
+            entry_counts: &entry_counts,
+        };
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                area_widget.render(frame, rect, 58, Some((&matches, 0)), None, Some("hello"));
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_search_highlights", terminal.backend());
+    }
+
+    #[test]
+    fn render_search_bar_during_input() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::User,
+            "test content".to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                area_widget.render(frame, rect, 58, None, Some("search term"), None);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_search_bar_input", terminal.backend());
+    }
+
+    #[test]
+    fn render_search_bar_with_active_results() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+        )];
+        let matches = vec![SearchMatch {
+            entry_index: 0,
+            byte_start: 0,
+            byte_end: 5,
+        }];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                area_widget.render(frame, rect, 58, Some((&matches, 0)), None, Some("hello"));
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_search_bar_active", terminal.backend());
+    }
+
+    #[test]
+    fn render_no_search_when_none() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                area_widget.render(frame, rect, 58, None, None, None);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_no_search", terminal.backend());
+    }
+
+    #[test]
+    fn highlight_line_basic() {
+        use ratatui::style::Color;
+
+        let line = Line::from(vec![Span::raw("hello world")]);
+        let result = highlight_line(
+            &line,
+            "hello",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_count = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .count();
+        assert_eq!(highlighted_count, 1, "should have one highlighted span");
+        let highlighted_text: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(highlighted_text, "hello");
+    }
+
+    #[test]
+    fn highlight_line_case_insensitive() {
+        use ratatui::style::Color;
+
+        let line = Line::from(vec![Span::raw("Hello World")]);
+        let result = highlight_line(
+            &line,
+            "hello",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_text: String = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(highlighted_text, "Hello");
+    }
+
+    #[test]
+    fn highlight_line_multiple_occurrences() {
+        use ratatui::style::Color;
+
+        let line = Line::from(vec![Span::raw("abc abc abc")]);
+        let result = highlight_line(
+            &line,
+            "abc",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        let highlighted_count = result
+            .spans
+            .iter()
+            .filter(|s| s.style.bg == Some(Color::Yellow))
+            .count();
+        assert_eq!(highlighted_count, 3, "should highlight all occurrences");
+    }
+
+    #[test]
+    fn highlight_line_no_match() {
+        let line = Line::from(vec![Span::raw("hello world")]);
+        let result = highlight_line(
+            &line,
+            "xyz",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        );
+
+        assert_eq!(
+            result.spans.len(),
+            1,
+            "unmatched line should remain unchanged"
+        );
+        assert_eq!(result.spans[0].content.as_ref(), "hello world");
     }
 }

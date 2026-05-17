@@ -9,6 +9,7 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const VISUAL_TITLE: &str = " -- VISUAL -- ";
+const SEARCH_TITLE: &str = " Search ";
 const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
 const COMPACTING_TITLE: &str = "Compacting...";
 const SESSIONS_TITLE: &str = " Sessions ";
@@ -21,6 +22,7 @@ pub enum InputMode {
     Insert,
     Normal,
     Visual,
+    Search,
     Streaming,
     SessionPicker,
     TasksPicker,
@@ -229,6 +231,7 @@ impl<'a> InputArea<'a> {
                 }
                 other => self.handle_motion(other),
             },
+            InputMode::Search => false,
             _ => false,
         }
     }
@@ -283,6 +286,7 @@ impl<'a> InputArea<'a> {
             InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
             InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
             InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
+            InputMode::Search => Block::default().borders(Borders::ALL).title(SEARCH_TITLE),
             InputMode::Streaming => Block::default()
                 .borders(Borders::ALL)
                 .title(STREAMING_TITLE),
@@ -314,7 +318,8 @@ impl<'a> InputArea<'a> {
             InputMode::Streaming
             | InputMode::SessionPicker
             | InputMode::TasksPicker
-            | InputMode::Compacting => MIN_HEIGHT,
+            | InputMode::Compacting
+            | InputMode::Search => MIN_HEIGHT,
             InputMode::Insert | InputMode::Normal | InputMode::Visual => {
                 self.text_height_for_width(width, max_height)
             }
