@@ -4,24 +4,19 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::types::AgentEvent;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 static GLOBAL_WRITER: OnceLock<Mutex<Option<BufWriter<File>>>> = OnceLock::new();
 
 /// Initialise the global debug-log writer once.
 pub fn init_global(log_path: Option<PathBuf>) -> Result<()> {
-    GLOBAL_WRITER.get_or_init(|| {
-        let writer = match log_path {
-            Some(path) => {
-                let file = File::create(&path).unwrap_or_else(|_| {
-                    panic!("Failed to create debug log file at {}", path.display())
-                });
-                Some(BufWriter::new(file))
-            }
-            None => None,
-        };
-        Mutex::new(writer)
-    });
+    let writer = match log_path {
+        Some(path) => Some(BufWriter::new(File::create(&path).with_context(|| {
+            format!("Failed to create debug log file at {}", path.display())
+        })?)),
+        None => None,
+    };
+    let _ = GLOBAL_WRITER.set(Mutex::new(writer));
     Ok(())
 }
 
@@ -829,5 +824,43 @@ mod tests {
         logger.log_error("x").expect("Failed to log error");
         logger.log_info("x").expect("Failed to log info");
         // No panic = success.
+    }
+
+    #[test]
+    fn global_writer_path_and_free_log_event() {
+        // GLOBAL_WRITER is a process-global OnceLock. This is the only test that calls
+        // init_global; a single test function avoids races with other test threads.
+        // If the OnceLock was already set (e.g. by a prior call in the same process),
+        // init_global silently no-ops — the "no panic" guarantee still holds.
+        use crate::types::AgentEvent;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("global-test.log");
+
+        init_global(Some(path.clone())).expect("init_global should succeed");
+
+        log_warn("global warn");
+        log_error("global error");
+        log_event(&AgentEvent::ResponseComplete("assistant text".to_string()));
+        log_event(&AgentEvent::Error("some error".to_string()));
+        flush();
+
+        // Only assert file contents when this process's init_global call won the OnceLock.
+        if path.exists() {
+            let content = std::fs::read_to_string(&path).expect("read log");
+            assert!(content.contains("[WARN]"), "expected [WARN] tag");
+            assert!(content.contains("global warn"), "expected warn message");
+            assert!(content.contains("[ERROR]"), "expected [ERROR] tag");
+            assert!(content.contains("global error"), "expected error message");
+            assert!(
+                content.contains("[ASSISTANT RESPONSE]"),
+                "expected [ASSISTANT RESPONSE] tag"
+            );
+            assert!(
+                content.contains("assistant text"),
+                "expected assistant text"
+            );
+        }
     }
 }

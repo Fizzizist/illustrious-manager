@@ -239,6 +239,9 @@ async fn main() -> Result<()> {
         logging::log_error(&format!("cleanup_empty_session failed: {e}"));
     }
 
+    // Flush the debug log before printing the session-ID epilogue so no buffered
+    // entries are lost (static OnceLock is never dropped by Rust).
+    logging::flush();
     // Intentional stderr write: session ID epilogue is printed after TUI tears down, safe to write directly.
     writeln!(io::stderr(), "Session ID: {}", agent.session_id().await)?;
     frontend_result
