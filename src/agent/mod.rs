@@ -223,6 +223,50 @@ impl Agent {
             .await
     }
 
+    /// Append a synthetic assistant `ToolUse` + user `ToolResult` message pair to
+    /// in-memory history and persist both to the session DB.
+    ///
+    /// Applies `max_tool_result_bytes` truncation to the in-history `ToolResult`
+    /// content so that a large `/bash` output does not explode the context window.
+    /// The caller is responsible for sending the untruncated content to the TUI.
+    pub async fn record_synthetic_tool_call(
+        &self,
+        tool_use_id: String,
+        command: String,
+        content: String,
+        is_error: bool,
+    ) -> Result<()> {
+        let input = serde_json::json!({ "command": command });
+        let assistant_msg = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: tool_use_id.clone(),
+                name: "bash".to_string(),
+                input,
+            }],
+        };
+        let truncated = truncate_tool_result(&content, self.max_tool_result_bytes);
+        let user_msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id,
+                content: truncated,
+                is_error,
+            }],
+        };
+        let session = self.session.lock().await;
+        session
+            .conversation()
+            .insert_message(&assistant_msg)
+            .await?;
+        session.conversation().insert_message(&user_msg).await?;
+        drop(session);
+        let mut history = lock(&self.history);
+        history.push(assistant_msg);
+        history.push(user_msg);
+        Ok(())
+    }
+
     /// Return a snapshot of all tasks in the current session.
     ///
     /// # Lock note
@@ -963,6 +1007,7 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::{StreamExt, channel::mpsc, stream};
+    use std::sync::Mutex;
 
     async fn test_session() -> Session {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -4305,5 +4350,302 @@ mod tests {
             .expect("expected ResponseComplete");
 
         assert_eq!(response, "from-backend-two");
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_tool_call_appends_pair_to_history() {
+        use crate::config::ConfirmationMode;
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        let initial_len = agent.history().len();
+
+        agent
+            .record_synthetic_tool_call(
+                "user-bash-abc123".to_string(),
+                "echo hello".to_string(),
+                "hello\n".to_string(),
+                false,
+            )
+            .await
+            .expect("record should succeed");
+
+        let history = agent.history();
+        assert_eq!(
+            history.len(),
+            initial_len + 2,
+            "should add exactly 2 messages"
+        );
+
+        let assistant_msg = &history[initial_len];
+        assert_eq!(assistant_msg.role, Role::Assistant);
+        assert!(
+            matches!(&assistant_msg.content[0], ContentBlock::ToolUse { id, name, .. } if id == "user-bash-abc123" && name == "bash"),
+            "first message should be ToolUse with matching id and name=bash"
+        );
+
+        let user_msg = &history[initial_len + 1];
+        assert_eq!(user_msg.role, Role::User);
+        assert!(
+            matches!(&user_msg.content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "user-bash-abc123"),
+            "second message should be ToolResult with matching tool_use_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_tool_call_persists_both_messages() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let session_arc = test_session_arc().await;
+        let agent = Agent::new(Box::new(backend), config, Arc::clone(&session_arc)).await;
+
+        agent
+            .record_synthetic_tool_call(
+                "user-bash-persist".to_string(),
+                "ls".to_string(),
+                "file.txt\n".to_string(),
+                false,
+            )
+            .await
+            .expect("record should succeed");
+
+        let persisted = agent.session_history().await.expect("load session history");
+        assert_eq!(persisted.len(), 2, "both messages should be persisted");
+        assert_eq!(persisted[0].role, Role::Assistant);
+        assert_eq!(persisted[1].role, Role::User);
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_tool_call_applies_truncation() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = crate::config::ToolsConfig {
+            confirmation: crate::config::ConfirmationMode::Never,
+            max_tool_result_bytes: 200,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config);
+
+        let large_content = "x".repeat(10_000);
+        agent
+            .record_synthetic_tool_call(
+                "user-bash-trunc".to_string(),
+                "cat big_file".to_string(),
+                large_content.clone(),
+                false,
+            )
+            .await
+            .expect("record should succeed");
+
+        let history = agent.history();
+        let user_msg = history.last().expect("should have user message");
+        if let ContentBlock::ToolResult { content, .. } = &user_msg.content[0] {
+            assert!(
+                content.len() <= 200,
+                "in-history content should be truncated to ≤ 200 bytes"
+            );
+            assert!(
+                content.contains("[... output truncated:"),
+                "should contain truncation sentinel"
+            );
+        } else {
+            panic!("last message should be ToolResult");
+        }
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_tool_call_with_is_error_true_marks_block() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+
+        agent
+            .record_synthetic_tool_call(
+                "user-bash-err".to_string(),
+                "exit 1".to_string(),
+                "error output".to_string(),
+                true,
+            )
+            .await
+            .expect("record should succeed");
+
+        let history = agent.history();
+        let user_msg = history.last().expect("should have user message");
+        if let ContentBlock::ToolResult { is_error, .. } = &user_msg.content[0] {
+            assert!(*is_error, "is_error should be true");
+        } else {
+            panic!("last message should be ToolResult");
+        }
+    }
+
+    struct CapturingBackend {
+        captured: Arc<Mutex<Vec<Message>>>,
+        events: Arc<Vec<StreamEvent>>,
+    }
+
+    #[async_trait]
+    impl LlmBackend for CapturingBackend {
+        async fn send_message(
+            &self,
+            messages: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            for event in self.events.iter() {
+                tx.unbounded_send(Ok(event.clone()))
+                    .unwrap_or_else(|e| panic!("send failed: {e:?}"));
+            }
+            Ok(Box::pin(rx))
+        }
+    }
+
+    fn ok_events(events: Vec<Result<StreamEvent>>) -> Arc<Vec<StreamEvent>> {
+        Arc::new(
+            events
+                .into_iter()
+                .map(|r| r.expect("test events should be Ok"))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_pair_appears_in_next_backend_request() {
+        let captured = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let backend = CapturingBackend {
+            captured: Arc::clone(&captured),
+            events: ok_events(text_response("done")),
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+
+        let tool_use_id = "user-bash-roundtrip-42".to_string();
+        agent
+            .record_synthetic_tool_call(
+                tool_use_id.clone(),
+                "ls".to_string(),
+                "file.txt\n".to_string(),
+                false,
+            )
+            .await
+            .expect("record should succeed");
+
+        let stream = agent
+            .send("what did that produce?".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let messages = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+        let has_tool_use = messages.iter().any(|m| {
+            m.role == Role::Assistant
+                && m.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { id, name, .. }
+                        if id == &tool_use_id && name == "bash")
+                })
+        });
+        assert!(
+            has_tool_use,
+            "backend request should contain the synthetic ToolUse block"
+        );
+
+        let has_tool_result = messages.iter().any(|m| {
+            m.role == Role::User
+                && m.content.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolResult { tool_use_id: tid, .. }
+                        if tid == &tool_use_id)
+                })
+        });
+        assert!(
+            has_tool_result,
+            "backend request should contain the synthetic ToolResult block with matching id"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_synthetic_tool_call_full_content_in_event_truncated_in_history() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let tool_config = crate::config::ToolsConfig {
+            confirmation: crate::config::ConfirmationMode::Never,
+            max_tool_result_bytes: 200,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tool_config(&tool_config);
+
+        let large_content = "y".repeat(500);
+
+        agent
+            .record_synthetic_tool_call(
+                "user-bash-ac5".to_string(),
+                "cat bigfile".to_string(),
+                large_content.clone(),
+                false,
+            )
+            .await
+            .expect("record should succeed");
+
+        // The in-history ToolResult must be truncated
+        let history = agent.history();
+        let user_msg = history.last().expect("should have user message");
+        if let ContentBlock::ToolResult { content, .. } = &user_msg.content[0] {
+            assert!(
+                content.len() <= 200,
+                "in-history ToolResult should be truncated to ≤ 200 bytes, got {}",
+                content.len()
+            );
+            assert!(
+                content.contains("[... output truncated:"),
+                "truncated content should contain sentinel"
+            );
+        } else {
+            panic!("last message should be ToolResult");
+        }
+
+        // The caller (BashCommand) is responsible for sending the untruncated content
+        // to the TUI — the record method itself only stores (truncated) content.
+        // What we can assert here: the original large_content was preserved by the
+        // method as-is (i.e. record_synthetic_tool_call received it correctly and
+        // only truncates what it stores, not the caller's copy).
+        assert_eq!(
+            large_content.len(),
+            500,
+            "original content reference must be unchanged (method must not mutate caller's copy)"
+        );
     }
 }

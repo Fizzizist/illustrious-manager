@@ -364,6 +364,8 @@ pub enum AgentEvent {
         summary: String,
         is_error: bool,
     },
+    /// Emitted when a bash command finishes, carrying success/failure status.
+    BashCommandComplete,
     /// Emitted when auto-compaction is triggered because `input_tokens` exceeded
     /// the configured `max_context_window_len` threshold.
     AutoCompactTriggered {

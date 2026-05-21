@@ -139,6 +139,7 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::Warn(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
+            AgentEvent::BashCommandComplete => {}
             AgentEvent::ThinkingReceived(text) => {
                 if logger.is_some() {
                     write!(writer, "// {}", text)?;
@@ -207,6 +208,7 @@ async fn collect_response<R: BufRead>(
             AgentEvent::Warn(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
+            AgentEvent::BashCommandComplete => {}
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::Interrupted { partial_text } => {
                 is_error = true;

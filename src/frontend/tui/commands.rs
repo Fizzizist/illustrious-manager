@@ -339,6 +339,126 @@ impl SlashCommand for RoleCommand {
     }
 }
 
+/// Drop guard that ensures `BashCommandComplete` is always emitted from the
+/// spawned bash task, even if the task body panics.
+struct BashStateGuard {
+    event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    disarmed: bool,
+}
+
+impl BashStateGuard {
+    fn new(event_tx: tokio::sync::mpsc::Sender<AgentEvent>) -> Self {
+        Self {
+            event_tx,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for BashStateGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let _ = self.event_tx.try_send(AgentEvent::BashCommandComplete);
+        }
+    }
+}
+
+/// Built-in `/bash <command>` command — executes a shell command directly,
+/// records the tool call and result in conversation history, and renders it
+/// exactly like an LLM-driven bash call. Bypasses all policy checks.
+pub struct BashCommand;
+
+impl SlashCommand for BashCommand {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn execute<'a>(
+        &self,
+        args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        let command = args.to_string();
+        let sandbox_root = std::path::PathBuf::from(&ctx.config.tools.sandbox_root);
+        Box::pin(async move {
+            ctx.app.input.clear();
+            if command.is_empty() {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    "Usage: /bash <command>".to_string(),
+                ));
+                return Ok(DispatchResult::Handled);
+            }
+
+            let tool_use_id = format!("user-bash-{}", uuid::Uuid::now_v7());
+            let index = 1usize;
+
+            ctx.app.set_state(AppState::RunningBash);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            ctx.app.cancel_token = Some(cancel.clone());
+
+            let input_json = serde_json::json!({ "command": command });
+            let _ = ctx
+                .event_tx
+                .send(AgentEvent::ToolUseReceived {
+                    id: tool_use_id.clone(),
+                    name: "bash".to_string(),
+                    input: input_json,
+                    index,
+                })
+                .await;
+
+            let agent = Arc::clone(&ctx.agent);
+            let event_tx = ctx.event_tx.clone();
+            let cmd_clone = command.clone();
+            let id_clone = tool_use_id.clone();
+
+            tokio::spawn(async move {
+                let mut guard = BashStateGuard::new(event_tx.clone());
+
+                let (raw_content, is_error) =
+                    crate::tools::bash::execute_raw(&cmd_clone, &sandbox_root, Some(cancel)).await;
+
+                if let Err(e) = agent
+                    .record_synthetic_tool_call(
+                        id_clone.clone(),
+                        cmd_clone,
+                        raw_content.clone(),
+                        is_error,
+                    )
+                    .await
+                {
+                    let _ = event_tx
+                        .send(AgentEvent::Error(format!(
+                            "Failed to record /bash result: {e}"
+                        )))
+                        .await;
+                    return;
+                }
+
+                let _ = event_tx
+                    .send(AgentEvent::ToolResult {
+                        name: "bash".to_string(),
+                        content: raw_content,
+                        is_error,
+                        index,
+                    })
+                    .await;
+
+                guard.disarm();
+                let _ = event_tx.send(AgentEvent::BashCommandComplete).await;
+            });
+
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -348,6 +468,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(CompactCommand));
     registry.register(Box::new(NewCommand));
     registry.register(Box::new(RoleCommand));
+    registry.register(Box::new(BashCommand));
     registry
 }
 
@@ -1083,6 +1204,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bash_command_empty_args_shows_usage_hint() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(
+            ctx.app.state,
+            AppState::Input,
+            "empty /bash should not change state"
+        );
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info && e.content.contains("Usage: /bash")),
+            "should show usage hint"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_command_with_args_sets_running_bash_state() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("echo hi", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(
+            ctx.app.state,
+            AppState::RunningBash,
+            "/bash with args should set RunningBash state"
+        );
+        assert!(
+            ctx.app.cancel_token.is_some(),
+            "cancel_token should be set during bash execution"
+        );
+        let event = event_rx
+            .recv()
+            .await
+            .expect("should receive ToolUseReceived");
+        assert!(
+            matches!(event, AgentEvent::ToolUseReceived { name, .. } if name == "bash"),
+            "should send ToolUseReceived with name=bash"
+        );
+    }
+
+    #[tokio::test]
     async fn new_command_session_creation_failure_returns_error() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
@@ -1124,6 +1346,105 @@ mod tests {
         assert!(
             err_msg.contains("Failed to create new session"),
             "error should mention session creation failure, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_command_esc_cancels_and_records_cancellation_result() {
+        use crate::frontend::tui::tui_app::{handle_agent_event, handle_esc};
+        use crate::types::ContentBlock;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent: Arc::clone(&agent),
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+
+        // Dispatch /bash sleep 30 (long-running)
+        let result = cmd.execute("sleep 30", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(ctx.app.state, AppState::RunningBash);
+
+        // Simulate Esc — cancels the token
+        handle_esc(ctx.app);
+
+        // Drop ctx so app is accessible
+        drop(ctx);
+
+        // Drain events until BashCommandComplete (with timeout)
+        let timeout = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let mut got_complete = false;
+        while start.elapsed() < timeout {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await
+            {
+                Ok(Some(event)) => {
+                    if matches!(event, AgentEvent::BashCommandComplete) {
+                        handle_agent_event(&mut app, event, None).expect("handle");
+                        got_complete = true;
+                        break;
+                    } else {
+                        let _ = handle_agent_event(&mut app, event, None);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+
+        assert!(
+            got_complete,
+            "BashCommandComplete should be received after Esc"
+        );
+        assert_eq!(
+            app.state,
+            AppState::Input,
+            "state should return to Input after BashCommandComplete"
+        );
+        assert!(app.cancel_token.is_none(), "cancel_token should be cleared");
+
+        // History should contain the synthetic pair with cancellation content
+        let history = agent.history();
+        let has_cancelled = history.iter().any(|m| {
+            m.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolResult {
+                        content,
+                        is_error,
+                        ..
+                    } if content.contains("cancelled") && *is_error
+                )
+            })
+        });
+        assert!(
+            has_cancelled,
+            "history should contain ToolResult with 'cancelled' content and is_error=true"
         );
     }
 }

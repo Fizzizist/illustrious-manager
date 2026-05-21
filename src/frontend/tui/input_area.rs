@@ -11,6 +11,7 @@ const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const VISUAL_TITLE: &str = " -- VISUAL -- ";
 const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
 const COMPACTING_TITLE: &str = "Compacting...";
+const RUNNING_BASH_TITLE: &str = "Running bash... (Esc to cancel)";
 const SESSIONS_TITLE: &str = " Sessions ";
 const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
@@ -29,6 +30,7 @@ pub enum InputMode {
         input: serde_json::Value,
     },
     Compacting,
+    RunningBash,
 }
 
 pub struct InputArea<'a> {
@@ -293,6 +295,9 @@ impl<'a> InputArea<'a> {
             InputMode::Compacting => Block::default()
                 .borders(Borders::ALL)
                 .title(COMPACTING_TITLE),
+            InputMode::RunningBash => Block::default()
+                .borders(Borders::ALL)
+                .title(RUNNING_BASH_TITLE),
             InputMode::ToolConfirmation { name, .. } => Block::default()
                 .borders(Borders::ALL)
                 .title(format!("Allow '{name}'? [y/n]")),
@@ -314,7 +319,8 @@ impl<'a> InputArea<'a> {
             InputMode::Streaming
             | InputMode::SessionPicker
             | InputMode::TasksPicker
-            | InputMode::Compacting => MIN_HEIGHT,
+            | InputMode::Compacting
+            | InputMode::RunningBash => MIN_HEIGHT,
             InputMode::Insert | InputMode::Normal | InputMode::Visual => {
                 self.text_height_for_width(width, max_height)
             }

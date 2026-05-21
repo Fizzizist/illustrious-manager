@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use tokio_util::sync::CancellationToken;
 
 use super::{Tool, ToolError, ToolResult};
 
@@ -146,34 +147,58 @@ impl Tool for BashTool {
             }
         }
 
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.sandbox_root)
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|e| ToolError::Execution {
-                tool_name: "bash".to_string(),
-                message: format!("Failed to spawn command: {}", e),
-            })?;
-
-        let is_error = !output.status.success();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let content = match (stdout.is_empty(), stderr.is_empty()) {
-            (false, false) => format!("{}\n{}", stdout, stderr),
-            (true, false) => stderr.into_owned(),
-            (false, true) => stdout.into_owned(),
-            (true, true) => "(no output)".to_string(),
-        };
+        let (content, is_error) = execute_raw(command, &self.sandbox_root, None).await;
 
         Ok(ToolResult {
             content: vec![ContentBlock::Text(content)],
             is_error,
             agent_events: vec![],
         })
+    }
+}
+
+/// Execute a shell command directly, bypassing all policy checks.
+///
+/// Returns `(combined_output, is_error)`. If `cancel` is cancelled while the
+/// command is running, the child process is killed (via `kill_on_drop`) and
+/// `("[cancelled by user]", true)` is returned.
+pub async fn execute_raw(
+    command: &str,
+    sandbox_root: &std::path::Path,
+    cancel: Option<CancellationToken>,
+) -> (String, bool) {
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(sandbox_root)
+        .kill_on_drop(true)
+        .output();
+
+    let outcome = if let Some(token) = cancel {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => None,
+            result = child => Some(result),
+        }
+    } else {
+        Some(child.await)
+    };
+
+    match outcome {
+        None => ("[cancelled by user]".to_string(), true),
+        Some(Err(e)) => (format!("Failed to spawn command: {e}"), true),
+        Some(Ok(output)) => {
+            let is_error = !output.status.success();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let content = match (stdout.is_empty(), stderr.is_empty()) {
+                (false, false) => format!("{}\n{}", stdout, stderr),
+                (true, false) => stderr.into_owned(),
+                (false, true) => stdout.into_owned(),
+                (true, true) => "(no output)".to_string(),
+            };
+            (content, is_error)
+        }
     }
 }
 
@@ -563,6 +588,64 @@ mod tests {
         assert!(
             !marker.exists(),
             "marker file at {marker_str} exists — subprocess was NOT killed when future was dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_raw_returns_stdout_for_successful_command() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let (output, is_error) = execute_raw("echo hello", temp_dir.path(), None).await;
+        assert!(!is_error);
+        assert!(output.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn execute_raw_reports_nonzero_exit_as_error() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let (output, is_error) = execute_raw("exit 1", temp_dir.path(), None).await;
+        assert!(is_error, "non-zero exit should be is_error=true");
+        let _ = output; // content may vary
+    }
+
+    #[tokio::test]
+    async fn execute_raw_combines_stdout_and_stderr() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let (output, _) = execute_raw("echo out; echo err >&2", temp_dir.path(), None).await;
+        assert!(output.contains("out"), "should contain stdout");
+        assert!(output.contains("err"), "should contain stderr");
+    }
+
+    #[tokio::test]
+    async fn execute_raw_cancellation_kills_child() {
+        use tokio_util::sync::CancellationToken;
+        let temp_dir = TempDir::new().expect("temp dir");
+        let sandbox = temp_dir.path().to_path_buf();
+        let marker = sandbox.join("completed.marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
+        let token = CancellationToken::new();
+        let cancel_clone = token.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let command = format!("sleep 30 && touch {marker_str}");
+        let (output, is_error) = execute_raw(&command, &sandbox, Some(token)).await;
+
+        assert!(is_error, "cancelled command should be is_error=true");
+        assert!(
+            output.contains("cancelled"),
+            "cancelled command should mention cancellation, got: {output}"
+        );
+
+        // Give the OS a moment to reap the killed child
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            !marker.exists(),
+            "marker file should not exist — subprocess was not killed"
         );
     }
 }

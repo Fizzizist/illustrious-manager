@@ -44,6 +44,7 @@ pub enum AppState {
     SessionPicker,
     TasksPicker,
     Compacting,
+    RunningBash,
 }
 
 pub struct App {
@@ -101,6 +102,10 @@ impl App {
             }
             AppState::Compacting => {
                 self.input.set_mode(InputMode::Compacting);
+                self.pending_g = false;
+            }
+            AppState::RunningBash => {
+                self.input.set_mode(InputMode::RunningBash);
                 self.pending_g = false;
             }
         }
@@ -455,6 +460,11 @@ pub fn handle_esc(app: &mut App) {
                 token.cancel();
             }
         }
+        AppState::RunningBash => {
+            if let Some(token) = &app.cancel_token {
+                token.cancel();
+            }
+        }
         _ => {}
     }
 }
@@ -603,6 +613,11 @@ pub fn handle_agent_event(
         // CompactionComplete is handled in run_app where we have access to the Agent.
         // It must not reach this match arm.
         AgentEvent::CompactionComplete { .. } => {}
+        AgentEvent::BashCommandComplete => {
+            app.cancel_token = None;
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
+        }
     }
     Ok(())
 }
@@ -2920,6 +2935,27 @@ mod tests {
     #[test]
     fn extract_last_thinking_line_whitespace_only() {
         assert_eq!(extract_last_thinking_line("   \n  \n  "), None);
+    }
+
+    #[test]
+    fn render_running_bash_snapshot() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::RunningBash);
+        app.conversation.push(ConversationEntry::new_indexed(
+            ConversationRole::ToolUse,
+            "**bash**\n```sh\necho hi\n```".to_string(),
+            1,
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_running_bash", terminal.backend());
     }
 
     #[test]
