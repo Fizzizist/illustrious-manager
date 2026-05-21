@@ -339,6 +339,97 @@ impl SlashCommand for RoleCommand {
     }
 }
 
+/// Built-in `/bash <command>` command — executes a shell command directly,
+/// records the tool call and result in conversation history, and renders it
+/// exactly like an LLM-driven bash call. Bypasses all policy checks.
+pub struct BashCommand;
+
+impl SlashCommand for BashCommand {
+    fn name(&self) -> &str {
+        "bash"
+    }
+
+    fn execute<'a>(
+        &self,
+        args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        let command = args.to_string();
+        let sandbox_root = std::path::PathBuf::from(&ctx.config.tools.sandbox_root);
+        let _max_tool_result_bytes = ctx.config.tools.max_tool_result_bytes;
+        Box::pin(async move {
+            ctx.app.input.clear();
+            if command.is_empty() {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    "Usage: /bash <command>".to_string(),
+                ));
+                return Ok(DispatchResult::Handled);
+            }
+
+            let tool_use_id = format!("user-bash-{}", uuid::Uuid::now_v7());
+            let index = 1usize;
+
+            ctx.app.set_state(AppState::RunningBash);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            ctx.app.cancel_token = Some(cancel.clone());
+
+            let input_json = serde_json::json!({ "command": command });
+            let _ = ctx
+                .event_tx
+                .send(AgentEvent::ToolUseReceived {
+                    id: tool_use_id.clone(),
+                    name: "bash".to_string(),
+                    input: input_json,
+                    index,
+                })
+                .await;
+
+            let agent = Arc::clone(&ctx.agent);
+            let event_tx = ctx.event_tx.clone();
+            let cmd_clone = command.clone();
+            let id_clone = tool_use_id.clone();
+
+            tokio::spawn(async move {
+                let (raw_content, is_error) =
+                    crate::tools::bash::execute_raw(&cmd_clone, &sandbox_root, Some(cancel)).await;
+
+                if let Err(e) = agent
+                    .record_synthetic_tool_call(
+                        id_clone.clone(),
+                        cmd_clone,
+                        raw_content.clone(),
+                        is_error,
+                    )
+                    .await
+                {
+                    let _ = event_tx
+                        .send(AgentEvent::Error(format!(
+                            "Failed to record /bash result: {e}"
+                        )))
+                        .await;
+                }
+
+                let _ = event_tx
+                    .send(AgentEvent::ToolResult {
+                        name: "bash".to_string(),
+                        content: raw_content,
+                        is_error,
+                        index,
+                    })
+                    .await;
+
+                let _ = event_tx
+                    .send(AgentEvent::BashCommandComplete { is_error })
+                    .await;
+            });
+
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -348,6 +439,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(CompactCommand));
     registry.register(Box::new(NewCommand));
     registry.register(Box::new(RoleCommand));
+    registry.register(Box::new(BashCommand));
     registry
 }
 
@@ -1079,6 +1171,107 @@ mod tests {
                 .any(|e| e.role == ConversationRole::Info
                     && e.content.contains("Switched to role 'fast'")),
             "should show success message for valid role switch"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_command_empty_args_shows_usage_hint() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(
+            ctx.app.state,
+            AppState::Input,
+            "empty /bash should not change state"
+        );
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info && e.content.contains("Usage: /bash")),
+            "should show usage hint"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_command_with_args_sets_running_bash_state() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("echo hi", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(
+            ctx.app.state,
+            AppState::RunningBash,
+            "/bash with args should set RunningBash state"
+        );
+        assert!(
+            ctx.app.cancel_token.is_some(),
+            "cancel_token should be set during bash execution"
+        );
+        let event = event_rx
+            .recv()
+            .await
+            .expect("should receive ToolUseReceived");
+        assert!(
+            matches!(event, AgentEvent::ToolUseReceived { name, .. } if name == "bash"),
+            "should send ToolUseReceived with name=bash"
         );
     }
 

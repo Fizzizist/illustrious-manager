@@ -44,6 +44,7 @@ pub enum AppState {
     SessionPicker,
     TasksPicker,
     Compacting,
+    RunningBash,
 }
 
 pub struct App {
@@ -101,6 +102,10 @@ impl App {
             }
             AppState::Compacting => {
                 self.input.set_mode(InputMode::Compacting);
+                self.pending_g = false;
+            }
+            AppState::RunningBash => {
+                self.input.set_mode(InputMode::RunningBash);
                 self.pending_g = false;
             }
         }
@@ -455,6 +460,11 @@ pub fn handle_esc(app: &mut App) {
                 token.cancel();
             }
         }
+        AppState::RunningBash => {
+            if let Some(token) = &app.cancel_token {
+                token.cancel();
+            }
+        }
         _ => {}
     }
 }
@@ -603,6 +613,11 @@ pub fn handle_agent_event(
         // CompactionComplete is handled in run_app where we have access to the Agent.
         // It must not reach this match arm.
         AgentEvent::CompactionComplete { .. } => {}
+        AgentEvent::BashCommandComplete { .. } => {
+            app.cancel_token = None;
+            app.set_state(AppState::Input);
+            app.scroll_offset = 0;
+        }
     }
     Ok(())
 }
