@@ -177,6 +177,7 @@ pub fn log_event(event: &AgentEvent) {
                 );
             });
         }
+        AgentEvent::BashCommandComplete => {}
     }
 }
 
@@ -375,6 +376,7 @@ impl Logger {
                 current_tokens, threshold
             )
             .map_err(Into::into),
+            AgentEvent::BashCommandComplete => Ok(()),
         }
     }
 
