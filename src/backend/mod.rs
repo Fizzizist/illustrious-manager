@@ -144,27 +144,6 @@ impl BackendFactory {
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::*;
-    use futures::stream;
-
-    /// A minimal `LlmBackend` implementation that returns an empty stream.
-    /// Shared across test modules to avoid duplication.
-    pub struct MockBackend;
-
-    #[async_trait]
-    impl LlmBackend for MockBackend {
-        async fn send_message(
-            &self,
-            _messages: &[Message],
-            _config: &RequestConfig,
-        ) -> Result<BoxStream<Result<StreamEvent>>> {
-            Ok(Box::pin(stream::empty()))
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use crate::config::CompactionConfig;
     use anyhow::Result;

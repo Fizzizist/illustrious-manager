@@ -1,3 +1,5 @@
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
+
 pub mod agent;
 pub mod backend;
 pub mod config;
@@ -11,6 +13,7 @@ pub mod types;
 use anyhow::Result;
 use clap::Parser;
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -172,9 +175,11 @@ async fn main() -> Result<()> {
         .with_compaction_spawner(spawner),
     );
 
-    let mut logger = if cli.debug {
-        let log_path = create_log_path()?;
-        Some(Logger::new(Some(log_path))?)
+    if cli.debug {
+        logging::init_global(Some(create_log_path()?))?;
+    }
+    let mut logger: Option<Logger> = if cli.debug {
+        Some(Logger::new(None)?)
     } else {
         None
     };
@@ -225,16 +230,20 @@ async fn main() -> Result<()> {
     };
 
     if let Err(e) = agent.checkpoint_session().await {
-        eprintln!("checkpoint_session failed: {e}");
+        logging::log_error(&format!("checkpoint_session failed: {e}"));
     }
 
     if let Err(e) = agent.cleanup_empty_session().await
         && cli.debug
     {
-        eprintln!("cleanup_empty_session failed: {e}");
+        logging::log_error(&format!("cleanup_empty_session failed: {e}"));
     }
 
-    eprintln!("Session ID: {}", agent.session_id().await);
+    // Flush the debug log before printing the session-ID epilogue so no buffered
+    // entries are lost (static OnceLock is never dropped by Rust).
+    logging::flush();
+    // Intentional stderr write: session ID epilogue is printed after TUI tears down, safe to write directly.
+    writeln!(io::stderr(), "Session ID: {}", agent.session_id().await)?;
     frontend_result
 }
 

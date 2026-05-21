@@ -18,6 +18,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 - Always run `cargo fmt` before committing code.
 - Always run `cargo clippy` before committing code.
 - Keep code comments to a minimum. Only comment in cases where something is unable to be gleaned from the code itself.
+- The use of `eprintln!`, `println!`, `eprint!`, `print!`, and `dbg!` is forbidden in `src/`. All diagnostic output must go through the `logging` module. Direct stdout/stderr writes corrupt the TUI. Genuinely interactive prompts or end-of-process user-facing notices (e.g. single-shot TTY confirmation, session-id epilogue) may use `write!(io::stderr(), ...)` and must include a comment justifying why.
 
 ### Testing
 

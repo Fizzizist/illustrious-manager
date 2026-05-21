@@ -114,7 +114,7 @@ async fn run_text<W: Write, R: BufRead>(
                 break;
             }
             AgentEvent::Error(msg) => {
-                eprintln!("\nError: {}", msg);
+                crate::logging::log_error(&format!("\nError: {}", msg));
                 anyhow::bail!("LLM error: {}", msg);
             }
             AgentEvent::ToolUseReceived {
@@ -363,14 +363,22 @@ fn handle_confirmation<R: BufRead>(
     input: &serde_json::Value,
 ) -> Result<()> {
     if !is_tty {
-        eprintln!(
+        // Intentional stderr write: stdout.rs runs outside the TUI; this is a fatal user-facing error.
+        writeln!(
+            io::stderr(),
             "Error: tool confirmation required but stdin is not a TTY (tool: {})",
             name
-        );
+        )?;
         let _ = confirm_tx.unbounded_send(ConfirmationResponse::Rejected);
         anyhow::bail!("tool confirmation required in non-TTY mode");
     }
-    eprint!("Allow tool '{}' with input {}? [y/N] ", name, input);
+    // Intentional stderr write: interactive TTY confirmation prompt runs outside the TUI.
+    write!(
+        io::stderr(),
+        "Allow tool '{}' with input {}? [y/N] ",
+        name,
+        input
+    )?;
     io::stderr().flush()?;
     let mut response = String::new();
     stdin.read_line(&mut response)?;
