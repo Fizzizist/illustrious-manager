@@ -1,3 +1,5 @@
+#![deny(clippy::print_stderr, clippy::print_stdout, clippy::dbg_macro)]
+
 pub mod agent;
 pub mod backend;
 pub mod config;

@@ -371,26 +371,37 @@ impl LlmBackend for VertexBackend {
     }
 }
 
+fn filter_content_blocks<'a>(
+    blocks: &'a [crate::types::ContentBlock],
+    warnings: &mut Vec<String>,
+) -> Vec<&'a crate::types::ContentBlock> {
+    blocks
+        .iter()
+        .filter(|block| {
+            if let crate::types::ContentBlock::Thinking { signature, .. } = block
+                && signature.is_empty()
+            {
+                warnings.push(
+                    "dropping thinking block with empty signature from history \
+                     (corrupted session data); it cannot be replayed."
+                        .to_string(),
+                );
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 fn build_request_body(messages: &[Message], config: &RequestConfig) -> Result<serde_json::Value> {
     let messages_json: Vec<serde_json::Value> = messages
         .iter()
         .filter_map(|m| {
-            let content: Vec<&crate::types::ContentBlock> = m
-                .content
-                .iter()
-                .filter(|block| {
-                    if let crate::types::ContentBlock::Thinking { signature, .. } = block
-                        && signature.is_empty()
-                    {
-                        eprintln!(
-                            "WARNING: dropping thinking block with empty signature from history \
-                             (corrupted session data); it cannot be replayed."
-                        );
-                        return false;
-                    }
-                    true
-                })
-                .collect();
+            let mut warnings = Vec::new();
+            let content = filter_content_blocks(&m.content, &mut warnings);
+            for w in warnings {
+                crate::logging::log_warn(&w);
+            }
             if content.is_empty() {
                 return None;
             }
@@ -1223,5 +1234,29 @@ mod tests {
             "message with only empty-signature thinking blocks must be dropped"
         );
         assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[test]
+    fn filter_content_blocks_drops_empty_signature_thinking_and_records_warning() {
+        use crate::types::ContentBlock;
+        let blocks = vec![
+            ContentBlock::Thinking {
+                text: "reasoning".to_string(),
+                signature: String::new(), // empty → should be dropped
+            },
+            ContentBlock::Text("hello".to_string()),
+        ];
+        let mut warnings = Vec::new();
+        let filtered = filter_content_blocks(&blocks, &mut warnings);
+        assert_eq!(filtered.len(), 1, "only the Text block should remain");
+        assert!(
+            matches!(filtered[0], ContentBlock::Text(_)),
+            "remaining block should be Text"
+        );
+        assert_eq!(warnings.len(), 1, "one warning should be recorded");
+        assert!(
+            warnings[0].contains("empty signature"),
+            "warning should mention empty signature"
+        );
     }
 }

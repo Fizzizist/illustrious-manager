@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn thinking_config_defaults_are_correct() {
         let config = ThinkingConfig::default();
-        assert_eq!(config.enabled, true);
+        assert!(config.enabled);
         assert_eq!(config.mode, ThinkingMode::Adaptive);
         assert!(config.display.is_none());
     }

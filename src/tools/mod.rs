@@ -143,11 +143,11 @@ impl ToolRegistry {
             allowlist.iter().map(String::as_str).collect();
         self.tools.retain(|name, _| allowed.contains(name.as_str()));
         if self.tools.is_empty() && !allowlist.is_empty() {
-            eprintln!(
-                "WARNING: agent tool allowlist [{list}] matched no registered tools; \
-                 sub-agent will run with an empty tool set",
+            crate::logging::log_warn(&format!(
+                "agent tool allowlist [{list}] matched no registered tools; \
+             sub-agent will run with an empty tool set",
                 list = allowlist.join(", ")
-            );
+            ));
         }
         self
     }

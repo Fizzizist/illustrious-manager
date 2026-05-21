@@ -150,6 +150,7 @@ pub(crate) mod test_support {
 
     /// A minimal `LlmBackend` implementation that returns an empty stream.
     /// Shared across test modules to avoid duplication.
+    #[allow(dead_code)]
     pub struct MockBackend;
 
     #[async_trait]

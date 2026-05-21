@@ -1,7 +1,8 @@
 use dirs;
 use std::collections::BTreeMap;
-use std::fmt::Write;
+use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -369,7 +370,12 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
         }
         fs::write(&path, CONFIG_TEMPLATE)
             .with_context(|| format!("Failed to write default config: {}", path.display()))?;
-        eprintln!("Created default config at: {}", path.display());
+        // Intentional stderr write: config creation notice runs before the TUI starts.
+        writeln!(
+            io::stderr(),
+            "Created default config at: {}",
+            path.display()
+        )?;
     }
 
     load_config_from_path(&path)
