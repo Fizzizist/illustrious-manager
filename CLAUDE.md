@@ -15,6 +15,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 
 - The use of `.unwrap()` is forbidden under _all_ circumstances. The program should _never_ panic.
 - In a case where something needs to be unwrapped and it is _logically impossible_ for a panic to occur, the use of `.expect()` with an informative message is permitted.
+- The use of `pub(crate)` is forbidden. It is a leaky boundary that exposes implementation details to the rest of the crate without forcing a real API decision. If something needs to cross a module boundary, either make it fully `pub` with a thought-out interface, or restructure so the caller doesn't need access at all.
 - Always run `cargo fmt` before committing code.
 - Always run `cargo clippy` before committing code.
 - Keep code comments to a minimum. Only comment in cases where something is unable to be gleaned from the code itself.
