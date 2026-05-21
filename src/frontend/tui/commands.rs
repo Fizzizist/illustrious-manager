@@ -339,6 +339,34 @@ impl SlashCommand for RoleCommand {
     }
 }
 
+/// Drop guard that ensures `BashCommandComplete` is always emitted from the
+/// spawned bash task, even if the task body panics.
+struct BashStateGuard {
+    event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    disarmed: bool,
+}
+
+impl BashStateGuard {
+    fn new(event_tx: tokio::sync::mpsc::Sender<AgentEvent>) -> Self {
+        Self {
+            event_tx,
+            disarmed: false,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+impl Drop for BashStateGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let _ = self.event_tx.try_send(AgentEvent::BashCommandComplete);
+        }
+    }
+}
+
 /// Built-in `/bash <command>` command — executes a shell command directly,
 /// records the tool call and result in conversation history, and renders it
 /// exactly like an LLM-driven bash call. Bypasses all policy checks.
@@ -357,7 +385,6 @@ impl SlashCommand for BashCommand {
     {
         let command = args.to_string();
         let sandbox_root = std::path::PathBuf::from(&ctx.config.tools.sandbox_root);
-        let _max_tool_result_bytes = ctx.config.tools.max_tool_result_bytes;
         Box::pin(async move {
             ctx.app.input.clear();
             if command.is_empty() {
@@ -392,6 +419,8 @@ impl SlashCommand for BashCommand {
             let id_clone = tool_use_id.clone();
 
             tokio::spawn(async move {
+                let mut guard = BashStateGuard::new(event_tx.clone());
+
                 let (raw_content, is_error) =
                     crate::tools::bash::execute_raw(&cmd_clone, &sandbox_root, Some(cancel)).await;
 
@@ -409,6 +438,7 @@ impl SlashCommand for BashCommand {
                             "Failed to record /bash result: {e}"
                         )))
                         .await;
+                    return;
                 }
 
                 let _ = event_tx
@@ -420,9 +450,8 @@ impl SlashCommand for BashCommand {
                     })
                     .await;
 
-                let _ = event_tx
-                    .send(AgentEvent::BashCommandComplete { is_error })
-                    .await;
+                guard.disarm();
+                let _ = event_tx.send(AgentEvent::BashCommandComplete).await;
             });
 
             Ok(DispatchResult::Handled)
@@ -1317,6 +1346,105 @@ mod tests {
         assert!(
             err_msg.contains("Failed to create new session"),
             "error should mention session creation failure, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_command_esc_cancels_and_records_cancellation_result() {
+        use crate::frontend::tui::tui_app::{handle_agent_event, handle_esc};
+        use crate::types::ContentBlock;
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = BashCommand;
+        let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent: Arc::clone(&agent),
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+
+        // Dispatch /bash sleep 30 (long-running)
+        let result = cmd.execute("sleep 30", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert_eq!(ctx.app.state, AppState::RunningBash);
+
+        // Simulate Esc — cancels the token
+        handle_esc(ctx.app);
+
+        // Drop ctx so app is accessible
+        drop(ctx);
+
+        // Drain events until BashCommandComplete (with timeout)
+        let timeout = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        let mut got_complete = false;
+        while start.elapsed() < timeout {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await
+            {
+                Ok(Some(event)) => {
+                    if matches!(event, AgentEvent::BashCommandComplete) {
+                        handle_agent_event(&mut app, event, None).expect("handle");
+                        got_complete = true;
+                        break;
+                    } else {
+                        let _ = handle_agent_event(&mut app, event, None);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+
+        assert!(
+            got_complete,
+            "BashCommandComplete should be received after Esc"
+        );
+        assert_eq!(
+            app.state,
+            AppState::Input,
+            "state should return to Input after BashCommandComplete"
+        );
+        assert!(app.cancel_token.is_none(), "cancel_token should be cleared");
+
+        // History should contain the synthetic pair with cancellation content
+        let history = agent.history();
+        let has_cancelled = history.iter().any(|m| {
+            m.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolResult {
+                        content,
+                        is_error,
+                        ..
+                    } if content.contains("cancelled") && *is_error
+                )
+            })
+        });
+        assert!(
+            has_cancelled,
+            "history should contain ToolResult with 'cancelled' content and is_error=true"
         );
     }
 }

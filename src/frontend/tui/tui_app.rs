@@ -613,7 +613,7 @@ pub fn handle_agent_event(
         // CompactionComplete is handled in run_app where we have access to the Agent.
         // It must not reach this match arm.
         AgentEvent::CompactionComplete { .. } => {}
-        AgentEvent::BashCommandComplete { .. } => {
+        AgentEvent::BashCommandComplete => {
             app.cancel_token = None;
             app.set_state(AppState::Input);
             app.scroll_offset = 0;
@@ -2935,6 +2935,27 @@ mod tests {
     #[test]
     fn extract_last_thinking_line_whitespace_only() {
         assert_eq!(extract_last_thinking_line("   \n  \n  "), None);
+    }
+
+    #[test]
+    fn render_running_bash_snapshot() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::RunningBash);
+        app.conversation.push(ConversationEntry::new_indexed(
+            ConversationRole::ToolUse,
+            "**bash**\n```sh\necho hi\n```".to_string(),
+            1,
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_running_bash", terminal.backend());
     }
 
     #[test]

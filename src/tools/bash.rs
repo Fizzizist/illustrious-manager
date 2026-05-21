@@ -619,17 +619,33 @@ mod tests {
     async fn execute_raw_cancellation_kills_child() {
         use tokio_util::sync::CancellationToken;
         let temp_dir = TempDir::new().expect("temp dir");
+        let sandbox = temp_dir.path().to_path_buf();
+        let marker = sandbox.join("completed.marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
         let token = CancellationToken::new();
         let cancel_clone = token.clone();
+
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             cancel_clone.cancel();
         });
-        let (output, is_error) = execute_raw("sleep 30", temp_dir.path(), Some(token)).await;
+
+        let command = format!("sleep 30 && touch {marker_str}");
+        let (output, is_error) = execute_raw(&command, &sandbox, Some(token)).await;
+
         assert!(is_error, "cancelled command should be is_error=true");
         assert!(
             output.contains("cancelled"),
             "cancelled command should mention cancellation, got: {output}"
+        );
+
+        // Give the OS a moment to reap the killed child
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        assert!(
+            !marker.exists(),
+            "marker file should not exist — subprocess was not killed"
         );
     }
 }

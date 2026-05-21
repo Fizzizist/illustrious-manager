@@ -78,7 +78,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
             AgentEvent::ThinkingReceived(_) => {}
             AgentEvent::CompactionComplete { .. } => {}
             AgentEvent::AutoCompactTriggered { .. } => {}
-            AgentEvent::BashCommandComplete { .. } => {}
+            AgentEvent::BashCommandComplete => {}
         }
     }
 
