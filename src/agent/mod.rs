@@ -25,6 +25,8 @@ pub use spawner::{
     spawn_agent_with_selection,
 };
 
+const CHAT_MODE_CONTEXT_MESSAGE: &str = "Chat mode is enabled. Your tools are currently disabled. Respond to the user's questions using text only.";
+
 struct PendingToolCall {
     id: String,
     name: String,
@@ -58,6 +60,10 @@ pub struct Agent {
     /// sentinel so that the agent prompt does not explode. The untruncated
     /// version is still sent to the TUI via `AgentEvent::ToolResult`.
     max_tool_result_bytes: u64,
+    /// When true, tool definitions are suppressed from API requests and a
+    /// context message informs the LLM that tools are disabled. Toggled at
+    /// runtime via `--chat` CLI flag or `/chat` slash command.
+    chat_mode: Arc<AtomicBool>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -94,6 +100,7 @@ impl Agent {
             max_context_window_len: 0,
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
             max_tool_result_bytes: 65_536,
+            chat_mode: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -184,6 +191,19 @@ impl Agent {
     pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String) {
         *self.backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
+    }
+
+    pub fn set_chat_mode(&self, enabled: bool) {
+        self.chat_mode.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn chat_mode(&self) -> bool {
+        self.chat_mode.load(Ordering::SeqCst)
+    }
+
+    pub fn with_chat_mode(self, enabled: bool) -> Self {
+        self.chat_mode.store(enabled, Ordering::SeqCst);
+        self
     }
 
     #[cfg(test)]
@@ -356,7 +376,7 @@ impl Agent {
         let history_arc = Arc::clone(&self.history);
         let backend = Arc::clone(&self.backend.lock().unwrap_or_else(|e| e.into_inner()));
         let tools = Arc::clone(&self.tools);
-        let config = self
+        let mut config = self
             .config
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -367,6 +387,15 @@ impl Agent {
         let max_context_window_len = self.max_context_window_len;
         let last_auto_compacted = Arc::clone(&self.last_auto_compacted);
         let max_tool_result_bytes = self.max_tool_result_bytes;
+        let chat_mode = self.chat_mode();
+        let context_prefix_len = *self
+            .context_prefix_len
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if chat_mode {
+            config.tools = vec![];
+        }
 
         self.session
             .lock()
@@ -395,7 +424,18 @@ impl Agent {
                 }
                 iterations += 1;
 
-                let history_snapshot = lock(&history_arc).clone();
+                let history_snapshot = if chat_mode {
+                    let snapshot = lock(&history_arc).clone();
+                    let insert_at = context_prefix_len.min(snapshot.len());
+                    let mut modified = snapshot;
+                    modified.insert(
+                        insert_at,
+                        Message::text(Role::User, CHAT_MODE_CONTEXT_MESSAGE.to_string()),
+                    );
+                    modified
+                } else {
+                    lock(&history_arc).clone()
+                };
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
@@ -4354,7 +4394,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_synthetic_tool_call_appends_pair_to_history() {
-        use crate::config::ConfirmationMode;
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
@@ -4646,6 +4685,163 @@ mod tests {
             large_content.len(),
             500,
             "original content reference must be unchanged (method must not mutate caller's copy)"
+        );
+    }
+
+    struct ConfigCapturingBackend {
+        captured_messages: Arc<Mutex<Vec<Message>>>,
+        captured_config: Arc<Mutex<RequestConfig>>,
+        events: Arc<Vec<StreamEvent>>,
+    }
+
+    #[async_trait]
+    impl LlmBackend for ConfigCapturingBackend {
+        async fn send_message(
+            &self,
+            messages: &[Message],
+            config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            *self
+                .captured_messages
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
+            *self
+                .captured_config
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = config.clone();
+            let (tx, rx) = futures::channel::mpsc::unbounded();
+            for event in self.events.iter() {
+                tx.unbounded_send(Ok(event.clone()))
+                    .unwrap_or_else(|e| panic!("send failed: {e:?}"));
+            }
+            Ok(Box::pin(rx))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_clears_tools() {
+        let captured_config = Arc::new(Mutex::new(RequestConfig {
+            model: String::new(),
+            max_tokens: 0,
+            tools: vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: "run bash".to_string(),
+                input_schema: serde_json::json!({}),
+            }],
+            thinking: None,
+        }));
+        let backend = ConfigCapturingBackend {
+            captured_messages: Arc::new(Mutex::new(Vec::new())),
+            captured_config: Arc::clone(&captured_config),
+            events: ok_events(text_response("hello")),
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![crate::types::ToolDefinition {
+                name: "bash".to_string(),
+                description: "run bash".to_string(),
+                input_schema: serde_json::json!({}),
+            }],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_chat_mode(true);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let sent_config = captured_config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            sent_config.tools.is_empty(),
+            "chat mode should clear tools from RequestConfig"
+        );
+    }
+
+    #[test]
+    fn chat_mode_toggle() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let agent = rt.block_on(async {
+            Agent::new(Box::new(backend), config, test_session_arc().await).await
+        });
+
+        assert!(!agent.chat_mode(), "default should be false");
+
+        agent.set_chat_mode(true);
+        assert!(agent.chat_mode(), "after set_chat_mode(true)");
+
+        agent.set_chat_mode(false);
+        assert!(!agent.chat_mode(), "after set_chat_mode(false)");
+    }
+
+    #[tokio::test]
+    async fn chat_mode_injects_context_message() {
+        let captured_messages = Arc::new(Mutex::new(Vec::new()));
+        let backend = ConfigCapturingBackend {
+            captured_messages: Arc::clone(&captured_messages),
+            captured_config: Arc::new(Mutex::new(RequestConfig {
+                model: String::new(),
+                max_tokens: 0,
+                tools: vec![],
+                thinking: None,
+            })),
+            events: ok_events(text_response("response")),
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_chat_mode(true);
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let messages = captured_messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let has_chat_context = messages.iter().any(|m| {
+            m.role == Role::User
+                && m.content.iter().any(
+                    |b| matches!(b, ContentBlock::Text(t) if t.contains("Chat mode is enabled")),
+                )
+        });
+        assert!(
+            has_chat_context,
+            "chat mode should inject a context message into the history snapshot"
+        );
+
+        // The context message should NOT be persisted to session DB
+        let persisted = agent.session_history().await.expect("history");
+        let has_chat_in_db = persisted.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("Chat mode is enabled")))
+        });
+        assert!(
+            !has_chat_in_db,
+            "chat mode context message should not be persisted to session DB"
         );
     }
 }

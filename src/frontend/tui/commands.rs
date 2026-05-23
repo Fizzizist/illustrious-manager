@@ -367,6 +367,38 @@ impl Drop for BashStateGuard {
     }
 }
 
+/// Built-in `/chat` command — toggles chat mode on/off.
+pub struct ChatCommand;
+
+impl SlashCommand for ChatCommand {
+    fn name(&self) -> &str {
+        "chat"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            ctx.app.chat_mode = !ctx.app.chat_mode;
+            ctx.agent.set_chat_mode(ctx.app.chat_mode);
+            let state = if ctx.app.chat_mode {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            ctx.app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                format!("Chat mode {state}."),
+            ));
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Built-in `/bash <command>` command — executes a shell command directly,
 /// records the tool call and result in conversation history, and renders it
 /// exactly like an LLM-driven bash call. Bypasses all policy checks.
@@ -468,6 +500,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(CompactCommand));
     registry.register(Box::new(NewCommand));
     registry.register(Box::new(RoleCommand));
+    registry.register(Box::new(ChatCommand));
     registry.register(Box::new(BashCommand));
     registry
 }
@@ -1445,6 +1478,74 @@ mod tests {
         assert!(
             has_cancelled,
             "history should contain ToolResult with 'cancelled' content and is_error=true"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_command_toggles_chat_mode() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        assert!(!app.chat_mode, "chat_mode should start false");
+
+        let cmd = ChatCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent: Arc::clone(&agent),
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+
+        // First toggle: off -> on
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(
+            ctx.app.chat_mode,
+            "chat_mode should be on after first toggle"
+        );
+        assert!(agent.chat_mode(), "agent chat_mode should be on");
+        assert!(
+            ctx.app.conversation.iter().any(
+                |e| e.role == ConversationRole::Info && e.content.contains("Chat mode enabled")
+            ),
+            "should confirm chat mode enabled"
+        );
+
+        // Second toggle: on -> off
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(
+            !ctx.app.chat_mode,
+            "chat_mode should be off after second toggle"
+        );
+        assert!(!agent.chat_mode(), "agent chat_mode should be off");
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info
+                    && e.content.contains("Chat mode disabled")),
+            "should confirm chat mode disabled"
         );
     }
 }

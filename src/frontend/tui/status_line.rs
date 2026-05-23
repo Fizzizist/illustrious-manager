@@ -28,6 +28,7 @@ pub struct StatusLineInfo<'a> {
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
     pub subagent_usage: Option<&'a TokenUsage>,
+    pub chat_mode: bool,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -122,6 +123,15 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         }
     });
 
+    let chat_span: Option<Span<'static>> = if info.chat_mode {
+        Some(Span::styled(
+            " [chat] ",
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        ))
+    } else {
+        None
+    };
+
     let parent_span = Span::styled(
         format!(" {usage_str} "),
         Style::default().fg(Color::White).bg(STATUS_BG),
@@ -152,9 +162,25 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         false
     };
 
+    let include_chat = if let Some(ref chat_sp) = chat_span {
+        let subagent_width = if include_subagent {
+            subagent_span.as_ref().map(|s| s.width()).unwrap_or(0)
+        } else {
+            0
+        };
+        let left_width_with =
+            parent_span.width() + subagent_width + chat_sp.width() + branch_span.width();
+        left_width_with + right_width <= total_width
+    } else {
+        false
+    };
+
     let mut left_spans = vec![parent_span];
     if include_subagent {
         left_spans.push(subagent_span.expect("checked above"));
+    }
+    if include_chat {
+        left_spans.push(chat_span.expect("checked above"));
     }
     left_spans.push(branch_span);
 
@@ -216,6 +242,7 @@ mod tests {
             working_dir,
             usage,
             subagent_usage: None,
+            chat_mode: false,
         }
     }
 
@@ -516,6 +543,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent_zero),
+            chat_mode: false,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -539,6 +567,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -573,6 +602,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
         // Use a very narrow width where the subagent span won't fit
         let line = build_status_line(&info, 30);
@@ -607,6 +637,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
 
         let backend = ratatui::backend::TestBackend::new(120, 1);
@@ -652,6 +683,64 @@ mod tests {
         assert!(
             output > 0 && output <= 2,
             "only the Text block should count, not thinking; got output={output}"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_chat_indicator_when_chat_mode_is_true() {
+        let (model, branch, dir, usage) = test_info();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            chat_mode: true,
+        };
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            text.contains("[chat]"),
+            "status line should contain [chat] when chat_mode is true, got: {text}"
+        );
+
+        let chat_span = line.spans.iter().find(|s| s.content.contains("[chat]"));
+        assert!(chat_span.is_some(), "should find the [chat] span");
+        assert_eq!(
+            chat_span.expect("checked").style.fg,
+            Some(Color::Yellow),
+            "[chat] span should be yellow"
+        );
+    }
+
+    #[test]
+    fn status_line_hides_chat_indicator_when_chat_mode_is_false() {
+        let (model, branch, dir, usage) = test_info();
+        let info = make_info(&model, branch.as_deref(), &dir, &usage);
+        let line = build_status_line(&info, 120);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains("[chat]"),
+            "status line should not contain [chat] when chat_mode is false"
+        );
+    }
+
+    #[test]
+    fn chat_indicator_dropped_on_narrow_terminal() {
+        let (model, _, dir, usage) = test_info();
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: None,
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            chat_mode: true,
+        };
+        let line = build_status_line(&info, 20);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(
+            !text.contains("[chat]"),
+            "[chat] should be dropped on narrow terminal (width=20)"
         );
     }
 }

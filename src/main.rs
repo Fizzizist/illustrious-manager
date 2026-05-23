@@ -71,6 +71,9 @@ struct Cli {
 
     #[arg(long)]
     session_id: Option<String>,
+
+    #[arg(long)]
+    chat: bool,
 }
 
 #[derive(Debug)]
@@ -172,7 +175,8 @@ async fn main() -> Result<()> {
         // because initial history is set from the input session
         .with_skills(&skills)
         .with_context_files()?
-        .with_compaction_spawner(spawner),
+        .with_compaction_spawner(spawner)
+        .with_chat_mode(cli.chat),
     );
 
     if cli.debug {
@@ -224,6 +228,7 @@ async fn main() -> Result<()> {
                 logger,
                 &app_config,
                 factory.clone(),
+                cli.chat,
             )
             .await
         }
@@ -414,6 +419,18 @@ mod tests {
     fn session_id_flag_defaults_to_none() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert!(cli.session_id.is_none());
+    }
+
+    #[test]
+    fn chat_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(!cli.chat);
+    }
+
+    #[test]
+    fn chat_flag_is_parsed_when_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--chat"]).unwrap();
+        assert!(cli.chat);
     }
 
     #[test]

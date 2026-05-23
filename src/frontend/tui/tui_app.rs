@@ -73,6 +73,7 @@ pub struct App {
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
+    pub chat_mode: bool,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -133,6 +134,7 @@ impl App {
             working_dir: std::path::PathBuf::new(),
             pending_g: false,
             compaction_task: None,
+            chat_mode: false,
             tools,
         }
     }
@@ -430,6 +432,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         working_dir: &app.working_dir,
         usage: &app.usage,
         subagent_usage: Some(&app.subagent_usage),
+        chat_mode: app.chat_mode,
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 
@@ -629,6 +632,7 @@ pub async fn run(
     logger: Option<Logger>,
     config: &AppConfig,
     backend_factory: Arc<BackendFactory>,
+    chat_mode: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -643,6 +647,7 @@ pub async fn run(
         logger,
         config,
         backend_factory,
+        chat_mode,
     )
     .await;
 
@@ -664,11 +669,13 @@ async fn run_app(
     mut logger: Option<Logger>,
     config: &AppConfig,
     backend_factory: Arc<BackendFactory>,
+    chat_mode: bool,
 ) -> Result<()> {
     let mut app = App::new(agent.tools());
     app.model = agent.model();
     app.git_branch = status_line::detect_git_branch();
     app.working_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    app.chat_mode = chat_mode;
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
