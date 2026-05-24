@@ -69,6 +69,7 @@ pub struct App {
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
+    pub chat_mode: crate::types::ChatMode,
     pending_g: bool,
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
@@ -131,6 +132,7 @@ impl App {
             model: String::new(),
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
+            chat_mode: crate::types::ChatMode::default(),
             pending_g: false,
             compaction_task: None,
             tools,
@@ -430,6 +432,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         working_dir: &app.working_dir,
         usage: &app.usage,
         subagent_usage: Some(&app.subagent_usage),
+        chat_mode: app.chat_mode.is_on(),
     };
     status_line::render_status_line(&info, frame, chunks[2]);
 

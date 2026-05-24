@@ -459,6 +459,41 @@ impl SlashCommand for BashCommand {
     }
 }
 
+/// Built-in `/chat` command — toggles chat mode on/off.
+pub struct ChatCommand;
+
+impl SlashCommand for ChatCommand {
+    fn name(&self) -> &str {
+        "chat"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            let new_state = ctx.app.chat_mode.toggle();
+            ctx.agent.set_chat_mode(new_state);
+            if new_state {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    "Chat mode ON — write tools hidden, bash restricted to read-only commands"
+                        .to_string(),
+                ));
+            } else {
+                ctx.app.conversation.push(ConversationEntry::new(
+                    ConversationRole::Info,
+                    "Chat mode OFF — all tools available".to_string(),
+                ));
+            }
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -468,6 +503,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(CompactCommand));
     registry.register(Box::new(NewCommand));
     registry.register(Box::new(RoleCommand));
+    registry.register(Box::new(ChatCommand));
     registry.register(Box::new(BashCommand));
     registry
 }
@@ -1445,6 +1481,105 @@ mod tests {
         assert!(
             has_cancelled,
             "history should contain ToolResult with 'cancelled' content and is_error=true"
+        );
+    }
+
+    #[test]
+    fn parse_command_recognizes_chat() {
+        let parsed = parse_command("/chat").expect("should parse");
+        assert_eq!(parsed.name, "chat");
+        assert_eq!(parsed.args, "");
+    }
+
+    #[tokio::test]
+    async fn chat_command_toggles_mode_on() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        let cmd = ChatCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(ctx.app.chat_mode.is_on());
+        assert!(ctx.agent.is_chat_mode());
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info && e.content.contains("Chat mode ON")),
+            "should show ON message"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_command_toggles_mode_off() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        let session = std::sync::Arc::new(tokio::sync::Mutex::new(session_inner));
+        let agent = Arc::new(
+            crate::agent::Agent::new(
+                Box::new(FakeBackend),
+                crate::types::RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                },
+                session,
+            )
+            .await,
+        );
+        agent.set_chat_mode(true);
+        let config = make_config();
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mut app = App::new(Arc::clone(&tools));
+        app.chat_mode.set(true);
+        let cmd = ChatCommand;
+        let (event_tx, _event_rx) = mpsc::channel::<AgentEvent>(100);
+        let mut ctx = CommandContext {
+            app: &mut app,
+            agent,
+            config: &config,
+            event_tx: &event_tx,
+            backend_factory: make_factory(),
+        };
+        let result = cmd.execute("", &mut ctx).await.expect("execute");
+        assert_eq!(result, DispatchResult::Handled);
+        assert!(!ctx.app.chat_mode.is_on());
+        assert!(!ctx.agent.is_chat_mode());
+        assert!(
+            ctx.app
+                .conversation
+                .iter()
+                .any(|e| e.role == ConversationRole::Info && e.content.contains("Chat mode OFF")),
+            "should show OFF message"
         );
     }
 }

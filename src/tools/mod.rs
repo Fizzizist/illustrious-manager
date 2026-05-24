@@ -135,6 +135,24 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    pub fn read_only_definitions(&self) -> Vec<ToolDefinition> {
+        let excluded: std::collections::HashSet<&str> =
+            ["edit_file", "write_file", "bash"].into_iter().collect();
+        self.tools
+            .values()
+            .filter(|t| !excluded.contains(t.name()))
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema().clone(),
+            })
+            .collect()
+    }
+
     /// Consume this registry and return a new one containing only the tools
     /// whose names appear in `allowlist`. Names not found in the registry are
     /// silently skipped; a warning is printed if the result is empty.
@@ -241,6 +259,64 @@ mod tests {
                 message: "Tool execution failed".to_string(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn tool_names_returns_all_registered_tool_names() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("tool1", "First")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("tool2", "Second")))
+            .expect("register");
+        let mut names = registry.tool_names();
+        names.sort();
+        assert_eq!(names, vec!["tool1", "tool2"]);
+    }
+
+    #[tokio::test]
+    async fn read_only_definitions_excludes_write_tools_and_bash() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("search", "Search tool")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("edit_file", "Edit tool")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("write_file", "Write tool")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("bash", "Bash tool")))
+            .expect("register");
+        let defs = registry.read_only_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.contains(&"edit_file"),
+            "edit_file should be excluded"
+        );
+        assert!(
+            !names.contains(&"write_file"),
+            "write_file should be excluded"
+        );
+        assert!(!names.contains(&"bash"), "bash should be excluded");
+        assert!(names.contains(&"search"), "search should be included");
+    }
+
+    #[tokio::test]
+    async fn read_only_definitions_preserves_schema() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("search", "Search tool")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("edit_file", "Edit tool")))
+            .expect("register");
+        let defs = registry.read_only_definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "search");
+        assert_eq!(defs[0].input_schema["properties"]["arg1"]["type"], "string");
     }
 
     #[tokio::test]

@@ -128,6 +128,7 @@ pub struct AgentSpawner {
     pub registry_builder: RegistryBuilder,
     pub parent_confirmation: ConfirmationMode,
     pub skills: std::collections::HashMap<String, std::path::PathBuf>,
+    pub chat_mode: crate::types::ChatMode,
 }
 
 impl AgentSpawner {
@@ -164,7 +165,16 @@ impl AgentSpawner {
             }
         };
 
-        let registry = if let Some(allowlist) = tool_allowlist {
+        let registry = if self.chat_mode.is_on() {
+            let read_only_names = registry.tool_names();
+            let excluded: std::collections::HashSet<&str> =
+                ["edit_file", "write_file", "bash"].into_iter().collect();
+            let filtered: Vec<String> = read_only_names
+                .into_iter()
+                .filter(|n| !excluded.contains(n.as_str()))
+                .collect();
+            registry.into_filtered(&filtered)
+        } else if let Some(allowlist) = tool_allowlist {
             registry.into_filtered(allowlist)
         } else {
             registry

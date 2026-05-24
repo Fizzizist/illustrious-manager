@@ -71,6 +71,9 @@ struct Cli {
 
     #[arg(long)]
     session_id: Option<String>,
+
+    #[arg(long)]
+    chat: bool,
 }
 
 #[derive(Debug)]
@@ -151,11 +154,18 @@ async fn main() -> Result<()> {
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
     let session_arc = Arc::new(tokio::sync::Mutex::new(session));
 
+    let chat_mode = crate::types::ChatMode::new(cli.chat);
+
     let mut registry =
         build_tool_registry(Arc::clone(&session_arc), &app_config.tools, &skills, None)?;
 
-    let spawner =
-        build_agent_spawner_and_register(&mut registry, &factory, &app_config_arc, &skills)?;
+    let spawner = build_agent_spawner_and_register(
+        &mut registry,
+        &factory,
+        &app_config_arc,
+        &skills,
+        chat_mode.clone(),
+    )?;
 
     let agent = Arc::new(
         spawn_agent(
@@ -172,7 +182,8 @@ async fn main() -> Result<()> {
         // because initial history is set from the input session
         .with_skills(&skills)
         .with_context_files()?
-        .with_compaction_spawner(spawner),
+        .with_compaction_spawner(spawner)
+        .with_chat_mode(chat_mode),
     );
 
     if cli.debug {
@@ -266,6 +277,7 @@ fn build_tool_registry(
         PathBuf::from(&tools_config.sandbox_root),
         tools_config.confirmation.clone(),
         Box::new(|_| true),
+        false,
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
@@ -293,6 +305,7 @@ fn build_agent_spawner_and_register(
     factory: &Arc<BackendFactory>,
     app_config: &Arc<config::AppConfig>,
     skills: &HashMap<String, PathBuf>,
+    chat_mode: crate::types::ChatMode,
 ) -> Result<Arc<agent::AgentSpawner>> {
     let factory_clone = Arc::clone(factory);
     let app_config_clone = Arc::clone(app_config);
@@ -316,6 +329,7 @@ fn build_agent_spawner_and_register(
         }),
         parent_confirmation: app_config.tools.confirmation.clone(),
         skills: skills.clone(),
+        chat_mode,
     });
 
     spawner_cell
@@ -581,5 +595,17 @@ mod tests {
             err.contains("compile"),
             "error should mention compilation failure"
         );
+    }
+
+    #[test]
+    fn chat_flag_is_parsed_when_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--chat"]).unwrap();
+        assert!(cli.chat);
+    }
+
+    #[test]
+    fn chat_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(!cli.chat);
     }
 }

@@ -46,6 +46,13 @@ fn default_bash_denylist() -> Vec<String> {
         .collect()
 }
 
+pub fn read_only_bash_allowlist() -> Vec<String> {
+    ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn default_sessions_dir() -> PathBuf {
     dirs::config_dir()
         .map(|path| path.join("illustrious-manager/sessions"))
@@ -714,6 +721,15 @@ mod tests {
         assert_eq!(
             config.bash_denylist,
             vec!["rm", "wget", "sudo", "chmod", "chown"]
+        );
+    }
+
+    #[test]
+    fn read_only_bash_allowlist_returns_expected_commands() {
+        let allowlist = read_only_bash_allowlist();
+        assert_eq!(
+            allowlist,
+            vec!["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
         );
     }
 

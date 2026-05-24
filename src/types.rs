@@ -3,6 +3,8 @@
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Definition of a tool for discovery/registration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -382,6 +384,52 @@ pub type BoxStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 pub enum ConfirmationResponse {
     Approved,
     Rejected,
+}
+
+/// Runtime toggle for chat mode, which restricts the agent to read-only operations.
+#[derive(Debug)]
+pub struct ChatMode {
+    inner: Arc<AtomicBool>,
+}
+
+impl ChatMode {
+    pub fn new(on: bool) -> Self {
+        Self {
+            inner: Arc::new(AtomicBool::new(on)),
+        }
+    }
+
+    pub fn is_on(&self) -> bool {
+        self.inner.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self, on: bool) {
+        self.inner.store(on, Ordering::SeqCst);
+    }
+
+    pub fn toggle(&self) -> bool {
+        let new = !self.is_on();
+        self.set(new);
+        new
+    }
+
+    pub fn clone_inner(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner)
+    }
+}
+
+impl Clone for ChatMode {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Default for ChatMode {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 #[cfg(test)]
@@ -866,5 +914,51 @@ mod tests {
     fn thinking_display_omitted_serializes_as_snake_case() {
         let json = serde_json::to_string(&ThinkingDisplay::Omitted).expect("serialize");
         assert_eq!(json, r#""omitted""#);
+    }
+
+    #[test]
+    fn chat_mode_new_off() {
+        let mode = ChatMode::new(false);
+        assert!(!mode.is_on());
+    }
+
+    #[test]
+    fn chat_mode_new_on() {
+        let mode = ChatMode::new(true);
+        assert!(mode.is_on());
+    }
+
+    #[test]
+    fn chat_mode_set() {
+        let mode = ChatMode::new(false);
+        mode.set(true);
+        assert!(mode.is_on());
+        mode.set(false);
+        assert!(!mode.is_on());
+    }
+
+    #[test]
+    fn chat_mode_toggle() {
+        let mode = ChatMode::new(false);
+        let new = mode.toggle();
+        assert!(new);
+        assert!(mode.is_on());
+        let new2 = mode.toggle();
+        assert!(!new2);
+        assert!(!mode.is_on());
+    }
+
+    #[test]
+    fn chat_mode_clones_share_state() {
+        let mode = ChatMode::new(false);
+        let clone = mode.clone();
+        mode.set(true);
+        assert!(clone.is_on(), "clones should share the same AtomicBool");
+    }
+
+    #[test]
+    fn chat_mode_default_is_off() {
+        let mode = ChatMode::default();
+        assert!(!mode.is_on());
     }
 }
