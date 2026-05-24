@@ -166,10 +166,12 @@ impl AgentSpawner {
         };
 
         let registry = if self.chat_mode.is_on() {
-            let read_only_names = registry.tool_names();
-            let excluded: std::collections::HashSet<&str> =
-                ["edit_file", "write_file", "bash"].into_iter().collect();
-            let filtered: Vec<String> = read_only_names
+            let all_names = registry.tool_names();
+            let excluded: std::collections::HashSet<&str> = crate::types::CHAT_MODE_EXCLUDED_TOOLS
+                .iter()
+                .copied()
+                .collect();
+            let filtered: Vec<String> = all_names
                 .into_iter()
                 .filter(|n| !excluded.contains(n.as_str()))
                 .collect();
@@ -266,4 +268,106 @@ pub async fn spawn_agent_with_selection(
         .with_tools(tools)
         .with_tool_config(tool_config)
         .with_compaction_config(&crate::config::CompactionConfig::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ChatMode;
+
+    #[test]
+    fn spawner_chat_mode_filters_write_tools_from_registry() {
+        let chat_mode = ChatMode::new(true);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(crate::tools::bash::BashTool::new(
+                vec![],
+                vec![],
+                std::path::PathBuf::from("/tmp"),
+                crate::config::ConfirmationMode::Never,
+                Box::new(|_| true),
+            )))
+            .expect("register bash");
+        registry
+            .register(Box::new(crate::tools::edit_file::EditFile::new(
+                crate::tools::sandbox::SandboxPolicy::new(std::path::Path::new("/tmp")),
+            )))
+            .expect("register edit_file");
+        registry
+            .register(Box::new(crate::tools::write_file::WriteFileTool::new(
+                crate::tools::sandbox::SandboxPolicy::new(std::path::Path::new("/tmp")),
+            )))
+            .expect("register write_file");
+        registry
+            .register(Box::new(crate::tools::search::SearchTool::new(
+                std::path::PathBuf::from("/tmp"),
+            )))
+            .expect("register search");
+        registry
+            .register(Box::new(crate::tools::skill::SkillTool::new(
+                &std::collections::HashMap::new(),
+            )))
+            .expect("register skill");
+
+        let all_names = registry.tool_names();
+        assert!(all_names.contains(&"bash".to_string()));
+        assert!(all_names.contains(&"edit_file".to_string()));
+        assert!(all_names.contains(&"write_file".to_string()));
+        assert!(all_names.contains(&"search".to_string()));
+
+        let excluded: std::collections::HashSet<&str> = crate::types::CHAT_MODE_EXCLUDED_TOOLS
+            .iter()
+            .copied()
+            .collect();
+        let filtered: Vec<String> = all_names
+            .into_iter()
+            .filter(|n| !excluded.contains(n.as_str()))
+            .collect();
+        let registry = registry.into_filtered(&filtered);
+
+        let remaining = registry.tool_names();
+        assert!(
+            !remaining.contains(&"bash".to_string()),
+            "bash should be filtered out in chat mode"
+        );
+        assert!(
+            !remaining.contains(&"edit_file".to_string()),
+            "edit_file should be filtered out in chat mode"
+        );
+        assert!(
+            !remaining.contains(&"write_file".to_string()),
+            "write_file should be filtered out in chat mode"
+        );
+        assert!(
+            remaining.contains(&"search".to_string()),
+            "search should remain in chat mode"
+        );
+        assert!(
+            remaining.contains(&"skill".to_string()),
+            "skill should remain in chat mode"
+        );
+        assert!(chat_mode.is_on());
+    }
+
+    #[test]
+    fn spawner_chat_mode_off_keeps_all_tools() {
+        let chat_mode = ChatMode::new(false);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(crate::tools::bash::BashTool::new(
+                vec![],
+                vec![],
+                std::path::PathBuf::from("/tmp"),
+                crate::config::ConfirmationMode::Never,
+                Box::new(|_| true),
+            )))
+            .expect("register bash");
+
+        assert!(!chat_mode.is_on());
+        let names = registry.tool_names();
+        assert!(
+            names.contains(&"bash".to_string()),
+            "bash should be present when chat mode is off"
+        );
+    }
 }

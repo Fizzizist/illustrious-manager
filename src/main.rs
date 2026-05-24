@@ -277,7 +277,6 @@ fn build_tool_registry(
         PathBuf::from(&tools_config.sandbox_root),
         tools_config.confirmation.clone(),
         Box::new(|_| true),
-        false,
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;

@@ -816,7 +816,7 @@ async fn execute_tool_calls(
         let decision = if let Some(err) = parse_error {
             ToolDecision::ParseError(err)
         } else if chat_mode.is_on()
-            && matches!(call.name.as_str(), "edit_file" | "write_file" | "bash")
+            && crate::types::CHAT_MODE_EXCLUDED_TOOLS.contains(&call.name.as_str())
         {
             ToolDecision::ChatModeRejected
         } else {
@@ -4861,6 +4861,126 @@ mod tests {
         } = tool_result.expect("checked")
         {
             assert!(*is_error, "write tool should be rejected in chat mode");
+            assert!(
+                content.contains("chat mode"),
+                "error should mention chat mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_bash_tool_execution() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{"command":"ls"}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "Bash tool")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("run ls".to_string(), None, None)
+            .await
+            .expect("send");
+        let events = collect_events(stream).await;
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
+        assert!(tool_result.is_some(), "should have a tool result");
+        if let AgentEvent::ToolResult {
+            content, is_error, ..
+        } = tool_result.expect("checked")
+        {
+            assert!(*is_error, "bash tool should be rejected in chat mode");
+            assert!(
+                content.contains("chat mode"),
+                "error should mention chat mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_write_file_tool_execution() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "write_file".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(
+                    r#"{"path":"x","content":"hello"}"#.to_string(),
+                )),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("write_file", "Write tool")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("write file".to_string(), None, None)
+            .await
+            .expect("send");
+        let events = collect_events(stream).await;
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
+        assert!(tool_result.is_some(), "should have a tool result");
+        if let AgentEvent::ToolResult {
+            content, is_error, ..
+        } = tool_result.expect("checked")
+        {
+            assert!(*is_error, "write_file tool should be rejected in chat mode");
             assert!(
                 content.contains("chat mode"),
                 "error should mention chat mode"

@@ -140,8 +140,10 @@ impl ToolRegistry {
     }
 
     pub fn read_only_definitions(&self) -> Vec<ToolDefinition> {
-        let excluded: std::collections::HashSet<&str> =
-            ["edit_file", "write_file", "bash"].into_iter().collect();
+        let excluded: std::collections::HashSet<&str> = crate::types::CHAT_MODE_EXCLUDED_TOOLS
+            .iter()
+            .copied()
+            .collect();
         self.tools
             .values()
             .filter(|t| !excluded.contains(t.name()))

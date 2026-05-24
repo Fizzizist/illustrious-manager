@@ -6,6 +6,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Tool names excluded from the LLM when chat mode is active.
+pub const CHAT_MODE_EXCLUDED_TOOLS: &[&str] = &["edit_file", "write_file", "bash"];
+
 /// Definition of a tool for discovery/registration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -411,10 +414,6 @@ impl ChatMode {
         let new = !self.is_on();
         self.set(new);
         new
-    }
-
-    pub fn clone_inner(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.inner)
     }
 }
 

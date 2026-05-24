@@ -28,7 +28,6 @@ pub struct BashTool {
     confirmation: ConfirmationMode,
     confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
     schema: Value,
-    read_only_mode: bool,
 }
 
 impl BashTool {
@@ -38,7 +37,6 @@ impl BashTool {
         sandbox_root: PathBuf,
         confirmation: ConfirmationMode,
         confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
-        read_only_mode: bool,
     ) -> Self {
         let schema = serde_json::json!({
             "type": "object",
@@ -57,12 +55,7 @@ impl BashTool {
             confirmation,
             confirm_fn,
             schema,
-            read_only_mode,
         }
-    }
-
-    pub fn set_read_only_mode(&mut self, on: bool) {
-        self.read_only_mode = on;
     }
 
     /// Extracts the first token (command name) from each shell segment.
@@ -121,23 +114,6 @@ impl Tool for BashTool {
             })?;
 
         let tokens = Self::shell_command_tokens(command);
-
-        if self.read_only_mode {
-            let read_only: std::collections::HashSet<&str> =
-                ["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"]
-                    .into_iter()
-                    .collect();
-            let all_read_only = tokens.iter().all(|token| read_only.contains(*token));
-            if !all_read_only {
-                return Ok(ToolResult {
-                    content: vec![ContentBlock::Text(
-                        "Command rejected: chat mode only allows read-only commands".to_string(),
-                    )],
-                    is_error: true,
-                    agent_events: vec![],
-                });
-            }
-        }
 
         for token in &tokens {
             if self.denylist.contains(*token) {
@@ -235,7 +211,6 @@ mod tests {
         confirmation: ConfirmationMode,
         sandbox_root: PathBuf,
         confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
-        read_only_mode: bool,
     ) -> BashTool {
         BashTool::new(
             vec!["echo", "ls", "cat"]
@@ -246,7 +221,6 @@ mod tests {
             sandbox_root,
             confirmation,
             confirm_fn,
-            read_only_mode,
         )
     }
 
@@ -257,7 +231,6 @@ mod tests {
             ConfirmationMode::Always,
             temp_dir.path().to_path_buf(),
             Box::new(|_| panic!("confirm_fn must not be called for allowlisted commands")),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}))
@@ -277,7 +250,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "rm -rf /"}))
@@ -297,7 +269,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| panic!("confirm_fn must not be called with Never policy")),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
@@ -313,7 +284,6 @@ mod tests {
             ConfirmationMode::Always,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
@@ -329,7 +299,6 @@ mod tests {
             ConfirmationMode::Always,
             temp_dir.path().to_path_buf(),
             Box::new(|_| false),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
@@ -345,7 +314,6 @@ mod tests {
             ConfirmationMode::WriteOnly,
             temp_dir.path().to_path_buf(),
             Box::new(|_| false),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
@@ -361,7 +329,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "cat file.txt | rm -rf /"}))
@@ -382,7 +349,6 @@ mod tests {
             ConfirmationMode::Always,
             temp_dir.path().to_path_buf(),
             Box::new(|_| panic!("confirm_fn must not be called when all segments allowlisted")),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello | cat"}))
@@ -395,12 +361,7 @@ mod tests {
     async fn command_runs_with_sandbox_root_as_cwd() {
         let temp_dir = TempDir::new().expect("temp dir");
         let sandbox = temp_dir.path().canonicalize().expect("canonicalize");
-        let tool = make_tool(
-            ConfirmationMode::Never,
-            sandbox.clone(),
-            Box::new(|_| true),
-            false,
-        );
+        let tool = make_tool(ConfirmationMode::Never, sandbox.clone(), Box::new(|_| true));
         let result = tool
             .execute(serde_json::json!({"command": "pwd"}))
             .await
@@ -425,7 +386,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo 'err msg' >&2; exit 1"}))
@@ -445,7 +405,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"not_command": "echo hello"}))
@@ -460,7 +419,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello && rm -rf /"}))
@@ -479,7 +437,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello; rm -rf /"}))
@@ -498,7 +455,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello\nrm -rf /"}))
@@ -517,7 +473,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo $(rm -rf /)"}))
@@ -536,7 +491,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo `rm -rf /`"}))
@@ -555,7 +509,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "true"}))
@@ -578,7 +531,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let md = tool.markdown_input(&serde_json::json!({"command": "ls -la"}));
         assert!(md.contains("```sh"), "should wrap in sh code block");
@@ -592,7 +544,6 @@ mod tests {
             ConfirmationMode::Never,
             temp_dir.path().to_path_buf(),
             Box::new(|_| true),
-            false,
         );
         let result = tool
             .execute(serde_json::json!({"command": "echo hello"}))
@@ -618,12 +569,7 @@ mod tests {
         let marker = sandbox.join("ran_to_completion.marker");
         let marker_str = marker.to_string_lossy().to_string();
 
-        let tool = make_tool(
-            ConfirmationMode::Never,
-            sandbox.clone(),
-            Box::new(|_| true),
-            false,
-        );
+        let tool = make_tool(ConfirmationMode::Never, sandbox.clone(), Box::new(|_| true));
 
         let command = format!("sleep 30 && touch {}", marker_str);
         let exec_future = tool.execute(serde_json::json!({"command": command}));
@@ -701,99 +647,5 @@ mod tests {
             !marker.exists(),
             "marker file should not exist — subprocess was not killed"
         );
-    }
-
-    #[tokio::test]
-    async fn read_only_mode_allows_read_only_commands() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let tool = BashTool::new(
-            vec!["echo".to_string()],
-            vec![],
-            temp_dir.path().to_path_buf(),
-            ConfirmationMode::Never,
-            Box::new(|_| true),
-            true,
-        );
-        let result = tool
-            .execute(serde_json::json!({"command": "ls"}))
-            .await
-            .expect("should succeed");
-        assert!(!result.is_error);
-    }
-
-    #[tokio::test]
-    async fn read_only_mode_rejects_non_read_only_commands() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let tool = BashTool::new(
-            vec!["echo".to_string()],
-            vec![],
-            temp_dir.path().to_path_buf(),
-            ConfirmationMode::Never,
-            Box::new(|_| true),
-            true,
-        );
-        let result = tool
-            .execute(serde_json::json!({"command": "python3 script.py"}))
-            .await
-            .expect("execute must not err");
-        assert!(result.is_error);
-        match &result.content[0] {
-            ContentBlock::Text(text) => assert!(text.contains("chat mode")),
-            _ => panic!("expected Text"),
-        }
-    }
-
-    #[tokio::test]
-    async fn read_only_mode_off_allows_all_commands() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let tool = BashTool::new(
-            vec!["echo", "ls", "cat"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            vec![],
-            temp_dir.path().to_path_buf(),
-            ConfirmationMode::Never,
-            Box::new(|_| true),
-            false,
-        );
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
-            .await
-            .expect("should succeed");
-        assert!(!result.is_error);
-    }
-
-    #[tokio::test]
-    async fn read_only_mode_toggle() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let mut tool = BashTool::new(
-            vec!["echo".to_string()],
-            vec![],
-            temp_dir.path().to_path_buf(),
-            ConfirmationMode::Never,
-            Box::new(|_| true),
-            false,
-        );
-        // Initially off
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
-            .await
-            .expect("should succeed");
-        assert!(!result.is_error);
-        // Toggle on
-        tool.set_read_only_mode(true);
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
-            .await
-            .expect("execute must not err");
-        assert!(result.is_error);
-        // Toggle off
-        tool.set_read_only_mode(false);
-        let result = tool
-            .execute(serde_json::json!({"command": "echo hello"}))
-            .await
-            .expect("should succeed");
-        assert!(!result.is_error);
     }
 }
