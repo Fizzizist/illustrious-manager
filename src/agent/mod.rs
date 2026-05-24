@@ -597,6 +597,47 @@ impl Agent {
                     break;
                 }
 
+                // Defensive guard: in chat mode, the LLM should never emit tool
+                // calls (it received no tool definitions), but some models
+                // hallucinate them anyway. Skip execution and warn the user.
+                if chat_mode && !tool_calls.is_empty() {
+                    let tool_names: Vec<&str> =
+                        tool_calls.iter().map(|t| t.name.as_str()).collect();
+                    let _ = event_tx.unbounded_send(AgentEvent::Warn(format!(
+                        "Chat mode is active but the model attempted tool calls ({}). Ignoring.",
+                        tool_names.join(", ")
+                    )));
+                    let mut content = vec![];
+                    if !thinking_accumulated.is_empty() {
+                        content.push(ContentBlock::Thinking {
+                            text: thinking_accumulated.clone(),
+                            signature: thinking_signature.clone(),
+                        });
+                    }
+                    if !text_accumulated.is_empty() {
+                        content.push(ContentBlock::Text(text_accumulated.clone()));
+                    }
+                    let assistant_msg = Message {
+                        role: Role::Assistant,
+                        content,
+                    };
+                    lock(&history_arc).push(assistant_msg.clone());
+                    let _ = session
+                        .lock()
+                        .await
+                        .conversation()
+                        .insert_message(&assistant_msg)
+                        .await;
+                    let _ = event_tx.unbounded_send(AgentEvent::ResponseComplete(text_accumulated));
+                    compact::check_auto_compact(
+                        peak_input_tokens,
+                        max_context_window_len,
+                        &last_auto_compacted,
+                        &event_tx,
+                    );
+                    break;
+                }
+
                 // Check cancellation before executing tool calls.
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
@@ -4842,6 +4883,187 @@ mod tests {
         assert!(
             !has_chat_in_db,
             "chat mode context message should not be persisted to session DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_toggle_lifecycle_restores_tools() {
+        let tool_def = crate::types::ToolDefinition {
+            name: "bash".to_string(),
+            description: "run bash".to_string(),
+            input_schema: serde_json::json!({}),
+        };
+
+        // First send: chat mode ON — verify tools cleared
+        let captured_config_on = Arc::new(Mutex::new(RequestConfig {
+            model: String::new(),
+            max_tokens: 0,
+            tools: vec![tool_def.clone()],
+            thinking: None,
+        }));
+        let captured_messages_on = Arc::new(Mutex::new(Vec::new()));
+        let backend_on = ConfigCapturingBackend {
+            captured_messages: Arc::clone(&captured_messages_on),
+            captured_config: Arc::clone(&captured_config_on),
+            events: ok_events(text_response("chat response")),
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![tool_def.clone()],
+            thinking: None,
+        };
+        let agent = Agent::new(
+            Box::new(backend_on),
+            config.clone(),
+            test_session_arc().await,
+        )
+        .await
+        .with_chat_mode(true);
+
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _events = collect_events(stream).await;
+
+        let config_on = captured_config_on
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            config_on.tools.is_empty(),
+            "chat mode should clear tools, got {} tools",
+            config_on.tools.len()
+        );
+
+        // Verify synthetic context message was injected
+        let messages_on = captured_messages_on
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let has_chat_msg = messages_on.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("Chat mode is enabled")))
+        });
+        assert!(has_chat_msg, "chat mode ON should inject context message");
+
+        // Toggle chat mode OFF
+        agent.set_chat_mode(false);
+
+        // Second send: chat mode OFF — verify tools restored
+        let captured_config_off = Arc::new(Mutex::new(RequestConfig {
+            model: String::new(),
+            max_tokens: 0,
+            tools: vec![],
+            thinking: None,
+        }));
+        let captured_messages_off = Arc::new(Mutex::new(Vec::new()));
+        let backend_off = ConfigCapturingBackend {
+            captured_messages: Arc::clone(&captured_messages_off),
+            captured_config: Arc::clone(&captured_config_off),
+            events: ok_events(text_response("normal response")),
+        };
+        agent.set_backend(
+            Arc::new(backend_off) as Arc<dyn LlmBackend>,
+            "test".to_string(),
+        );
+
+        let stream = agent
+            .send("hello again".to_string(), None, None)
+            .await
+            .expect("second send should succeed");
+        let _events = collect_events(stream).await;
+
+        let config_off = captured_config_off
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            config_off.tools.len(),
+            1,
+            "toggling chat mode off should restore tools"
+        );
+        assert_eq!(
+            config_off.tools[0].name, "bash",
+            "restored tool should be bash"
+        );
+
+        // Verify no synthetic context message in the second send
+        let messages_off = captured_messages_off
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let has_chat_msg_off = messages_off.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("Chat mode is enabled")))
+        });
+        assert!(
+            !has_chat_msg_off,
+            "no chat mode context message should be injected when chat mode is off"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_skips_hallucinated_tool_calls() {
+        // Simulate a model that emits a tool call despite having no tool definitions.
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("Here is a".to_string())),
+            Ok(StreamEvent::ToolUseStart {
+                id: "t1".to_string(),
+                name: "bash".to_string(),
+            }),
+            Ok(StreamEvent::ToolUseDelta(
+                r#"{"command": "ls"}"#.to_string(),
+            )),
+            Ok(StreamEvent::ToolUseDone),
+            Ok(StreamEvent::Usage {
+                input_tokens: 500,
+                output_tokens: 50,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_chat_mode(true);
+
+        let stream = agent
+            .send("list files".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // Should complete without executing the hallucinated tool call
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "should get ResponseComplete even with hallucinated tool call"
+        );
+        // Should emit a Warn event about the hallucinated tool call
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Warn(msg) if msg.contains("Chat mode is active"))),
+            "should emit Warn about hallucinated tool call in chat mode"
+        );
+        // Should NOT emit ToolUseReceived (since the guard runs after stream parsing)
+        // Actually, ToolUseReceived IS emitted during stream parsing before the guard.
+        // The key assertion is that the tool is NOT executed.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolResult { .. })),
+            "should not emit ToolResult for hallucinated tool call in chat mode"
         );
     }
 }

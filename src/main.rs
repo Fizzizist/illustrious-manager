@@ -434,6 +434,18 @@ mod tests {
     }
 
     #[test]
+    fn chat_flag_combined_with_single_shot() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--chat", "--single-shot", "hello"])
+            .unwrap();
+        assert!(cli.chat);
+        assert!(cli.single_shot);
+        match determine_mode(&cli).unwrap() {
+            Mode::SingleShot { prompt, .. } => assert_eq!(prompt, "hello"),
+            Mode::Repl { .. } => panic!("Expected SingleShot mode"),
+        }
+    }
+
+    #[test]
     fn output_format_defaults_to_text() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert_eq!(cli.output_format, frontend::stdout::OutputFormat::Text);
