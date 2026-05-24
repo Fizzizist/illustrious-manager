@@ -286,6 +286,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp"),
                 crate::config::ConfirmationMode::Never,
                 Box::new(|_| true),
+                chat_mode.clone(),
             )))
             .expect("register bash");
         registry
@@ -327,8 +328,8 @@ mod tests {
 
         let remaining = registry.tool_names();
         assert!(
-            !remaining.contains(&"bash".to_string()),
-            "bash should be filtered out in chat mode"
+            remaining.contains(&"bash".to_string()),
+            "bash should remain available in chat mode (as restricted read-only)"
         );
         assert!(
             !remaining.contains(&"edit_file".to_string()),
@@ -360,6 +361,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp"),
                 crate::config::ConfirmationMode::Never,
                 Box::new(|_| true),
+                chat_mode.clone(),
             )))
             .expect("register bash");
 

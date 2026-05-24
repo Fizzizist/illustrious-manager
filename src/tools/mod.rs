@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_definitions_excludes_write_tools_and_bash() {
+    async fn read_only_definitions_excludes_write_tools_but_keeps_bash() {
         let mut registry = ToolRegistry::new();
         registry
             .register(Box::new(MockTool::new("search", "Search tool")))
@@ -302,7 +302,10 @@ mod tests {
             !names.contains(&"write_file"),
             "write_file should be excluded"
         );
-        assert!(!names.contains(&"bash"), "bash should be excluded");
+        assert!(
+            names.contains(&"bash"),
+            "bash should be included (restricted to read-only at execution time)"
+        );
         assert!(names.contains(&"search"), "search should be included");
     }
 

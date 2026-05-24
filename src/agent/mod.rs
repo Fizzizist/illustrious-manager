@@ -4794,8 +4794,8 @@ mod tests {
         let configs = captured.lock().unwrap_or_else(|e| e.into_inner());
         let tool_names: Vec<&str> = configs[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert!(
-            !tool_names.contains(&"bash"),
-            "bash should be excluded in chat mode"
+            tool_names.contains(&"bash"),
+            "bash should be included in chat mode (restricted at execution time)"
         );
         assert!(
             !tool_names.contains(&"edit_file"),
@@ -4869,7 +4869,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_mode_rejects_bash_tool_execution() {
+    async fn chat_mode_allows_bash_tool_through_execution() {
+        // Bash is NOT excluded from tool definitions in chat mode — it remains
+        // available but restricted to read-only commands at execution time by BashTool.
+        // At the agent layer, bash calls pass through normally.
         let backend = SequencedBackend::new(vec![
             vec![
                 Ok(StreamEvent::ToolUseStart {
@@ -4911,6 +4914,7 @@ mod tests {
             .await
             .expect("send");
         let events = collect_events(stream).await;
+        // EchoTool succeeds, so bash should NOT be rejected at the agent layer
         let tool_result = events
             .iter()
             .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
@@ -4919,10 +4923,13 @@ mod tests {
             content, is_error, ..
         } = tool_result.expect("checked")
         {
-            assert!(*is_error, "bash tool should be rejected in chat mode");
             assert!(
-                content.contains("chat mode"),
-                "error should mention chat mode"
+                !*is_error,
+                "bash should not be rejected by ChatModeRejected — restriction is at BashTool level"
+            );
+            assert!(
+                content.contains("Bash tool"),
+                "EchoTool should echo its output"
             );
         }
     }

@@ -7,7 +7,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Tool names excluded from the LLM when chat mode is active.
-pub const CHAT_MODE_EXCLUDED_TOOLS: &[&str] = &["edit_file", "write_file", "bash"];
+/// Bash is NOT excluded — it remains available but restricted to read-only commands.
+pub const CHAT_MODE_EXCLUDED_TOOLS: &[&str] = &["edit_file", "write_file"];
+
+/// Commands allowed in chat mode's restricted bash.
+pub const CHAT_MODE_READ_ONLY_BASH_COMMANDS: &[&str] =
+    &["cat", "ls", "grep", "find", "head", "tail", "wc", "tree"];
 
 /// Definition of a tool for discovery/registration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
