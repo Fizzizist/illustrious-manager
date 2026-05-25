@@ -1,5 +1,5 @@
 use crate::config::ConfirmationMode;
-use crate::types::ContentBlock;
+use crate::types::{ChatMode, ContentBlock};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -16,6 +16,12 @@ use super::{Tool, ToolError, ToolResult};
 /// - All other commands follow `ConfirmationMode`. Because bash commands cannot be reliably
 ///   classified as read-only or write operations, `WriteOnly` is treated identically to `Always`.
 ///
+/// # Chat mode
+/// When chat mode is active, only commands on the read-only allowlist are permitted.
+/// All other commands are rejected with an error, regardless of the allowlist/denylist
+/// configuration. This restriction is enforced at execution time as a safety net alongside
+/// the definition-layer filtering that excludes write tools.
+///
 /// # Denylist limitations
 /// Segment detection splits on common shell operators (`|`, `&`, `;`, newline, `(`, backtick)
 /// to catch obvious bypass patterns. It is best-effort: complex quoting, heredocs, variable
@@ -27,6 +33,9 @@ pub struct BashTool {
     sandbox_root: PathBuf,
     confirmation: ConfirmationMode,
     confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    chat_mode: ChatMode,
+    normal_description: String,
+    chat_description: String,
     schema: Value,
 }
 
@@ -37,6 +46,7 @@ impl BashTool {
         sandbox_root: PathBuf,
         confirmation: ConfirmationMode,
         confirm_fn: Box<dyn Fn(&str) -> bool + Send + Sync>,
+        chat_mode: ChatMode,
     ) -> Self {
         let schema = serde_json::json!({
             "type": "object",
@@ -48,12 +58,19 @@ impl BashTool {
             },
             "required": ["command"]
         });
+        let read_only_cmds = crate::types::CHAT_MODE_READ_ONLY_BASH_COMMANDS.join(", ");
         Self {
             allowlist: allowlist.into_iter().collect(),
             denylist: denylist.into_iter().collect(),
             sandbox_root,
             confirmation,
             confirm_fn,
+            chat_mode,
+            normal_description: "Execute shell commands in the sandbox directory".to_string(),
+            chat_description: format!(
+                "Execute read-only shell commands in the sandbox directory. \
+                 In chat mode, only the following commands are allowed: {read_only_cmds}"
+            ),
             schema,
         }
     }
@@ -77,7 +94,11 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute shell commands in the sandbox directory"
+        if self.chat_mode.is_on() {
+            &self.chat_description
+        } else {
+            &self.normal_description
+        }
     }
 
     fn input_schema(&self) -> &Value {
@@ -114,6 +135,23 @@ impl Tool for BashTool {
             })?;
 
         let tokens = Self::shell_command_tokens(command);
+
+        if self.chat_mode.is_on() {
+            let read_only: HashSet<&str> = crate::types::CHAT_MODE_READ_ONLY_BASH_COMMANDS
+                .iter()
+                .copied()
+                .collect();
+            let all_read_only = tokens.iter().all(|token| read_only.contains(*token));
+            if !all_read_only {
+                return Ok(ToolResult {
+                    content: vec![ContentBlock::Text(
+                        "Command rejected: chat mode only allows read-only commands".to_string(),
+                    )],
+                    is_error: true,
+                    agent_events: vec![],
+                });
+            }
+        }
 
         for token in &tokens {
             if self.denylist.contains(*token) {
@@ -221,6 +259,7 @@ mod tests {
             sandbox_root,
             confirmation,
             confirm_fn,
+            ChatMode::default(),
         )
     }
 
@@ -646,6 +685,99 @@ mod tests {
         assert!(
             !marker.exists(),
             "marker file should not exist — subprocess was not killed"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_non_read_only_command() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = BashTool::new(
+            vec!["echo".to_string()],
+            vec![],
+            temp_dir.path().to_path_buf(),
+            ConfirmationMode::Never,
+            Box::new(|_| true),
+            ChatMode::new(true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "python3 script.py"}))
+            .await
+            .expect("execute must not err");
+        assert!(result.is_error);
+        match &result.content[0] {
+            ContentBlock::Text(text) => assert!(text.contains("chat mode")),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_allows_read_only_command() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = BashTool::new(
+            vec!["echo".to_string()],
+            vec![],
+            temp_dir.path().to_path_buf(),
+            ConfirmationMode::Never,
+            Box::new(|_| true),
+            ChatMode::new(true),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "ls"}))
+            .await
+            .expect("should succeed");
+        assert!(!result.is_error);
+    }
+
+    #[tokio::test]
+    async fn chat_mode_off_allows_all_commands() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool = BashTool::new(
+            vec!["echo".to_string()],
+            vec![],
+            temp_dir.path().to_path_buf(),
+            ConfirmationMode::Never,
+            Box::new(|_| true),
+            ChatMode::new(false),
+        );
+        let result = tool
+            .execute(serde_json::json!({"command": "echo hello"}))
+            .await
+            .expect("should succeed");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn chat_mode_description_changes_when_on() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool_off = BashTool::new(
+            vec![],
+            vec![],
+            temp_dir.path().to_path_buf(),
+            ConfirmationMode::Never,
+            Box::new(|_| true),
+            ChatMode::new(false),
+        );
+        assert_eq!(
+            tool_off.description(),
+            "Execute shell commands in the sandbox directory"
+        );
+
+        let tool_on = BashTool::new(
+            vec![],
+            vec![],
+            temp_dir.path().to_path_buf(),
+            ConfirmationMode::Never,
+            Box::new(|_| true),
+            ChatMode::new(true),
+        );
+        let desc = tool_on.description();
+        assert!(
+            desc.contains("read-only"),
+            "chat mode description should mention read-only, got: {desc}"
+        );
+        assert!(
+            desc.contains("cat"),
+            "chat mode description should list allowed commands, got: {desc}"
         );
     }
 }

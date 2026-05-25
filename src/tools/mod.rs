@@ -135,6 +135,29 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
+    }
+
+    pub fn read_only_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .filter(|t| !t.is_write_tool())
+            .map(|t| ToolDefinition {
+                name: t.name().to_string(),
+                description: t.description().to_string(),
+                input_schema: t.input_schema().clone(),
+            })
+            .collect()
+    }
+
+    /// Consume this registry and return a new one containing only non-write
+    /// tools, suitable for chat mode where write operations are disallowed.
+    pub fn into_chat_compatible(mut self) -> Self {
+        self.tools.retain(|_, tool| !tool.is_write_tool());
+        self
+    }
+
     /// Consume this registry and return a new one containing only the tools
     /// whose names appear in `allowlist`. Names not found in the registry are
     /// silently skipped; a warning is printed if the result is empty.
@@ -207,6 +230,52 @@ mod tests {
         }
     }
 
+    struct WriteMockTool {
+        name: String,
+        schema: Value,
+    }
+
+    impl WriteMockTool {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "arg1": {"type": "string"}
+                    }
+                }),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for WriteMockTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "A write tool"
+        }
+
+        fn input_schema(&self) -> &Value {
+            &self.schema
+        }
+
+        fn is_write_tool(&self) -> bool {
+            true
+        }
+
+        async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult {
+                content: vec![ContentBlock::Text(format!("executed with: {}", input))],
+                is_error: false,
+                agent_events: vec![],
+            })
+        }
+    }
+
     struct FailingTool {
         name: String,
         schema: Value,
@@ -241,6 +310,67 @@ mod tests {
                 message: "Tool execution failed".to_string(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn tool_names_returns_all_registered_tool_names() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("tool1", "First")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("tool2", "Second")))
+            .expect("register");
+        let mut names = registry.tool_names();
+        names.sort();
+        assert_eq!(names, vec!["tool1", "tool2"]);
+    }
+
+    #[tokio::test]
+    async fn read_only_definitions_excludes_write_tools_but_keeps_bash() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("search", "Search tool")))
+            .expect("register");
+        registry
+            .register(Box::new(WriteMockTool::new("edit_file")))
+            .expect("register");
+        registry
+            .register(Box::new(WriteMockTool::new("write_file")))
+            .expect("register");
+        registry
+            .register(Box::new(MockTool::new("bash", "Bash tool")))
+            .expect("register");
+        let defs = registry.read_only_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            !names.contains(&"edit_file"),
+            "edit_file should be excluded"
+        );
+        assert!(
+            !names.contains(&"write_file"),
+            "write_file should be excluded"
+        );
+        assert!(
+            names.contains(&"bash"),
+            "bash should be included (restricted to read-only at execution time)"
+        );
+        assert!(names.contains(&"search"), "search should be included");
+    }
+
+    #[tokio::test]
+    async fn read_only_definitions_preserves_schema() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(MockTool::new("search", "Search tool")))
+            .expect("register");
+        registry
+            .register(Box::new(WriteMockTool::new("edit_file")))
+            .expect("register");
+        let defs = registry.read_only_definitions();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "search");
+        assert_eq!(defs[0].input_schema["properties"]["arg1"]["type"], "string");
     }
 
     #[tokio::test]

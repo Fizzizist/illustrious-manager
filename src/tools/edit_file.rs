@@ -86,6 +86,7 @@ impl Tool for EditFile {
     fn is_write_tool(&self) -> bool {
         true
     }
+
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         use std::fs;
 

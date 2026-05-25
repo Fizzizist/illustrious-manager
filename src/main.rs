@@ -71,6 +71,9 @@ struct Cli {
 
     #[arg(long)]
     session_id: Option<String>,
+
+    #[arg(long)]
+    chat: bool,
 }
 
 #[derive(Debug)]
@@ -151,11 +154,23 @@ async fn main() -> Result<()> {
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
     let session_arc = Arc::new(tokio::sync::Mutex::new(session));
 
-    let mut registry =
-        build_tool_registry(Arc::clone(&session_arc), &app_config.tools, &skills, None)?;
+    let chat_mode = crate::types::ChatMode::new(cli.chat);
 
-    let spawner =
-        build_agent_spawner_and_register(&mut registry, &factory, &app_config_arc, &skills)?;
+    let mut registry = build_tool_registry(
+        Arc::clone(&session_arc),
+        &app_config.tools,
+        &skills,
+        None,
+        chat_mode.clone(),
+    )?;
+
+    let spawner = build_agent_spawner_and_register(
+        &mut registry,
+        &factory,
+        &app_config_arc,
+        &skills,
+        chat_mode.clone(),
+    )?;
 
     let agent = Arc::new(
         spawn_agent(
@@ -172,7 +187,8 @@ async fn main() -> Result<()> {
         // because initial history is set from the input session
         .with_skills(&skills)
         .with_context_files()?
-        .with_compaction_spawner(spawner),
+        .with_compaction_spawner(spawner)
+        .with_chat_mode(chat_mode),
     );
 
     if cli.debug {
@@ -257,6 +273,7 @@ fn build_tool_registry(
     tools_config: &config::ToolsConfig,
     skills: &HashMap<String, PathBuf>,
     agent_tool: Option<AgentTool>,
+    chat_mode: crate::types::ChatMode,
 ) -> Result<ToolRegistry> {
     let sandbox_policy = SandboxPolicy::new(Path::new(&tools_config.sandbox_root));
     let mut reg = ToolRegistry::new();
@@ -266,6 +283,7 @@ fn build_tool_registry(
         PathBuf::from(&tools_config.sandbox_root),
         tools_config.confirmation.clone(),
         Box::new(|_| true),
+        chat_mode.clone(),
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
     reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
@@ -293,6 +311,7 @@ fn build_agent_spawner_and_register(
     factory: &Arc<BackendFactory>,
     app_config: &Arc<config::AppConfig>,
     skills: &HashMap<String, PathBuf>,
+    chat_mode: crate::types::ChatMode,
 ) -> Result<Arc<agent::AgentSpawner>> {
     let factory_clone = Arc::clone(factory);
     let app_config_clone = Arc::clone(app_config);
@@ -308,14 +327,24 @@ fn build_agent_spawner_and_register(
     let spawner = Arc::new(agent::AgentSpawner {
         factory: factory_clone,
         app_config: app_config_clone,
-        registry_builder: Box::new(move |sub_session| {
-            let agent_tool = spawner_cell_clone
-                .get()
-                .map(|s| AgentTool::new(Arc::clone(s), roles_for_closure.clone()));
-            build_tool_registry(sub_session, &tools_config, &skills_clone, agent_tool)
+        registry_builder: Box::new({
+            let chat_mode_clone = chat_mode.clone();
+            move |sub_session| {
+                let agent_tool = spawner_cell_clone
+                    .get()
+                    .map(|s| AgentTool::new(Arc::clone(s), roles_for_closure.clone()));
+                build_tool_registry(
+                    sub_session,
+                    &tools_config,
+                    &skills_clone,
+                    agent_tool,
+                    chat_mode_clone.clone(),
+                )
+            }
         }),
         parent_confirmation: app_config.tools.confirmation.clone(),
         skills: skills.clone(),
+        chat_mode,
     });
 
     spawner_cell
@@ -581,5 +610,17 @@ mod tests {
             err.contains("compile"),
             "error should mention compilation failure"
         );
+    }
+
+    #[test]
+    fn chat_flag_is_parsed_when_present() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--chat"]).unwrap();
+        assert!(cli.chat);
+    }
+
+    #[test]
+    fn chat_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(!cli.chat);
     }
 }

@@ -1,0 +1,6 @@
+---
+source: src/frontend/tui/status_line.rs
+assertion_line: 671
+expression: terminal.backend()
+---
+" ↑12.5k ↓3.2k  CHAT   main         claude-sonnet-4-20250514  /home/user/project "

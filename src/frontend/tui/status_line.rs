@@ -28,6 +28,7 @@ pub struct StatusLineInfo<'a> {
     pub working_dir: &'a std::path::Path,
     pub usage: &'a TokenUsage,
     pub subagent_usage: Option<&'a TokenUsage>,
+    pub chat_mode: bool,
 }
 
 /// Estimate token counts from a slice of conversation messages.
@@ -131,6 +132,15 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
         Style::default().fg(Color::Cyan).bg(STATUS_BG),
     );
 
+    let chat_span = if info.chat_mode {
+        Some(Span::styled(
+            " CHAT ",
+            Style::default().fg(Color::Yellow).bg(STATUS_BG),
+        ))
+    } else {
+        None
+    };
+
     let right_spans = vec![
         Span::styled(
             format!(" {} ", info.model),
@@ -153,6 +163,9 @@ pub fn build_status_line(info: &StatusLineInfo<'_>, width: u16) -> Line<'static>
     };
 
     let mut left_spans = vec![parent_span];
+    if let Some(chat) = chat_span {
+        left_spans.push(chat);
+    }
     if include_subagent {
         left_spans.push(subagent_span.expect("checked above"));
     }
@@ -216,6 +229,7 @@ mod tests {
             working_dir,
             usage,
             subagent_usage: None,
+            chat_mode: false,
         }
     }
 
@@ -516,6 +530,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent_zero),
+            chat_mode: false,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -539,6 +554,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
         let line = build_status_line(&info, 120);
         let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
@@ -573,6 +589,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
         // Use a very narrow width where the subagent span won't fit
         let line = build_status_line(&info, 30);
@@ -607,6 +624,7 @@ mod tests {
             working_dir: &dir,
             usage: &usage,
             subagent_usage: Some(&subagent),
+            chat_mode: false,
         };
 
         let backend = ratatui::backend::TestBackend::new(120, 1);
@@ -619,6 +637,38 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_status_line_with_subagent_usage", terminal.backend());
+    }
+
+    #[test]
+    fn render_status_line_chat_mode_snapshot() {
+        use std::path::PathBuf;
+        let model = "claude-sonnet-4-20250514".to_string();
+        let branch = Some("main".to_string());
+        let dir = PathBuf::from("/home/user/project");
+        let usage = TokenUsage {
+            input_tokens: 12500,
+            output_tokens: 3200,
+            ..Default::default()
+        };
+        let info = StatusLineInfo {
+            model: &model,
+            git_branch: branch.as_deref(),
+            working_dir: &dir,
+            usage: &usage,
+            subagent_usage: None,
+            chat_mode: true,
+        };
+
+        let backend = ratatui::backend::TestBackend::new(80, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 80, 1);
+                render_status_line(&info, frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_status_line_chat_mode", terminal.backend());
     }
 
     #[test]

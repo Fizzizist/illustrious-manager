@@ -9,8 +9,8 @@ use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{
-    AgentEvent, BoxStream, ConfirmationResponse, ContentBlock, Message, RequestConfig, Role,
-    StreamEvent,
+    AgentEvent, BoxStream, ChatMode, ConfirmationResponse, ContentBlock, Message, RequestConfig,
+    Role, StreamEvent,
 };
 use anyhow::Result;
 use futures::StreamExt;
@@ -58,6 +58,7 @@ pub struct Agent {
     /// sentinel so that the agent prompt does not explode. The untruncated
     /// version is still sent to the TUI via `AgentEvent::ToolResult`.
     max_tool_result_bytes: u64,
+    chat_mode: ChatMode,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -94,6 +95,7 @@ impl Agent {
             max_context_window_len: 0,
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
             max_tool_result_bytes: 65_536,
+            chat_mode: ChatMode::default(),
         }
     }
 
@@ -164,6 +166,10 @@ impl Agent {
         }
     }
 
+    pub fn with_chat_mode(self, chat_mode: crate::types::ChatMode) -> Self {
+        Self { chat_mode, ..self }
+    }
+
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
     }
@@ -186,6 +192,18 @@ impl Agent {
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
+    pub fn set_chat_mode(&self, on: bool) {
+        self.chat_mode.set(on);
+    }
+
+    pub fn is_chat_mode(&self) -> bool {
+        self.chat_mode.is_on()
+    }
+
+    pub fn chat_mode(&self) -> &ChatMode {
+        &self.chat_mode
+    }
+
     #[cfg(test)]
     pub fn max_tool_iterations_for_test(&self) -> u32 {
         self.max_tool_iterations
@@ -204,6 +222,11 @@ impl Agent {
     #[cfg(test)]
     pub fn confirmation_mode_for_test(&self) -> &ConfirmationMode {
         &self.confirmation_mode
+    }
+
+    #[cfg(test)]
+    pub fn chat_mode_for_test(&self) -> &ChatMode {
+        &self.chat_mode
     }
 
     pub fn history(&self) -> Vec<Message> {
@@ -361,6 +384,15 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let config = if self.chat_mode.is_on() {
+            RequestConfig {
+                tools: self.tools.read_only_definitions(),
+                ..config
+            }
+        } else {
+            config
+        };
+        let chat_mode = self.chat_mode.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
@@ -589,6 +621,7 @@ impl Agent {
                     &event_tx,
                     cancel_token.clone(),
                     max_tool_result_bytes,
+                    chat_mode.clone(),
                 )
                 .await;
 
@@ -724,6 +757,7 @@ async fn execute_tool_calls(
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel_token: Option<CancellationToken>,
     max_tool_result_bytes: u64,
+    chat_mode: ChatMode,
 ) -> (Vec<ContentBlock>, Vec<ContentBlock>) {
     let mut assistant_content: Vec<ContentBlock> = vec![];
     if !thinking_prefix.is_empty() {
@@ -740,6 +774,7 @@ async fn execute_tool_calls(
         ParseError(String),
         Declined,
         Approved,
+        ChatModeRejected,
     }
 
     struct Resolved {
@@ -780,6 +815,8 @@ async fn execute_tool_calls(
 
         let decision = if let Some(err) = parse_error {
             ToolDecision::ParseError(err)
+        } else if chat_mode.is_on() && tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool()) {
+            ToolDecision::ChatModeRejected
         } else {
             let needs_confirmation = match confirmation_mode {
                 ConfirmationMode::Always => true,
@@ -852,6 +889,14 @@ async fn execute_tool_calls(
                         r.id.clone(),
                         r.name.clone(),
                         err.clone(),
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::ChatModeRejected => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        "Tool rejected: chat mode restricts to read-only operations".to_string(),
                         true,
                         vec![],
                     ),
@@ -4354,7 +4399,6 @@ mod tests {
 
     #[tokio::test]
     async fn record_synthetic_tool_call_appends_pair_to_history() {
-        use crate::config::ConfirmationMode;
         let backend = SequencedBackend::new(vec![]);
         let config = RequestConfig {
             model: "test".to_string(),
@@ -4647,5 +4691,305 @@ mod tests {
             500,
             "original content reference must be unchanged (method must not mutate caller's copy)"
         );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_defaults_to_off() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        assert!(!agent.is_chat_mode());
+    }
+
+    #[tokio::test]
+    async fn set_chat_mode_toggles_state() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+        agent.set_chat_mode(true);
+        assert!(agent.is_chat_mode());
+        agent.set_chat_mode(false);
+        assert!(!agent.is_chat_mode());
+    }
+
+    #[tokio::test]
+    async fn chat_mode_sends_filtered_tool_definitions() {
+        let captured = Arc::new(Mutex::new(Vec::<RequestConfig>::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        struct CapturingConfigBackend {
+            captured: Arc<Mutex<Vec<RequestConfig>>>,
+            events: Arc<Vec<StreamEvent>>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for CapturingConfigBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                config: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                self.captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(config.clone());
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                for event in self.events.iter() {
+                    tx.unbounded_send(Ok(event.clone()))
+                        .unwrap_or_else(|e| panic!("send failed: {e:?}"));
+                }
+                Ok(Box::pin(rx))
+            }
+        }
+
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "Bash tool")))
+            .expect("register");
+        registry
+            .register(Box::new(EchoTool::write_tool("edit_file", "Edit tool")))
+            .expect("register");
+        registry
+            .register(Box::new(EchoTool::new("search", "Search tool")))
+            .expect("register");
+
+        let events = Arc::new(vec![
+            StreamEvent::TextDelta("done".to_string()),
+            StreamEvent::Done,
+        ]);
+
+        let backend = CapturingConfigBackend {
+            captured: captured_clone,
+            events,
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry);
+
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send");
+        let _events = collect_events(stream).await;
+
+        let configs = captured.lock().unwrap_or_else(|e| e.into_inner());
+        let tool_names: Vec<&str> = configs[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            tool_names.contains(&"bash"),
+            "bash should be included in chat mode (restricted at execution time)"
+        );
+        assert!(
+            !tool_names.contains(&"edit_file"),
+            "edit_file should be excluded in chat mode"
+        );
+        assert!(
+            tool_names.contains(&"search"),
+            "search should be included in chat mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_write_tool_execution() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "edit_file".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(
+                    r#"{"path":"x","old_string":"a","new_string":"b"}"#.to_string(),
+                )),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::write_tool("edit_file", "Edit tool")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("edit something".to_string(), None, None)
+            .await
+            .expect("send");
+        let events = collect_events(stream).await;
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
+        assert!(tool_result.is_some(), "should have a tool result");
+        if let AgentEvent::ToolResult {
+            content, is_error, ..
+        } = tool_result.expect("checked")
+        {
+            assert!(*is_error, "write tool should be rejected in chat mode");
+            assert!(
+                content.contains("chat mode"),
+                "error should mention chat mode"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_allows_bash_tool_through_execution() {
+        // Bash is NOT excluded from tool definitions in chat mode — it remains
+        // available but restricted to read-only commands at execution time by BashTool.
+        // At the agent layer, bash calls pass through normally.
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{"command":"ls"}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("bash", "Bash tool")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("run ls".to_string(), None, None)
+            .await
+            .expect("send");
+        let events = collect_events(stream).await;
+        // EchoTool succeeds, so bash should NOT be rejected at the agent layer
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
+        assert!(tool_result.is_some(), "should have a tool result");
+        if let AgentEvent::ToolResult {
+            content, is_error, ..
+        } = tool_result.expect("checked")
+        {
+            assert!(
+                !*is_error,
+                "bash should not be rejected by ChatModeRejected — restriction is at BashTool level"
+            );
+            assert!(
+                content.contains("Bash tool"),
+                "EchoTool should echo its output"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_mode_rejects_write_file_tool_execution() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "write_file".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(
+                    r#"{"path":"x","content":"hello"}"#.to_string(),
+                )),
+                Ok(StreamEvent::ToolUseDone),
+                Ok(StreamEvent::Usage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    stop_reason: "end_turn".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ],
+            text_response("done"),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::write_tool("write_file", "Write tool")))
+            .expect("register");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
+            .await
+            .with_tools(registry)
+            .with_tool_config(&tool_config);
+        agent.set_chat_mode(true);
+        let stream = agent
+            .send("write file".to_string(), None, None)
+            .await
+            .expect("send");
+        let events = collect_events(stream).await;
+        let tool_result = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::ToolResult { .. }));
+        assert!(tool_result.is_some(), "should have a tool result");
+        if let AgentEvent::ToolResult {
+            content, is_error, ..
+        } = tool_result.expect("checked")
+        {
+            assert!(*is_error, "write_file tool should be rejected in chat mode");
+            assert!(
+                content.contains("chat mode"),
+                "error should mention chat mode"
+            );
+        }
     }
 }

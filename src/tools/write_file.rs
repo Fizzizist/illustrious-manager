@@ -72,6 +72,7 @@ impl Tool for WriteFileTool {
     fn is_write_tool(&self) -> bool {
         true
     }
+
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let path_str = input["path"]
             .as_str()
