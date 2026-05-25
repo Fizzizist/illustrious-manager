@@ -166,16 +166,7 @@ impl AgentSpawner {
         };
 
         let registry = if self.chat_mode.is_on() {
-            let all_names = registry.tool_names();
-            let excluded: std::collections::HashSet<&str> = crate::types::CHAT_MODE_EXCLUDED_TOOLS
-                .iter()
-                .copied()
-                .collect();
-            let filtered: Vec<String> = all_names
-                .into_iter()
-                .filter(|n| !excluded.contains(n.as_str()))
-                .collect();
-            registry.into_filtered(&filtered)
+            registry.into_chat_compatible()
         } else if let Some(allowlist) = tool_allowlist {
             registry.into_filtered(allowlist)
         } else {
@@ -316,15 +307,7 @@ mod tests {
         assert!(all_names.contains(&"write_file".to_string()));
         assert!(all_names.contains(&"search".to_string()));
 
-        let excluded: std::collections::HashSet<&str> = crate::types::CHAT_MODE_EXCLUDED_TOOLS
-            .iter()
-            .copied()
-            .collect();
-        let filtered: Vec<String> = all_names
-            .into_iter()
-            .filter(|n| !excluded.contains(n.as_str()))
-            .collect();
-        let registry = registry.into_filtered(&filtered);
+        let registry = registry.into_chat_compatible();
 
         let remaining = registry.tool_names();
         assert!(
