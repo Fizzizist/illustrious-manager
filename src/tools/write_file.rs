@@ -73,10 +73,6 @@ impl Tool for WriteFileTool {
         true
     }
 
-    fn is_chat_compatible(&self) -> bool {
-        false
-    }
-
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         let path_str = input["path"]
             .as_str()

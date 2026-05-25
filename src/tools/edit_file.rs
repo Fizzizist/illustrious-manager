@@ -87,10 +87,6 @@ impl Tool for EditFile {
         true
     }
 
-    fn is_chat_compatible(&self) -> bool {
-        false
-    }
-
     async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
         use std::fs;
 

@@ -69,10 +69,6 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    fn is_chat_compatible(&self) -> bool {
-        true
-    }
-
     fn markdown_input(&self, input: &Value) -> String {
         format!(
             "```json\n{}\n```",
@@ -146,7 +142,7 @@ impl ToolRegistry {
     pub fn read_only_definitions(&self) -> Vec<ToolDefinition> {
         self.tools
             .values()
-            .filter(|t| t.is_chat_compatible())
+            .filter(|t| !t.is_write_tool())
             .map(|t| ToolDefinition {
                 name: t.name().to_string(),
                 description: t.description().to_string(),
@@ -155,10 +151,10 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Consume this registry and return a new one containing only tools
-    /// that are compatible with chat mode (i.e., `is_chat_compatible()` returns `true`).
+    /// Consume this registry and return a new one containing only non-write
+    /// tools, suitable for chat mode where write operations are disallowed.
     pub fn into_chat_compatible(mut self) -> Self {
-        self.tools.retain(|_, tool| tool.is_chat_compatible());
+        self.tools.retain(|_, tool| !tool.is_write_tool());
         self
     }
 
@@ -234,12 +230,12 @@ mod tests {
         }
     }
 
-    struct ChatIncompatibleTool {
+    struct WriteMockTool {
         name: String,
         schema: Value,
     }
 
-    impl ChatIncompatibleTool {
+    impl WriteMockTool {
         fn new(name: &str) -> Self {
             Self {
                 name: name.to_string(),
@@ -254,21 +250,21 @@ mod tests {
     }
 
     #[async_trait]
-    impl Tool for ChatIncompatibleTool {
+    impl Tool for WriteMockTool {
         fn name(&self) -> &str {
             &self.name
         }
 
         fn description(&self) -> &str {
-            "A chat-incompatible tool"
+            "A write tool"
         }
 
         fn input_schema(&self) -> &Value {
             &self.schema
         }
 
-        fn is_chat_compatible(&self) -> bool {
-            false
+        fn is_write_tool(&self) -> bool {
+            true
         }
 
         async fn execute(&self, input: Value) -> Result<ToolResult, ToolError> {
@@ -331,16 +327,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_definitions_excludes_chat_incompatible_tools_but_keeps_bash() {
+    async fn read_only_definitions_excludes_write_tools_but_keeps_bash() {
         let mut registry = ToolRegistry::new();
         registry
             .register(Box::new(MockTool::new("search", "Search tool")))
             .expect("register");
         registry
-            .register(Box::new(ChatIncompatibleTool::new("edit_file")))
+            .register(Box::new(WriteMockTool::new("edit_file")))
             .expect("register");
         registry
-            .register(Box::new(ChatIncompatibleTool::new("write_file")))
+            .register(Box::new(WriteMockTool::new("write_file")))
             .expect("register");
         registry
             .register(Box::new(MockTool::new("bash", "Bash tool")))
@@ -369,7 +365,7 @@ mod tests {
             .register(Box::new(MockTool::new("search", "Search tool")))
             .expect("register");
         registry
-            .register(Box::new(ChatIncompatibleTool::new("edit_file")))
+            .register(Box::new(WriteMockTool::new("edit_file")))
             .expect("register");
         let defs = registry.read_only_definitions();
         assert_eq!(defs.len(), 1);

@@ -815,11 +815,7 @@ async fn execute_tool_calls(
 
         let decision = if let Some(err) = parse_error {
             ToolDecision::ParseError(err)
-        } else if chat_mode.is_on()
-            && tools
-                .lookup(&call.name)
-                .is_ok_and(|t| !t.is_chat_compatible())
-        {
+        } else if chat_mode.is_on() && tools.lookup(&call.name).is_ok_and(|t| t.is_write_tool()) {
             ToolDecision::ChatModeRejected
         } else {
             let needs_confirmation = match confirmation_mode {
@@ -1136,7 +1132,6 @@ mod tests {
         name: String,
         output: String,
         is_write: bool,
-        chat_compatible: bool,
         schema: serde_json::Value,
     }
 
@@ -1146,7 +1141,6 @@ mod tests {
                 name: name.to_string(),
                 output: output.to_string(),
                 is_write: false,
-                chat_compatible: true,
                 schema: serde_json::json!({"type": "object", "properties": {}}),
             }
         }
@@ -1154,13 +1148,6 @@ mod tests {
         fn write_tool(name: &str, output: &str) -> Self {
             Self {
                 is_write: true,
-                ..Self::new(name, output)
-            }
-        }
-
-        fn chat_incompatible(name: &str, output: &str) -> Self {
-            Self {
-                chat_compatible: false,
                 ..Self::new(name, output)
             }
         }
@@ -1179,9 +1166,6 @@ mod tests {
         }
         fn is_write_tool(&self) -> bool {
             self.is_write
-        }
-        fn is_chat_compatible(&self) -> bool {
-            self.chat_compatible
         }
         async fn execute(&self, _input: serde_json::Value) -> Result<ToolExecResult, ToolError> {
             Ok(ToolExecResult {
@@ -4773,10 +4757,7 @@ mod tests {
             .register(Box::new(EchoTool::new("bash", "Bash tool")))
             .expect("register");
         registry
-            .register(Box::new(EchoTool::chat_incompatible(
-                "edit_file",
-                "Edit tool",
-            )))
+            .register(Box::new(EchoTool::write_tool("edit_file", "Edit tool")))
             .expect("register");
         registry
             .register(Box::new(EchoTool::new("search", "Search tool")))
@@ -4847,10 +4828,7 @@ mod tests {
         ]);
         let mut registry = ToolRegistry::new();
         registry
-            .register(Box::new(EchoTool::chat_incompatible(
-                "edit_file",
-                "Edit tool",
-            )))
+            .register(Box::new(EchoTool::write_tool("edit_file", "Edit tool")))
             .expect("register");
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -4977,10 +4955,7 @@ mod tests {
         ]);
         let mut registry = ToolRegistry::new();
         registry
-            .register(Box::new(EchoTool::chat_incompatible(
-                "write_file",
-                "Write tool",
-            )))
+            .register(Box::new(EchoTool::write_tool("write_file", "Write tool")))
             .expect("register");
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
