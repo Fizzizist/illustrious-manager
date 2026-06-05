@@ -7,7 +7,6 @@ pub mod markdown_tables;
 pub mod session_picker;
 pub mod status_line;
 pub mod tasks_picker;
-pub mod timestamp;
 mod tui_app;
 
 pub use conversation_area::{ConversationEntry, ConversationRole};

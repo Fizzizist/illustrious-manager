@@ -120,7 +120,7 @@ impl SlashCommand for SessionsCommand {
                         .push(ConversationEntry::new_with_timestamp(
                             ConversationRole::Error,
                             format!("Failed to list sessions: {e}"),
-                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                            crate::timestamp::format_now_timestamp(),
                         ));
                 }
             }
@@ -152,7 +152,7 @@ impl SlashCommand for ModelCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Error,
                         "Usage: /model <model-name>".to_string(),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             } else {
                 ctx.agent.set_model(model.clone());
@@ -162,7 +162,7 @@ impl SlashCommand for ModelCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Info,
                         format!("Model switched to `{model}`"),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             }
             Ok(DispatchResult::Handled)
@@ -233,7 +233,7 @@ impl SlashCommand for TasksCommand {
                         .push(ConversationEntry::new_with_timestamp(
                             ConversationRole::Error,
                             format!("Failed to load tasks: {e}"),
-                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                            crate::timestamp::format_now_timestamp(),
                         ));
                 }
             }
@@ -265,7 +265,7 @@ impl SlashCommand for NewCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Error,
                         format!("Failed to checkpoint session: {e}"),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             }
             // Clean up current session if empty
@@ -275,7 +275,7 @@ impl SlashCommand for NewCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Error,
                         format!("Failed to clean up empty session: {e}"),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             }
             // Create a new session
@@ -303,7 +303,7 @@ impl SlashCommand for NewCommand {
                 .push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Info,
                     "Started new session.".to_string(),
-                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             Ok(DispatchResult::Handled)
         })
@@ -336,7 +336,7 @@ impl SlashCommand for RoleCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Info,
                         format!("Current model: {model}"),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 return Ok(DispatchResult::Handled);
             }
@@ -351,7 +351,7 @@ impl SlashCommand for RoleCommand {
                         .push(ConversationEntry::new_with_timestamp(
                             ConversationRole::Info,
                             format!("Switched to role '{role_name}' (model: {new_model})"),
-                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                            crate::timestamp::format_now_timestamp(),
                         ));
                 }
                 Err(e) => {
@@ -360,7 +360,7 @@ impl SlashCommand for RoleCommand {
                         .push(ConversationEntry::new_with_timestamp(
                             ConversationRole::Error,
                             format!("Unknown role '{role_name}': {e}"),
-                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                            crate::timestamp::format_now_timestamp(),
                         ));
                 }
             }
@@ -423,7 +423,7 @@ impl SlashCommand for BashCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Info,
                         "Usage: /bash <command>".to_string(),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 return Ok(DispatchResult::Handled);
             }
@@ -517,7 +517,7 @@ impl SlashCommand for ChatCommand {
                         ConversationRole::Info,
                         "Chat mode ON — write tools hidden, bash restricted to read-only commands"
                             .to_string(),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             } else {
                 ctx.app
@@ -525,7 +525,7 @@ impl SlashCommand for ChatCommand {
                     .push(ConversationEntry::new_with_timestamp(
                         ConversationRole::Info,
                         "Chat mode OFF — all tools available".to_string(),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
             }
             Ok(DispatchResult::Handled)

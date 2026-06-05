@@ -7,6 +7,7 @@ pub mod context_files;
 pub mod frontend;
 pub mod logging;
 pub mod session;
+pub mod timestamp;
 pub mod tools;
 pub mod types;
 

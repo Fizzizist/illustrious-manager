@@ -123,7 +123,7 @@ async fn run_text<W: Write, R: BufRead>(
                 writeln!(
                     writer,
                     "\n[{}] [tool({index}): {}] {}",
-                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                    crate::timestamp::format_now_timestamp(),
                     name,
                     input
                 )?;
@@ -138,7 +138,7 @@ async fn run_text<W: Write, R: BufRead>(
                     writeln!(
                         writer,
                         "[{}] [error({index}) from {}]: {}",
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                         name,
                         content
                     )?;
@@ -146,7 +146,7 @@ async fn run_text<W: Write, R: BufRead>(
                     writeln!(
                         writer,
                         "[{}] [result({index}) from {}]: {}",
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                         name,
                         content
                     )?;

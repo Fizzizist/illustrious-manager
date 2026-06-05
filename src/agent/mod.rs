@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
-use crate::frontend::tui::timestamp::now_timestamp;
 use crate::session::Session;
+use crate::timestamp::now_timestamp;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ChatMode, ConfirmationResponse, ContentBlock, Message, RequestConfig,

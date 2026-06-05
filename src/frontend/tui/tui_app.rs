@@ -159,7 +159,7 @@ impl App {
                 crate::types::Role::User => ConversationRole::User,
                 crate::types::Role::Assistant => ConversationRole::Assistant,
             };
-            let timestamp = crate::frontend::tui::timestamp::format_timestamp(message.created_at);
+            let timestamp = crate::timestamp::format_timestamp(message.created_at);
 
             // Re-derive per-turn 1-based indices for tool entries within each message.
             let tool_count = message
@@ -248,7 +248,7 @@ impl App {
             .push(ConversationEntry::new_with_timestamp(
                 ConversationRole::Info,
                 message,
-                crate::frontend::tui::timestamp::format_now_timestamp(),
+                crate::timestamp::format_now_timestamp(),
             ));
     }
 
@@ -524,7 +524,7 @@ pub fn handle_agent_event(
     match event {
         AgentEvent::TokenReceived(text) => {
             if app.current_response.is_empty() {
-                app.streaming_timestamp = crate::frontend::tui::timestamp::format_now_timestamp();
+                app.streaming_timestamp = crate::timestamp::format_now_timestamp();
             }
             app.current_response.push_str(&text);
             app.scroll_offset = 0;
@@ -555,7 +555,7 @@ pub fn handle_agent_event(
             app.conversation.push(ConversationEntry::new_with_timestamp(
                 ConversationRole::Error,
                 msg,
-                crate::frontend::tui::timestamp::format_now_timestamp(),
+                crate::timestamp::format_now_timestamp(),
             ));
             app.current_response.clear();
             app.current_thinking.clear();
@@ -660,7 +660,7 @@ pub fn handle_agent_event(
                 app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Info,
                     "*(interrupted)*".to_string(),
-                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             }
             app.current_response.clear();
@@ -768,7 +768,7 @@ async fn run_app(
                         app.conversation.push(ConversationEntry::new_with_timestamp(
                             ConversationRole::Error,
                             summary.clone(),
-                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                            crate::timestamp::format_now_timestamp(),
                         ));
                     } else {
                         // Rebuild conversation from compacted history
@@ -785,7 +785,7 @@ async fn run_app(
                                 app.conversation.push(ConversationEntry::new_with_timestamp(
                                     ConversationRole::Error,
                                     format!("Failed to reload history after compaction: {e}"),
-                                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                                    crate::timestamp::format_now_timestamp(),
                                 ));
                             }
                         }
@@ -800,7 +800,7 @@ async fn run_app(
                             "Auto-compact triggered: context ({} tokens) exceeded threshold ({} tokens)",
                             current_tokens, threshold
                         ),
-                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                     app.set_state(AppState::Compacting);
                     app.scroll_offset = 0;
@@ -891,7 +891,7 @@ async fn run_app(
                                             app.conversation.push(ConversationEntry::new_with_timestamp(
                                                 ConversationRole::Error,
                                                 format!("Failed to checkpoint session: {e}"),
-                                                crate::frontend::tui::timestamp::format_now_timestamp(),
+                                                crate::timestamp::format_now_timestamp(),
                                             ));
                                         }
                                         // Clean up current session if empty
@@ -899,7 +899,7 @@ async fn run_app(
                                             app.conversation.push(ConversationEntry::new_with_timestamp(
                                                 ConversationRole::Error,
                                                 format!("Failed to clean up empty session: {e}"),
-                                                crate::frontend::tui::timestamp::format_now_timestamp(),
+                                                crate::timestamp::format_now_timestamp(),
                                             ));
                                         }
                                         // Reload the selected session
@@ -923,7 +923,7 @@ async fn run_app(
                                                         app.conversation.push(ConversationEntry::new_with_timestamp(
                                                             ConversationRole::Error,
                                                             format!("Failed to load session history: {e}"),
-                                                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                                                            crate::timestamp::format_now_timestamp(),
                                                         ));
                                                     }
                                                 }
@@ -932,7 +932,7 @@ async fn run_app(
                                                 app.conversation.push(ConversationEntry::new_with_timestamp(
                                                     ConversationRole::Error,
                                                     format!("Failed to open session: {e}"),
-                                                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                                                    crate::timestamp::format_now_timestamp(),
                                                 ));
                                             }
                                         }
@@ -1003,7 +1003,7 @@ async fn run_app(
                                     app.conversation.push(ConversationEntry::new_with_timestamp(
                                         ConversationRole::Error,
                                         "Confirmation channel closed unexpectedly.".to_string(),
-                                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                                        crate::timestamp::format_now_timestamp(),
                                     ));
                                     app.confirmation_tx = None;
                                     app.set_state(AppState::Input);
@@ -1068,7 +1068,7 @@ pub async fn submit_message(
     app.conversation.push(ConversationEntry::new_with_timestamp(
         ConversationRole::User,
         input.clone(),
-        crate::frontend::tui::timestamp::format_now_timestamp(),
+        crate::timestamp::format_now_timestamp(),
     ));
 
     app.scroll_offset = 0;

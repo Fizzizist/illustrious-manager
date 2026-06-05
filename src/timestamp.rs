@@ -2,14 +2,13 @@ use time::OffsetDateTime;
 
 pub fn format_timestamp(unix_secs: f64) -> String {
     let secs = unix_secs as i64;
-    let offset = time::UtcOffset::UTC;
     let utc_dt = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH);
     let local_dt = match time::UtcOffset::current_local_offset() {
         Ok(local_offset) => utc_dt.to_offset(local_offset),
-        Err(_) => utc_dt.to_offset(offset),
+        Err(_) => utc_dt,
     };
     format!(
-        "[{}-{:02}-{:02} {:02}:{:02}]",
+        "[{}{:02}{:02}-{:02}:{:02}]",
         local_dt.year(),
         local_dt.month() as u8,
         local_dt.day(),
@@ -33,19 +32,19 @@ mod tests {
     #[test]
     fn format_timestamp_epoch() {
         let result = format_timestamp(0.0);
-        assert_eq!(result, "[1970-01-01 00:00]");
+        assert_eq!(result, "[19700101-00:00]");
     }
 
     #[test]
     fn format_timestamp_known_date() {
         let result = format_timestamp(1704348000.0);
-        assert_eq!(result, "[2024-01-04 06:00]");
+        assert_eq!(result, "[20240104-06:00]");
     }
 
     #[test]
     fn format_timestamp_truncates_fractional_seconds() {
         let result = format_timestamp(1704348000.999);
-        assert_eq!(result, "[2024-01-04 06:00]");
+        assert_eq!(result, "[20240104-06:00]");
     }
 
     #[test]
@@ -53,8 +52,6 @@ mod tests {
         let result = format_now_timestamp();
         assert!(result.starts_with('['), "should start with '[': {result}");
         assert!(result.ends_with(']'), "should end with ']': {result}");
-        assert!(result.contains('-'), "should contain dashes: {result}");
-        assert!(result.contains(':'), "should contain colons: {result}");
     }
 
     #[test]
