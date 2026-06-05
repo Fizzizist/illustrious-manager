@@ -115,10 +115,13 @@ impl SlashCommand for SessionsCommand {
                     ctx.app.set_state(AppState::SessionPicker);
                 }
                 Err(e) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Error,
-                        format!("Failed to list sessions: {e}"),
-                    ));
+                    ctx.app
+                        .conversation
+                        .push(ConversationEntry::new_with_timestamp(
+                            ConversationRole::Error,
+                            format!("Failed to list sessions: {e}"),
+                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                        ));
                 }
             }
             Ok(DispatchResult::Handled)
@@ -144,17 +147,23 @@ impl SlashCommand for ModelCommand {
         Box::pin(async move {
             ctx.app.input.clear();
             if model.is_empty() {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Error,
-                    "Usage: /model <model-name>".to_string(),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Error,
+                        "Usage: /model <model-name>".to_string(),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             } else {
                 ctx.agent.set_model(model.clone());
                 ctx.app.model = model.clone();
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Info,
-                    format!("Model switched to `{model}`"),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Info,
+                        format!("Model switched to `{model}`"),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             }
             Ok(DispatchResult::Handled)
         })
@@ -219,10 +228,13 @@ impl SlashCommand for TasksCommand {
                     ctx.app.set_state(AppState::TasksPicker);
                 }
                 Err(e) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Error,
-                        format!("Failed to load tasks: {e}"),
-                    ));
+                    ctx.app
+                        .conversation
+                        .push(ConversationEntry::new_with_timestamp(
+                            ConversationRole::Error,
+                            format!("Failed to load tasks: {e}"),
+                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                        ));
                 }
             }
             Ok(DispatchResult::Handled)
@@ -248,17 +260,23 @@ impl SlashCommand for NewCommand {
             ctx.app.input.clear();
             // Checkpoint current session WAL
             if let Err(e) = ctx.agent.checkpoint_session().await {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Error,
-                    format!("Failed to checkpoint session: {e}"),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Error,
+                        format!("Failed to checkpoint session: {e}"),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             }
             // Clean up current session if empty
             if let Err(e) = ctx.agent.cleanup_empty_session().await {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Error,
-                    format!("Failed to clean up empty session: {e}"),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Error,
+                        format!("Failed to clean up empty session: {e}"),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             }
             // Create a new session
             let new_session = crate::session::Session::new(None, ctx.config.sessions_dir.clone())
@@ -280,10 +298,13 @@ impl SlashCommand for NewCommand {
             ctx.app.reset_for_session_switch();
             ctx.app.load_history(&new_history);
             ctx.app.model = model;
-            ctx.app.conversation.push(ConversationEntry::new(
-                ConversationRole::Info,
-                "Started new session.".to_string(),
-            ));
+            ctx.app
+                .conversation
+                .push(ConversationEntry::new_with_timestamp(
+                    ConversationRole::Info,
+                    "Started new session.".to_string(),
+                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                ));
             Ok(DispatchResult::Handled)
         })
     }
@@ -310,10 +331,13 @@ impl SlashCommand for RoleCommand {
             ctx.app.input.clear();
             if role_name.is_empty() {
                 let model = ctx.agent.model();
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Info,
-                    format!("Current model: {model}"),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Info,
+                        format!("Current model: {model}"),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
                 return Ok(DispatchResult::Handled);
             }
             match factory.for_role(&role_name).await {
@@ -322,16 +346,22 @@ impl SlashCommand for RoleCommand {
                     let backend: Arc<dyn crate::backend::LlmBackend> = Arc::from(selection.backend);
                     ctx.agent.set_backend(backend, new_model.clone());
                     ctx.app.model = new_model.clone();
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Info,
-                        format!("Switched to role '{role_name}' (model: {new_model})"),
-                    ));
+                    ctx.app
+                        .conversation
+                        .push(ConversationEntry::new_with_timestamp(
+                            ConversationRole::Info,
+                            format!("Switched to role '{role_name}' (model: {new_model})"),
+                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                        ));
                 }
                 Err(e) => {
-                    ctx.app.conversation.push(ConversationEntry::new(
-                        ConversationRole::Error,
-                        format!("Unknown role '{role_name}': {e}"),
-                    ));
+                    ctx.app
+                        .conversation
+                        .push(ConversationEntry::new_with_timestamp(
+                            ConversationRole::Error,
+                            format!("Unknown role '{role_name}': {e}"),
+                            crate::frontend::tui::timestamp::format_now_timestamp(),
+                        ));
                 }
             }
             Ok(DispatchResult::Handled)
@@ -388,10 +418,13 @@ impl SlashCommand for BashCommand {
         Box::pin(async move {
             ctx.app.input.clear();
             if command.is_empty() {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Info,
-                    "Usage: /bash <command>".to_string(),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Info,
+                        "Usage: /bash <command>".to_string(),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
                 return Ok(DispatchResult::Handled);
             }
 
@@ -478,16 +511,22 @@ impl SlashCommand for ChatCommand {
             let new_state = ctx.app.chat_mode.toggle();
             ctx.agent.set_chat_mode(new_state);
             if new_state {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Info,
-                    "Chat mode ON — write tools hidden, bash restricted to read-only commands"
-                        .to_string(),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Info,
+                        "Chat mode ON — write tools hidden, bash restricted to read-only commands"
+                            .to_string(),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             } else {
-                ctx.app.conversation.push(ConversationEntry::new(
-                    ConversationRole::Info,
-                    "Chat mode OFF — all tools available".to_string(),
-                ));
+                ctx.app
+                    .conversation
+                    .push(ConversationEntry::new_with_timestamp(
+                        ConversationRole::Info,
+                        "Chat mode OFF — all tools available".to_string(),
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                    ));
             }
             Ok(DispatchResult::Handled)
         })
