@@ -120,7 +120,13 @@ async fn run_text<W: Write, R: BufRead>(
             AgentEvent::ToolUseReceived {
                 name, input, index, ..
             } => {
-                writeln!(writer, "\n[tool({index}): {}] {}", name, input)?;
+                writeln!(
+                    writer,
+                    "\n[{}] [tool({index}): {}] {}",
+                    crate::frontend::tui::timestamp::format_now_timestamp(),
+                    name,
+                    input
+                )?;
             }
             AgentEvent::ToolResult {
                 name,
@@ -129,9 +135,21 @@ async fn run_text<W: Write, R: BufRead>(
                 index,
             } => {
                 if is_error {
-                    writeln!(writer, "[error({index}) from {}]: {}", name, content)?;
+                    writeln!(
+                        writer,
+                        "[{}] [error({index}) from {}]: {}",
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        name,
+                        content
+                    )?;
                 } else {
-                    writeln!(writer, "[result({index}) from {}]: {}", name, content)?;
+                    writeln!(
+                        writer,
+                        "[{}] [result({index}) from {}]: {}",
+                        crate::frontend::tui::timestamp::format_now_timestamp(),
+                        name,
+                        content
+                    )?;
                 }
             }
             AgentEvent::Usage { .. } => {}

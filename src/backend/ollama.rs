@@ -417,6 +417,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello".to_string())],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -453,6 +454,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello".to_string())],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -482,6 +484,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello".to_string())],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -539,6 +542,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
             }],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -579,6 +583,7 @@ mod tests {
                 content: "file1.txt\nfile2.txt".to_string(),
                 is_error: false,
             }],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -607,6 +612,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text("run ls".to_string())],
+                created_at: 0.0,
             },
             Message {
                 role: Role::Assistant,
@@ -615,6 +621,7 @@ mod tests {
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
                 }],
+                created_at: 0.0,
             },
             Message {
                 role: Role::User,
@@ -623,6 +630,7 @@ mod tests {
                     content: "file1.txt".to_string(),
                     is_error: false,
                 }],
+                created_at: 0.0,
             },
         ];
 
@@ -761,6 +769,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello".to_string())],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);
@@ -784,6 +793,7 @@ mod tests {
         let messages = vec![Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello".to_string())],
+            created_at: 0.0,
         }];
 
         let body = backend.build_request_body(&messages, &config);

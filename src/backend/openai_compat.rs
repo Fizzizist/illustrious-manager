@@ -453,6 +453,7 @@ mod tests {
         Message {
             role: Role::User,
             content: vec![ContentBlock::Text(text.to_string())],
+            created_at: 0.0,
         }
     }
 
@@ -523,6 +524,7 @@ mod tests {
                 content: "output".to_string(),
                 is_error: false,
             }],
+            created_at: 0.0,
         }];
         let body = b.build_request_body(&messages, &simple_config());
         let msgs = body["messages"].as_array().expect("messages");
@@ -541,6 +543,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
             }],
+            created_at: 0.0,
         }];
         let body = b.build_request_body(&messages, &simple_config());
         let msgs = body["messages"].as_array().expect("messages");
@@ -1111,6 +1114,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text("hi".to_string())],
+                created_at: 0.0,
             },
             Message {
                 role: Role::Assistant,
@@ -1121,6 +1125,7 @@ mod tests {
                     },
                     ContentBlock::Text("answer".to_string()),
                 ],
+                created_at: 0.0,
             },
         ];
         let body = b.build_request_body(&messages, &simple_config());

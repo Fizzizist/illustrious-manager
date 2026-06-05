@@ -23,10 +23,11 @@ impl<'a> ConversationRepo<'a> {
         self.session
             .conn
             .execute(
-                "INSERT INTO conversation (role, content, active) VALUES (?1, ?2, 1)",
+                "INSERT INTO conversation (role, content, active, created_at) VALUES (?1, ?2, 1, ?3)",
                 [
                     turso::Value::Text(role_str.to_string()),
                     turso::Value::Text(content_json),
+                    turso::Value::Real(message.created_at),
                 ],
             )
             .await
@@ -58,7 +59,7 @@ impl<'a> ConversationRepo<'a> {
             .session
             .conn
             .query(
-                "SELECT role, content FROM conversation WHERE active = 1 ORDER BY id ASC",
+                "SELECT role, content, created_at FROM conversation WHERE active = 1 ORDER BY id ASC",
                 (),
             )
             .await
@@ -74,6 +75,11 @@ impl<'a> ConversationRepo<'a> {
                 turso::Value::Text(s) => s,
                 other => bail!("Unexpected content type in DB: {:?}", other),
             };
+            let created_at = match row.get_value(2)? {
+                turso::Value::Real(f) => f,
+                turso::Value::Integer(i) => i as f64,
+                _ => 0.0,
+            };
 
             let role = match role_str.as_str() {
                 "user" => Role::User,
@@ -84,7 +90,11 @@ impl<'a> ConversationRepo<'a> {
             let content: Vec<ContentBlock> =
                 serde_json::from_str(&content_str).context("Failed to deserialize content")?;
 
-            messages.push(Message { role, content });
+            messages.push(Message {
+                role,
+                content,
+                created_at,
+            });
         }
 
         Ok(messages)
@@ -465,5 +475,38 @@ mod tests {
             .await
             .expect("load history");
         assert_eq!(history.len(), 1, "summary should be the only active entry");
+    }
+
+    #[tokio::test]
+    async fn created_at_roundtrips_through_db() {
+        let (_dir, session) = create_test_session().await;
+
+        let msg =
+            Message::text(Role::User, "timestamped".to_string()).with_created_at(1704348000.0);
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].created_at, 1704348000.0);
+    }
+
+    #[tokio::test]
+    async fn created_at_defaults_to_zero_when_absent() {
+        let (_dir, session) = create_test_session().await;
+
+        let msg = Message::text(Role::User, "default timestamp".to_string());
+        assert_eq!(msg.created_at, 0.0);
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
+
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history[0].created_at, 0.0);
     }
 }

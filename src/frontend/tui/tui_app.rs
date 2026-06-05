@@ -52,6 +52,7 @@ pub struct App {
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub current_thinking: String,
+    pub streaming_timestamp: String,
     pub state: AppState,
     pub confirmation_tx: Option<fmpsc::UnboundedSender<ConfirmationResponse>>,
     pub cancel_token: Option<CancellationToken>,
@@ -118,6 +119,7 @@ impl App {
             conversation: Vec::new(),
             current_response: String::new(),
             current_thinking: String::new(),
+            streaming_timestamp: String::new(),
             state: AppState::Input,
             confirmation_tx: None,
             cancel_token: None,
@@ -157,6 +159,7 @@ impl App {
                 crate::types::Role::User => ConversationRole::User,
                 crate::types::Role::Assistant => ConversationRole::Assistant,
             };
+            let timestamp = crate::frontend::tui::timestamp::format_timestamp(message.created_at);
 
             // Re-derive per-turn 1-based indices for tool entries within each message.
             let tool_count = message
@@ -176,7 +179,11 @@ impl App {
             for block in &message.content {
                 let entry = match block {
                     crate::types::ContentBlock::Text(text) => {
-                        Some(ConversationEntry::new(role.clone(), text.clone()))
+                        Some(ConversationEntry::new_with_timestamp(
+                            role.clone(),
+                            text.clone(),
+                            timestamp.clone(),
+                        ))
                     }
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
                         tool_index += 1;
@@ -186,6 +193,7 @@ impl App {
                             input,
                             self.text_width as usize,
                             idx,
+                            &timestamp,
                         ))
                     }
                     crate::types::ContentBlock::ToolResult {
@@ -198,19 +206,33 @@ impl App {
                             ConversationRole::ToolResult
                         };
                         let entry = if is_indexed && entry_role == ConversationRole::ToolResult {
-                            ConversationEntry::new_indexed(entry_role, content.clone(), tool_index)
+                            ConversationEntry::new_indexed_with_timestamp(
+                                entry_role,
+                                content.clone(),
+                                tool_index,
+                                timestamp.clone(),
+                            )
                         } else {
-                            ConversationEntry::new(entry_role, content.clone())
+                            ConversationEntry::new_with_timestamp(
+                                entry_role,
+                                content.clone(),
+                                timestamp.clone(),
+                            )
                         };
                         Some(entry)
                     }
-                    crate::types::ContentBlock::Thinking { text, .. } => Some(
-                        ConversationEntry::new(ConversationRole::Thinking, text.clone()),
-                    ),
+                    crate::types::ContentBlock::Thinking { text, .. } => {
+                        Some(ConversationEntry::new_with_timestamp(
+                            ConversationRole::Thinking,
+                            text.clone(),
+                            timestamp.clone(),
+                        ))
+                    }
                     crate::types::ContentBlock::RedactedThinking { .. } => {
-                        Some(ConversationEntry::new(
+                        Some(ConversationEntry::new_with_timestamp(
                             ConversationRole::Thinking,
                             "[redacted thinking]".to_string(),
+                            timestamp.clone(),
                         ))
                     }
                 };
@@ -275,35 +297,47 @@ impl App {
         input: &serde_json::Value,
         width: usize,
         index: Option<usize>,
+        timestamp: &str,
     ) -> ConversationEntry {
         let effective_width = if width == 0 { 80 } else { width };
         let content = self.tool_use_markdown(name, input);
         match name {
             "edit_file" => {
                 if let Some(lines) = render_edit_file_diff(input, effective_width) {
-                    return ConversationEntry::new_with_lines_indexed(
+                    return ConversationEntry::new_with_lines_indexed_and_timestamp(
                         ConversationRole::ToolUse,
                         content,
                         lines,
                         index,
+                        timestamp.to_string(),
                     );
                 }
             }
             "write_file" => {
                 if let Some(lines) = render_write_file(input, effective_width) {
-                    return ConversationEntry::new_with_lines_indexed(
+                    return ConversationEntry::new_with_lines_indexed_and_timestamp(
                         ConversationRole::ToolUse,
                         content,
                         lines,
                         index,
+                        timestamp.to_string(),
                     );
                 }
             }
             _ => {}
         }
         match index {
-            Some(i) => ConversationEntry::new_indexed(ConversationRole::ToolUse, content, i),
-            None => ConversationEntry::new(ConversationRole::ToolUse, content),
+            Some(i) => ConversationEntry::new_indexed_with_timestamp(
+                ConversationRole::ToolUse,
+                content,
+                i,
+                timestamp.to_string(),
+            ),
+            None => ConversationEntry::new_with_timestamp(
+                ConversationRole::ToolUse,
+                content,
+                timestamp.to_string(),
+            ),
         }
     }
 
@@ -385,6 +419,7 @@ impl App {
             &self.current_response,
             0,
             self.viewport_height,
+            &self.streaming_timestamp,
         );
         conv_area.max_scroll(self.text_width)
     }
@@ -421,6 +456,7 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         &app.current_response,
         app.scroll_offset,
         chunks[0].height.saturating_sub(2),
+        &app.streaming_timestamp,
     );
     conv_area.render(frame, chunks[0], text_width);
 
@@ -483,20 +519,28 @@ pub fn handle_agent_event(
     }
     match event {
         AgentEvent::TokenReceived(text) => {
+            if app.current_response.is_empty() {
+                app.streaming_timestamp = crate::frontend::tui::timestamp::format_now_timestamp();
+            }
             app.current_response.push_str(&text);
             app.scroll_offset = 0;
         }
         AgentEvent::ResponseComplete(full) => {
             if !app.current_thinking.is_empty() {
-                app.conversation.push(ConversationEntry::new(
+                app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Thinking,
                     std::mem::take(&mut app.current_thinking),
+                    app.streaming_timestamp.clone(),
                 ));
             }
-            app.conversation
-                .push(ConversationEntry::new(ConversationRole::Assistant, full));
+            app.conversation.push(ConversationEntry::new_with_timestamp(
+                ConversationRole::Assistant,
+                full,
+                app.streaming_timestamp.clone(),
+            ));
             app.current_response.clear();
             app.current_thinking.clear();
+            app.streaming_timestamp.clear();
             app.confirmation_tx = None;
             app.cancel_token = None;
             app.set_state(AppState::Input);
@@ -504,10 +548,14 @@ pub fn handle_agent_event(
             app.git_branch = status_line::detect_git_branch();
         }
         AgentEvent::Error(msg) => {
-            app.conversation
-                .push(ConversationEntry::new(ConversationRole::Error, msg));
+            app.conversation.push(ConversationEntry::new_with_timestamp(
+                ConversationRole::Error,
+                msg,
+                crate::frontend::tui::timestamp::format_now_timestamp(),
+            ));
             app.current_response.clear();
             app.current_thinking.clear();
+            app.streaming_timestamp.clear();
             app.confirmation_tx = None;
             app.cancel_token = None;
             app.set_state(AppState::Input);
@@ -518,13 +566,15 @@ pub fn handle_agent_event(
             name, input, index, ..
         } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry::new(
+                app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
+                    app.streaming_timestamp.clone(),
                 ));
             }
             let width = app.text_width as usize;
-            let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
+            let ts = app.streaming_timestamp.clone();
+            let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index), &ts);
             app.conversation.push(entry);
             app.scroll_offset = 0;
         }
@@ -551,9 +601,18 @@ pub fn handle_agent_event(
                 Err(_) => content,
             };
             let entry = if role == ConversationRole::ToolResult {
-                ConversationEntry::new_indexed(role, display, index)
+                ConversationEntry::new_indexed_with_timestamp(
+                    role,
+                    display,
+                    index,
+                    app.streaming_timestamp.clone(),
+                )
             } else {
-                ConversationEntry::new(role, display)
+                ConversationEntry::new_with_timestamp(
+                    role,
+                    display,
+                    app.streaming_timestamp.clone(),
+                )
             };
             app.conversation.push(entry);
             app.scroll_offset = 0;
@@ -562,9 +621,10 @@ pub fn handle_agent_event(
             name, input, index, ..
         } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry::new(
+                app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
+                    app.streaming_timestamp.clone(),
                 ));
             }
             app.set_state(AppState::ToolConfirmation { name, input, index });
@@ -587,14 +647,16 @@ pub fn handle_agent_event(
         }
         AgentEvent::Interrupted { partial_text } => {
             if !partial_text.is_empty() {
-                app.conversation.push(ConversationEntry::new(
+                app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Assistant,
                     format!("{partial_text}\n*(interrupted)*"),
+                    app.streaming_timestamp.clone(),
                 ));
             } else {
-                app.conversation.push(ConversationEntry::new(
+                app.conversation.push(ConversationEntry::new_with_timestamp(
                     ConversationRole::Info,
                     "*(interrupted)*".to_string(),
+                    crate::frontend::tui::timestamp::format_now_timestamp(),
                 ));
             }
             app.current_response.clear();
@@ -918,7 +980,7 @@ async fn run_app(
                                     _ => unreachable!(),
                                 };
                                 let width = app.text_width as usize;
-                                let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index));
+                                let entry = app.tool_use_entry_indexed(&name, &input, width, Some(index), &app.streaming_timestamp);
                                 app.conversation.push(entry);
                                 let sent = app
                                     .confirmation_tx
@@ -1728,6 +1790,7 @@ mod tests {
                         input: serde_json::json!({"command": "ls"}),
                     },
                 ],
+                created_at: 0.0,
             },
             Message {
                 role: Role::User,
@@ -1736,6 +1799,7 @@ mod tests {
                     content: "file.txt".to_string(),
                     is_error: false,
                 }],
+                created_at: 0.0,
             },
             Message::text(Role::Assistant, "here is the file".to_string()),
         ];
@@ -1780,6 +1844,7 @@ mod tests {
                         input: serde_json::json!({"command": "whoami"}),
                     },
                 ],
+                created_at: 0.0,
             },
             Message {
                 role: Role::User,
@@ -1800,6 +1865,7 @@ mod tests {
                         is_error: false,
                     },
                 ],
+                created_at: 0.0,
             },
         ];
 
@@ -1876,7 +1942,7 @@ mod tests {
             }
             _ => panic!("expected ToolConfirmation state"),
         };
-        let entry = app.tool_use_entry_indexed(&name, &input, 80, Some(index));
+        let entry = app.tool_use_entry_indexed(&name, &input, 80, Some(index), "");
         assert_eq!(
             entry.tool_index,
             Some(3),
@@ -2187,6 +2253,7 @@ mod tests {
                     "new_string": "let x = 42;"
                 }),
             }],
+            created_at: 0.0,
         }];
 
         app.load_history(&messages);
@@ -2214,7 +2281,7 @@ mod tests {
             "old_string": "let x = 1;",
             "new_string": "let x = 42;"
         });
-        let entry = app.tool_use_entry_indexed("edit_file", &input, 80, None);
+        let entry = app.tool_use_entry_indexed("edit_file", &input, 80, None, "");
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The diff renderer produces spans with colour styles; verify that
         // at least one span has a coloured foreground (indicating diff styling)
@@ -2237,7 +2304,7 @@ mod tests {
             "path": "hello.txt",
             "content": "Hello, world!\n"
         });
-        let entry = app.tool_use_entry_indexed("write_file", &input, 80, None);
+        let entry = app.tool_use_entry_indexed("write_file", &input, 80, None, "");
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // write_file renders as a syntax-highlighted code block (green + markers)
         let has_plus_marker = entry
@@ -2254,7 +2321,7 @@ mod tests {
     fn regression_non_diff_tool_use_still_renders_via_markdown() {
         let app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let input = serde_json::json!({"command": "ls -la"});
-        let entry = app.tool_use_entry_indexed("bash", &input, 80, None);
+        let entry = app.tool_use_entry_indexed("bash", &input, 80, None, "");
         assert_eq!(entry.role, ConversationRole::ToolUse);
         // The content (markdown string) should mention the tool name.
         assert!(

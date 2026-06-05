@@ -277,6 +277,12 @@ impl<'de> Deserialize<'de> for ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default = "default_created_at")]
+    pub created_at: f64,
+}
+
+fn default_created_at() -> f64 {
+    0.0
 }
 
 impl Message {
@@ -284,7 +290,13 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text(content)],
+            created_at: default_created_at(),
         }
+    }
+
+    pub fn with_created_at(mut self, ts: f64) -> Self {
+        self.created_at = ts;
+        self
     }
 }
 
@@ -469,6 +481,7 @@ mod tests {
         let original = Message {
             role: Role::User,
             content: vec![ContentBlock::Text("Hello, world!".to_string())],
+            created_at: 0.0,
         };
 
         let json = serde_json::to_string(&original).expect("Message should serialize to JSON");
@@ -606,6 +619,37 @@ mod tests {
     }
 
     #[test]
+    fn message_text_defaults_created_at_to_zero() {
+        let msg = Message::text(Role::User, "Hello".to_string());
+        assert_eq!(msg.created_at, 0.0);
+    }
+
+    #[test]
+    fn message_with_created_at_overrides_default() {
+        let msg = Message::text(Role::User, "Hello".to_string()).with_created_at(1704348000.0);
+        assert_eq!(msg.created_at, 1704348000.0);
+    }
+
+    #[test]
+    fn message_serde_roundtrips_created_at() {
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text("hello".to_string())],
+            created_at: 1704348000.0,
+        };
+        let json = serde_json::to_string(&msg).expect("serialize");
+        let deserialized: Message = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized.created_at, 1704348000.0);
+    }
+
+    #[test]
+    fn message_deserializes_without_created_at_defaulting_to_zero() {
+        let json = r#"{"role":"user","content":[{"type":"text","text":"hello"}]}"#;
+        let msg: Message = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(msg.created_at, 0.0);
+    }
+
+    #[test]
     fn message_with_multiple_content_blocks_serializes_correctly() {
         let msg = Message {
             role: Role::Assistant,
@@ -617,6 +661,7 @@ mod tests {
                     input: serde_json::json!({"command": "ls"}),
                 },
             ],
+            created_at: 0.0,
         };
         let json = serde_json::to_string(&msg).expect("Message should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
@@ -837,6 +882,7 @@ mod tests {
                 },
                 ContentBlock::Text("Here is my answer.".to_string()),
             ],
+            created_at: 0.0,
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let deserialized: Message = serde_json::from_str(&json).expect("deserialize");

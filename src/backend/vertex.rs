@@ -892,6 +892,7 @@ mod tests {
                 text: "Let me think".to_string(),
                 signature: sig,
             }],
+            created_at: 0.0,
         };
         let config = RequestConfig {
             model: "claude-test".to_string(),
@@ -917,6 +918,7 @@ mod tests {
                 },
                 crate::types::ContentBlock::Text("visible text".to_string()),
             ],
+            created_at: 0.0,
         }];
         let config = RequestConfig {
             model: "claude-test".to_string(),
@@ -950,6 +952,7 @@ mod tests {
                 },
                 crate::types::ContentBlock::Text("answer".to_string()),
             ],
+            created_at: 0.0,
         }];
         let config = RequestConfig {
             model: "claude-test".to_string(),
@@ -1214,10 +1217,12 @@ mod tests {
                     text: "reasoning".to_string(),
                     signature: String::new(),
                 }],
+                created_at: 0.0,
             },
             Message {
                 role: crate::types::Role::User,
                 content: vec![crate::types::ContentBlock::Text("follow-up".to_string())],
+                created_at: 0.0,
             },
         ];
         let config = RequestConfig {

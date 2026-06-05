@@ -1894,6 +1894,7 @@ dependencies = [
  "syntect",
  "syntect-assets",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
  "toml",
