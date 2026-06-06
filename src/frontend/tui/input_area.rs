@@ -300,31 +300,29 @@ impl<'a> InputArea<'a> {
     }
 
     fn apply_block(&mut self) {
-        let block = match &self.mode {
-            InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
-            InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
-            InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
-            InputMode::Streaming => Block::default().borders(Borders::ALL).title(format!(
-                "{} Streaming... (Esc to interrupt)",
-                crate::timestamp::format_elapsed(std::time::Duration::ZERO)
-            )),
-            InputMode::SessionPicker => {
-                Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
+        match &self.mode {
+            InputMode::Streaming | InputMode::Compacting | InputMode::RunningBash => {
+                self.set_elapsed_title(std::time::Duration::ZERO);
             }
-            InputMode::TasksPicker => Block::default().borders(Borders::ALL).title(TASKS_TITLE),
-            InputMode::Compacting => Block::default().borders(Borders::ALL).title(format!(
-                "{} Compacting...",
-                crate::timestamp::format_elapsed(std::time::Duration::ZERO)
-            )),
-            InputMode::RunningBash => Block::default().borders(Borders::ALL).title(format!(
-                "{} Running bash... (Esc to cancel)",
-                crate::timestamp::format_elapsed(std::time::Duration::ZERO)
-            )),
-            InputMode::ToolConfirmation { name, .. } => Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Allow '{name}'? [y/n]")),
-        };
-        self.textarea.set_block(block);
+            _ => {
+                let block = match &self.mode {
+                    InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
+                    InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
+                    InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
+                    InputMode::SessionPicker => {
+                        Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
+                    }
+                    InputMode::TasksPicker => {
+                        Block::default().borders(Borders::ALL).title(TASKS_TITLE)
+                    }
+                    InputMode::ToolConfirmation { name, .. } => Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Allow '{name}'? [y/n]")),
+                    _ => unreachable!(),
+                };
+                self.textarea.set_block(block);
+            }
+        }
     }
 
     pub fn height_for_width(&self, width: u16, available_height: u16) -> u16 {
