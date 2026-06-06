@@ -118,6 +118,7 @@ impl SlashCommand for SessionsCommand {
                     ctx.app.conversation.push(ConversationEntry::new(
                         ConversationRole::Error,
                         format!("Failed to list sessions: {e}"),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 }
             }
@@ -147,6 +148,7 @@ impl SlashCommand for ModelCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Error,
                     "Usage: /model <model-name>".to_string(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             } else {
                 ctx.agent.set_model(model.clone());
@@ -154,6 +156,7 @@ impl SlashCommand for ModelCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Info,
                     format!("Model switched to `{model}`"),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             }
             Ok(DispatchResult::Handled)
@@ -222,6 +225,7 @@ impl SlashCommand for TasksCommand {
                     ctx.app.conversation.push(ConversationEntry::new(
                         ConversationRole::Error,
                         format!("Failed to load tasks: {e}"),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 }
             }
@@ -251,6 +255,7 @@ impl SlashCommand for NewCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Error,
                     format!("Failed to checkpoint session: {e}"),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             }
             // Clean up current session if empty
@@ -258,6 +263,7 @@ impl SlashCommand for NewCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Error,
                     format!("Failed to clean up empty session: {e}"),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             }
             // Create a new session
@@ -283,6 +289,7 @@ impl SlashCommand for NewCommand {
             ctx.app.conversation.push(ConversationEntry::new(
                 ConversationRole::Info,
                 "Started new session.".to_string(),
+                crate::timestamp::format_now_timestamp(),
             ));
             Ok(DispatchResult::Handled)
         })
@@ -313,6 +320,7 @@ impl SlashCommand for RoleCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Info,
                     format!("Current model: {model}"),
+                    crate::timestamp::format_now_timestamp(),
                 ));
                 return Ok(DispatchResult::Handled);
             }
@@ -325,12 +333,14 @@ impl SlashCommand for RoleCommand {
                     ctx.app.conversation.push(ConversationEntry::new(
                         ConversationRole::Info,
                         format!("Switched to role '{role_name}' (model: {new_model})"),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 }
                 Err(e) => {
                     ctx.app.conversation.push(ConversationEntry::new(
                         ConversationRole::Error,
                         format!("Unknown role '{role_name}': {e}"),
+                        crate::timestamp::format_now_timestamp(),
                     ));
                 }
             }
@@ -391,6 +401,7 @@ impl SlashCommand for BashCommand {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Info,
                     "Usage: /bash <command>".to_string(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
                 return Ok(DispatchResult::Handled);
             }
@@ -482,11 +493,13 @@ impl SlashCommand for ChatCommand {
                     ConversationRole::Info,
                     "Chat mode ON — write tools hidden, bash restricted to read-only commands"
                         .to_string(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             } else {
                 ctx.app.conversation.push(ConversationEntry::new(
                     ConversationRole::Info,
                     "Chat mode OFF — all tools available".to_string(),
+                    crate::timestamp::format_now_timestamp(),
                 ));
             }
             Ok(DispatchResult::Handled)
@@ -1088,6 +1101,7 @@ mod tests {
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
             "old message".to_string(),
+            String::new(),
         ));
         app.model = "test-model".to_string();
         // Pre-populate App state that should be reset

@@ -497,6 +497,7 @@ mod tests {
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
             }],
+            created_at: 0.0,
         }];
         let (input, output) = estimate_usage_from_messages(&messages);
         // tool use on Assistant message counts as output
@@ -514,6 +515,7 @@ mod tests {
                 content: "a".repeat(40),
                 is_error: false,
             }],
+            created_at: 0.0,
         }];
         let (input, output) = estimate_usage_from_messages(&messages);
         assert_eq!(input, 10, "40 chars / 4 = 10 input tokens");
@@ -686,12 +688,14 @@ mod tests {
                     },
                     ContentBlock::Text("short".to_string()),
                 ],
+                created_at: 0.0,
             },
             Message {
                 role: Role::Assistant,
                 content: vec![ContentBlock::RedactedThinking {
                     data: "opaque data blob".to_string(),
                 }],
+                created_at: 0.0,
             },
         ];
 

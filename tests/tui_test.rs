@@ -13,10 +13,12 @@ fn test_tui_tool_call_renders_inline() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::User,
         "Run ls".to_string(),
+        String::new(),
     ));
     app.conversation.push(ConversationEntry::new(
         ConversationRole::ToolUse,
         "bash\n  {\"command\":\"ls\"}".to_string(),
+        String::new(),
     ));
 
     let backend = TestBackend::new(80, 24);
@@ -35,10 +37,12 @@ fn test_tui_tool_result_renders_below_invocation() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::ToolUse,
         "bash\n  {\"command\":\"ls\"}".to_string(),
+        String::new(),
     ));
     app.conversation.push(ConversationEntry::new(
         ConversationRole::ToolResult,
         "file1.txt\nfile2.txt".to_string(),
+        String::new(),
     ));
 
     let backend = TestBackend::new(80, 24);
@@ -58,6 +62,7 @@ fn test_tui_long_tool_result_is_truncated() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::ToolResult,
         long_output,
+        String::new(),
     ));
 
     let backend = TestBackend::new(80, 24);
@@ -76,6 +81,7 @@ fn test_tui_confirmation_prompt_state_renders() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::User,
         "Write a file".to_string(),
+        String::new(),
     ));
     app.set_state(AppState::ToolConfirmation {
         name: "write_file".to_string(),
@@ -113,10 +119,12 @@ fn test_tui_with_conversation() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::User,
         "Hello!".to_string(),
+        String::new(),
     ));
     app.conversation.push(ConversationEntry::new(
         ConversationRole::Assistant,
         "Hi there! How can I help you?".to_string(),
+        String::new(),
     ));
 
     let backend = TestBackend::new(80, 24);
@@ -136,6 +144,7 @@ fn test_tui_streaming_state() {
     app.conversation.push(ConversationEntry::new(
         ConversationRole::User,
         "Tell me a story".to_string(),
+        String::new(),
     ));
     app.current_response = "Once upon a time".to_string();
     app.set_state(AppState::Streaming);
@@ -239,10 +248,12 @@ fn test_tui_auto_scroll_shows_bottom_with_wrapping_content() {
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
             format!("Message {i}"),
+            String::new(),
         ));
         app.conversation.push(ConversationEntry::new(
             ConversationRole::Assistant,
             long_response.clone(),
+            String::new(),
         ));
     }
     app.scroll_offset = 0;
@@ -269,6 +280,7 @@ fn test_tui_scrolled_up_shows_earlier_content() {
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
             format!("Message {i}"),
+            String::new(),
         ));
     }
     app.scroll_offset = 10;

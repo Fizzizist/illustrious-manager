@@ -7,6 +7,7 @@ use crate::backend::LlmBackend;
 use crate::config::{ConfirmationMode, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
+use crate::timestamp::now_timestamp;
 use crate::tools::ToolRegistry;
 use crate::types::{
     AgentEvent, BoxStream, ChatMode, ConfirmationResponse, ContentBlock, Message, RequestConfig,
@@ -267,6 +268,7 @@ impl Agent {
                 name: "bash".to_string(),
                 input,
             }],
+            created_at: now_timestamp(),
         };
         let truncated = truncate_tool_result(&content, self.max_tool_result_bytes);
         let user_msg = Message {
@@ -276,6 +278,7 @@ impl Agent {
                 content: truncated,
                 is_error,
             }],
+            created_at: now_timestamp(),
         };
         let session = self.session.lock().await;
         session
@@ -474,6 +477,7 @@ impl Agent {
                                         text: thinking_accumulated.clone(),
                                         signature: thinking_signature.clone(),
                                     }],
+                                    created_at: now_timestamp(),
                                 };
                                 lock(&history_arc).push(thinking_msg.clone());
                                 let _ = session
@@ -538,6 +542,7 @@ impl Agent {
                                         text: thinking_accumulated.clone(),
                                         signature: thinking_signature.clone(),
                                     }],
+                                    created_at: now_timestamp(),
                                 };
                                 lock(&history_arc).push(thinking_msg.clone());
                                 let _ = session
@@ -567,6 +572,7 @@ impl Agent {
                     let assistant_msg = Message {
                         role: Role::Assistant,
                         content,
+                        created_at: now_timestamp(),
                     };
                     lock(&history_arc).push(assistant_msg.clone());
                     let _ = session
@@ -644,6 +650,7 @@ impl Agent {
                                 text: thinking_for_cancel,
                                 signature: signature_for_cancel,
                             }],
+                            created_at: now_timestamp(),
                         };
                         lock(&history_arc).push(thinking_msg.clone());
                         let _ = session
@@ -659,6 +666,7 @@ impl Agent {
                 let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
+                    created_at: now_timestamp(),
                 };
                 lock(&history_arc).push(assistant_msg.clone());
                 let _ = session
@@ -671,6 +679,7 @@ impl Agent {
                 let tool_result_msg = Message {
                     role: Role::User,
                     content: tool_result_blocks,
+                    created_at: now_timestamp(),
                 };
                 lock(&history_arc).push(tool_result_msg.clone());
                 let _ = session
@@ -706,6 +715,7 @@ async fn persist_partial(
     let msg = Message {
         role: Role::Assistant,
         content: vec![ContentBlock::Text(text.to_string())],
+        created_at: now_timestamp(),
     };
     lock(history).push(msg.clone());
     let _ = session

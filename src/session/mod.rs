@@ -91,7 +91,8 @@ CREATE TABLE IF NOT EXISTS conversation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at REAL NOT NULL DEFAULT 0.0
 );
 CREATE TABLE IF NOT EXISTS task (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +130,7 @@ impl Session {
             .context("Failed to run schema DDL")?;
 
         migrate_active_column(&conn).await?;
+        migrate_created_at_column(&conn).await?;
 
         Ok(Self {
             id: sess_id,
@@ -193,6 +195,30 @@ async fn migrate_active_column(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE conversation ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
             .await
             .context("Failed to add active column to conversation table")?;
+    }
+    Ok(())
+}
+
+async fn migrate_created_at_column(conn: &Connection) -> Result<()> {
+    let mut rows = conn
+        .query("PRAGMA table_info(conversation)", ())
+        .await
+        .context("Failed to query conversation table info")?;
+    let mut has_created_at = false;
+    while let Some(row) = rows.next().await? {
+        if let turso::Value::Text(name) = row.get_value(1)?
+            && name == "created_at"
+        {
+            has_created_at = true;
+            break;
+        }
+    }
+    if !has_created_at {
+        conn.execute_batch(
+            "ALTER TABLE conversation ADD COLUMN created_at REAL NOT NULL DEFAULT 0.0",
+        )
+        .await
+        .context("Failed to add created_at column to conversation table")?;
     }
     Ok(())
 }
@@ -369,6 +395,7 @@ mod tests {
                     input: serde_json::json!({"command": "ls"}),
                 },
             ],
+            created_at: 0.0,
         };
         session
             .conversation()
@@ -404,6 +431,7 @@ mod tests {
                 content: "file.txt".to_string(),
                 is_error: false,
             }],
+            created_at: 0.0,
         };
         session
             .conversation()
@@ -783,5 +811,49 @@ mod tests {
             .expect("reopen with migration");
         let history = session.conversation().load_history().await.expect("load");
         assert_eq!(history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn created_at_column_is_added_on_reopen_of_existing_db() {
+        let dir = TempDir::new().expect("temp dir");
+        let id = uuid::Uuid::now_v7().to_string();
+        let db_path = dir.path().join(format!("{id}.db"));
+
+        {
+            let db = Builder::new_local(db_path.to_string_lossy().as_ref())
+                .build()
+                .await
+                .expect("build");
+            let conn = db.connect().expect("connect");
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS conversation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                )",
+            )
+            .await
+            .expect("create schema without created_at");
+            conn.execute(
+                "INSERT INTO conversation (role, content, active) VALUES (?1, ?2, 1)",
+                [
+                    turso::Value::Text("user".to_string()),
+                    turso::Value::Text("[{\"type\":\"text\",\"text\":\"hello\"}]".to_string()),
+                ],
+            )
+            .await
+            .expect("insert");
+        }
+
+        let session = Session::new(Some(id), dir.path().to_path_buf())
+            .await
+            .expect("reopen with migration");
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1);
+        assert_eq!(
+            history[0].created_at, 0.0,
+            "migrated rows should default to 0.0"
+        );
     }
 }

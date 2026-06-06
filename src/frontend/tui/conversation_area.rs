@@ -53,6 +53,7 @@ pub struct ConversationEntry {
     pub content: String,
     /// Per-turn 1-based index for tool use / result entries. `None` for other roles.
     pub tool_index: Option<usize>,
+    pub timestamp: String,
     cached_lines: Vec<Line<'static>>,
     cached_lines_width: u16,
     cached_wrapped_count: u16,
@@ -60,12 +61,13 @@ pub struct ConversationEntry {
 }
 
 impl ConversationEntry {
-    pub fn new(role: ConversationRole, content: String) -> Self {
-        let cached_lines = render_entry_lines(&role, None, &content, 0);
+    pub fn new(role: ConversationRole, content: String, timestamp: String) -> Self {
+        let cached_lines = render_entry_lines(&role, None, &content, 0, &timestamp);
         Self {
             role,
             content,
             tool_index: None,
+            timestamp,
             cached_lines,
             cached_lines_width: 0,
             cached_wrapped_count: 0,
@@ -73,12 +75,18 @@ impl ConversationEntry {
         }
     }
 
-    pub fn new_indexed(role: ConversationRole, content: String, index: usize) -> Self {
-        let cached_lines = render_entry_lines(&role, Some(index), &content, 0);
+    pub fn new_indexed(
+        role: ConversationRole,
+        content: String,
+        index: usize,
+        timestamp: String,
+    ) -> Self {
+        let cached_lines = render_entry_lines(&role, Some(index), &content, 0, &timestamp);
         Self {
             role,
             content,
             tool_index: Some(index),
+            timestamp,
             cached_lines,
             cached_lines_width: 0,
             cached_wrapped_count: 0,
@@ -89,21 +97,14 @@ impl ConversationEntry {
     /// Create an entry whose display lines are provided directly, bypassing markdown rendering.
     ///
     /// Used for diff output from `edit_file` and `write_file` tool calls.
-    pub fn new_with_lines(
-        role: ConversationRole,
-        content: String,
-        lines: Vec<Line<'static>>,
-    ) -> Self {
-        Self::new_with_lines_indexed(role, content, lines, None)
-    }
-
     pub fn new_with_lines_indexed(
         role: ConversationRole,
         content: String,
         lines: Vec<Line<'static>>,
         index: Option<usize>,
+        timestamp: String,
     ) -> Self {
-        let label = role_label(&role, index);
+        let label = role_label(&role, index, &timestamp);
         let mut all_lines = Vec::new();
         all_lines.push(Line::from(Span::styled(
             format!("{label}:"),
@@ -119,6 +120,7 @@ impl ConversationEntry {
             role,
             content,
             tool_index: index,
+            timestamp,
             cached_lines: all_lines,
             cached_lines_width: u16::MAX,
             cached_wrapped_count: 0,
@@ -132,8 +134,13 @@ impl ConversationEntry {
 
     pub fn wrapped_line_count(&mut self, text_width: u16) -> u16 {
         if self.cached_lines_width != u16::MAX && self.cached_lines_width != text_width {
-            self.cached_lines =
-                render_entry_lines(&self.role, self.tool_index, &self.content, text_width);
+            self.cached_lines = render_entry_lines(
+                &self.role,
+                self.tool_index,
+                &self.content,
+                text_width,
+                &self.timestamp,
+            );
             self.cached_lines_width = text_width;
             self.cached_width = 0;
         }
@@ -148,11 +155,16 @@ impl ConversationEntry {
     }
 }
 
-fn role_label(role: &ConversationRole, index: Option<usize>) -> String {
-    match (role, index) {
+fn role_label(role: &ConversationRole, index: Option<usize>, timestamp: &str) -> String {
+    let label = match (role, index) {
         (ConversationRole::ToolUse, Some(n)) => format!("[Tool({})]", n),
         (ConversationRole::ToolResult, Some(n)) => format!("[Result({})]", n),
         _ => role.display_label().to_string(),
+    };
+    if timestamp.is_empty() {
+        label
+    } else {
+        format!("{} {}", timestamp, label)
     }
 }
 
@@ -162,8 +174,9 @@ fn render_role_lines(
     content: &str,
     trailing_blank: bool,
     text_width: u16,
+    timestamp: &str,
 ) -> Vec<Line<'static>> {
-    let label = role_label(role, index);
+    let label = role_label(role, index, timestamp);
     let mut lines = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("{label}:"),
@@ -193,17 +206,23 @@ fn render_entry_lines(
     index: Option<usize>,
     content: &str,
     text_width: u16,
+    timestamp: &str,
 ) -> Vec<Line<'static>> {
-    render_role_lines(role, index, content, true, text_width)
+    render_role_lines(role, index, content, true, text_width, timestamp)
 }
 
-fn render_current_response_lines(current_response: &str, text_width: u16) -> Vec<Line<'static>> {
+fn render_current_response_lines(
+    current_response: &str,
+    text_width: u16,
+    timestamp: &str,
+) -> Vec<Line<'static>> {
     render_role_lines(
         &ConversationRole::Assistant,
         None,
         current_response,
         false,
         text_width,
+        timestamp,
     )
 }
 
@@ -243,9 +262,18 @@ fn truncate_to_width(s: &str, max_width: usize) -> String {
     format!("...{tail}")
 }
 
-fn thinking_indicator_lines(preview: Option<&str>, text_width: u16) -> Vec<Line<'static>> {
+fn thinking_indicator_lines(
+    preview: Option<&str>,
+    text_width: u16,
+    timestamp: &str,
+) -> Vec<Line<'static>> {
+    let label = if timestamp.is_empty() {
+        "[Thinking]:".to_string()
+    } else {
+        format!("{} [Thinking]:", timestamp)
+    };
     let mut lines = vec![Line::from(Span::styled(
-        "[Thinking]:",
+        label,
         Style::default().fg(ConversationRole::Thinking.color()),
     ))];
 
@@ -282,6 +310,7 @@ pub struct ConversationArea<'a> {
     is_thinking: bool,
     thinking_preview: Option<String>,
     current_response: &'a str,
+    streaming_timestamp: &'a str,
     scroll_offset: u16,
     viewport_height: u16,
 }
@@ -294,12 +323,14 @@ impl<'a> ConversationArea<'a> {
         current_response: &'a str,
         scroll_offset: u16,
         viewport_height: u16,
+        streaming_timestamp: &'a str,
     ) -> Self {
         Self {
             entries,
             is_thinking,
             thinking_preview: thinking_preview.map(|s| s.to_string()),
             current_response,
+            streaming_timestamp,
             scroll_offset,
             viewport_height,
         }
@@ -329,7 +360,11 @@ impl<'a> ConversationArea<'a> {
         let response_count = if self.current_response.is_empty() {
             0u16
         } else {
-            let response_lines = render_current_response_lines(self.current_response, text_width);
+            let response_lines = render_current_response_lines(
+                self.current_response,
+                text_width,
+                self.streaming_timestamp,
+            );
             estimate_wrapped_count(&response_lines, text_width)
         };
 
@@ -346,7 +381,11 @@ impl<'a> ConversationArea<'a> {
         let total_entries: u16 = entry_counts.iter().sum();
 
         let thinking_lines = if self.is_thinking {
-            thinking_indicator_lines(self.thinking_preview.as_deref(), text_width)
+            thinking_indicator_lines(
+                self.thinking_preview.as_deref(),
+                text_width,
+                self.streaming_timestamp,
+            )
         } else {
             Vec::new()
         };
@@ -363,7 +402,11 @@ impl<'a> ConversationArea<'a> {
         let response_lines = if self.current_response.is_empty() {
             Vec::new()
         } else {
-            render_current_response_lines(self.current_response, text_width)
+            render_current_response_lines(
+                self.current_response,
+                text_width,
+                self.streaming_timestamp,
+            )
         };
         let response_count = if response_lines.is_empty() {
             0u16
@@ -513,19 +556,37 @@ mod tests {
 
     #[test]
     fn role_label_without_index_uses_display_label() {
-        assert_eq!(role_label(&ConversationRole::ToolUse, None), "[Tool]");
-        assert_eq!(role_label(&ConversationRole::ToolResult, None), "[Result]");
-        assert_eq!(role_label(&ConversationRole::User, None), "You");
+        assert_eq!(role_label(&ConversationRole::ToolUse, None, ""), "[Tool]");
+        assert_eq!(
+            role_label(&ConversationRole::ToolResult, None, ""),
+            "[Result]"
+        );
+        assert_eq!(role_label(&ConversationRole::User, None, ""), "You");
     }
 
     #[test]
     fn role_label_with_index_formats_tool_labels() {
-        assert_eq!(role_label(&ConversationRole::ToolUse, Some(1)), "[Tool(1)]");
         assert_eq!(
-            role_label(&ConversationRole::ToolResult, Some(2)),
+            role_label(&ConversationRole::ToolUse, Some(1), ""),
+            "[Tool(1)]"
+        );
+        assert_eq!(
+            role_label(&ConversationRole::ToolResult, Some(2), ""),
             "[Result(2)]"
         );
-        assert_eq!(role_label(&ConversationRole::User, Some(3)), "You");
+        assert_eq!(role_label(&ConversationRole::User, Some(3), ""), "You");
+    }
+
+    #[test]
+    fn role_label_with_timestamp_prepends_timestamp() {
+        assert_eq!(
+            role_label(&ConversationRole::Assistant, None, "[20260104-18:32]"),
+            "[20260104-18:32] Assistant"
+        );
+        assert_eq!(
+            role_label(&ConversationRole::ToolUse, Some(1), "[20260104-18:32]"),
+            "[20260104-18:32] [Tool(1)]"
+        );
     }
 
     #[test]
@@ -541,32 +602,36 @@ mod tests {
     #[test]
     fn entry_lines_empty_conversation() {
         let entries: &mut [ConversationEntry] = &mut [];
-        let area = ConversationArea::new(entries, false, None, "", 0, 10);
+        let area = ConversationArea::new(entries, false, None, "", 0, 10, "");
         assert!(area.entries.is_empty());
     }
 
     #[test]
     fn entry_lines_with_entries() {
         let mut entries = vec![
-            ConversationEntry::new(ConversationRole::User, "hello".to_string()),
-            ConversationEntry::new(ConversationRole::Assistant, "world".to_string()),
+            ConversationEntry::new(ConversationRole::User, "hello".to_string(), String::new()),
+            ConversationEntry::new(
+                ConversationRole::Assistant,
+                "world".to_string(),
+                String::new(),
+            ),
         ];
         let total_lines: usize = entries.iter().map(|e| e.lines().len()).sum();
         assert_eq!(total_lines, 6);
-        let _ = ConversationArea::new(&mut entries, false, None, "", 0, 10);
+        let _ = ConversationArea::new(&mut entries, false, None, "", 0, 10, "");
     }
 
     #[test]
     fn entry_lines_with_current_response() {
         let mut entries: Vec<ConversationEntry> = Vec::new();
-        let area = ConversationArea::new(&mut entries, false, None, "streaming text", 0, 10);
+        let area = ConversationArea::new(&mut entries, false, None, "streaming text", 0, 10, "");
         assert!(!area.current_response.is_empty());
     }
 
     #[test]
     fn entry_lines_with_current_thinking_and_response() {
         let mut entries: Vec<ConversationEntry> = Vec::new();
-        let area = ConversationArea::new(&mut entries, true, None, "streaming text", 0, 10);
+        let area = ConversationArea::new(&mut entries, true, None, "streaming text", 0, 10, "");
         assert!(area.is_thinking);
         assert!(!area.current_response.is_empty());
     }
@@ -579,7 +644,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
-                let mut area = ConversationArea::new(&mut entries, true, None, "the answer", 0, 18);
+                let mut area =
+                    ConversationArea::new(&mut entries, true, None, "the answer", 0, 18, "");
                 area.render(frame, rect, 56);
             })
             .expect("draw");
@@ -606,7 +672,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 58, 18);
-                let mut area = ConversationArea::new(&mut entries, true, None, "", 0, 18);
+                let mut area = ConversationArea::new(&mut entries, true, None, "", 0, 18, "");
                 area.render(frame, rect, 56);
             })
             .expect("draw");
@@ -630,13 +696,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Thinking,
             "reasoning step 1 reasoning step 2".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -705,7 +773,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -716,15 +785,20 @@ mod tests {
     #[test]
     fn render_with_entries() {
         let mut entries = vec![
-            ConversationEntry::new(ConversationRole::User, "Hello".to_string()),
-            ConversationEntry::new(ConversationRole::Assistant, "Hi there!".to_string()),
+            ConversationEntry::new(ConversationRole::User, "Hello".to_string(), String::new()),
+            ConversationEntry::new(
+                ConversationRole::Assistant,
+                "Hi there!".to_string(),
+                String::new(),
+            ),
         ];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -747,6 +821,7 @@ mod tests {
                     "Streaming response...",
                     0,
                     20,
+                    "",
                 );
                 area_widget.render(frame, rect, 58);
             })
@@ -758,9 +833,11 @@ mod tests {
     #[test]
     fn max_scroll_with_many_entries() {
         let mut entries: Vec<ConversationEntry> = (0..40)
-            .map(|i| ConversationEntry::new(ConversationRole::User, format!("line {i}")))
+            .map(|i| {
+                ConversationEntry::new(ConversationRole::User, format!("line {i}"), String::new())
+            })
             .collect();
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 10);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 10, "");
         let max = area.max_scroll(58);
         assert!(max > 0, "should have scrollable content");
     }
@@ -770,8 +847,9 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::User,
             "short".to_string(),
+            String::new(),
         )];
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 100);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, 100, "");
         let max = area.max_scroll(58);
         assert_eq!(max, 0);
     }
@@ -788,13 +866,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             "This is **bold** text".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -807,13 +887,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             "```rust\nfn main() {}\n```".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -826,13 +908,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             "# Hello World\nSome content".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -845,13 +929,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             "- item one\n- item two\n- item three".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -865,13 +951,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             table.to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -885,13 +973,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             table.to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -905,13 +995,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             content.to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -933,7 +1025,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
                 let mut area_widget =
-                    ConversationArea::new(&mut entries, false, None, table, 0, 20);
+                    ConversationArea::new(&mut entries, false, None, table, 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -951,13 +1043,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             table.to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -973,13 +1067,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::User,
             "This is *italic* text".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1010,13 +1106,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,
             generate_intro_message(&config),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1029,13 +1127,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::ToolUse,
             "bash\n  {\"command\": \"ls\"}".to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1053,21 +1153,25 @@ mod tests {
                 ConversationRole::ToolUse,
                 "bash\n  {\"command\": \"ls\"}".to_string(),
                 1,
+                String::new(),
             ),
             ConversationEntry::new_indexed(
                 ConversationRole::ToolResult,
                 "file1.txt\nfile2.txt".to_string(),
                 1,
+                String::new(),
             ),
             ConversationEntry::new_indexed(
                 ConversationRole::ToolUse,
                 "bash\n  {\"command\": \"pwd\"}".to_string(),
                 2,
+                String::new(),
             ),
             ConversationEntry::new_indexed(
                 ConversationRole::ToolResult,
                 "/home/user".to_string(),
                 2,
+                String::new(),
             ),
         ];
         let backend = ratatui::backend::TestBackend::new(60, 20);
@@ -1075,7 +1179,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1097,7 +1202,11 @@ mod tests {
 
     #[test]
     fn cached_line_count_matches_paragraph_line_count() {
-        let mut entry = ConversationEntry::new(ConversationRole::User, "hello world".to_string());
+        let mut entry = ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+            String::new(),
+        );
         let count = entry.wrapped_line_count(58);
         let paragraph = Paragraph::new(entry.lines().to_vec()).wrap(Wrap { trim: false });
         let expected = paragraph.line_count(58) as u16;
@@ -1106,7 +1215,11 @@ mod tests {
 
     #[test]
     fn cached_line_count_is_reused_for_same_width() {
-        let mut entry = ConversationEntry::new(ConversationRole::User, "hello world".to_string());
+        let mut entry = ConversationEntry::new(
+            ConversationRole::User,
+            "hello world".to_string(),
+            String::new(),
+        );
         let count1 = entry.wrapped_line_count(58);
         let count2 = entry.wrapped_line_count(58);
         assert_eq!(count1, count2);
@@ -1118,6 +1231,7 @@ mod tests {
         let mut entry = ConversationEntry::new(
             ConversationRole::User,
             "a longer message that wraps differently at different widths".to_string(),
+            String::new(),
         );
         let wide = entry.wrapped_line_count(80);
         let narrow = entry.wrapped_line_count(10);
@@ -1127,14 +1241,21 @@ mod tests {
     #[test]
     fn windowed_render_skips_entries_above_viewport() {
         let mut entries: Vec<ConversationEntry> = (0..50)
-            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .map(|i| {
+                ConversationEntry::new(
+                    ConversationRole::User,
+                    format!("message {i}"),
+                    String::new(),
+                )
+            })
             .collect();
         let backend = ratatui::backend::TestBackend::new(60, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 10);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 8);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 8, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1145,14 +1266,21 @@ mod tests {
     #[test]
     fn windowed_render_with_scroll_offset() {
         let mut entries: Vec<ConversationEntry> = (0..20)
-            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .map(|i| {
+                ConversationEntry::new(
+                    ConversationRole::User,
+                    format!("message {i}"),
+                    String::new(),
+                )
+            })
             .collect();
         let backend = ratatui::backend::TestBackend::new(60, 12);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, 12);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 20, 10);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 20, 10, "");
                 area_widget.render(frame, rect, 58);
             })
             .expect("draw");
@@ -1166,10 +1294,11 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             long_text,
+            String::new(),
         )];
         let viewport = 10u16;
         let text_width = 30u16;
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let max = area.max_scroll(text_width);
 
         let paragraph = Paragraph::new(entries[0].lines().to_vec()).wrap(Wrap { trim: false });
@@ -1187,6 +1316,7 @@ mod tests {
             entries.push(ConversationEntry::new(
                 ConversationRole::User,
                 format!("User message {i} with some extra text to test wrapping behavior"),
+                String::new(),
             ));
             entries.push(ConversationEntry::new(
                 ConversationRole::Assistant,
@@ -1194,10 +1324,11 @@ mod tests {
                     "Assistant response {i}: {}",
                     "detailed explanation ".repeat(5)
                 ),
+                String::new(),
             ));
         }
 
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let max = area.max_scroll(text_width);
 
         let all_lines: Vec<Line<'static>> =
@@ -1220,10 +1351,11 @@ mod tests {
             entries.push(ConversationEntry::new(
                 ConversationRole::User,
                 format!("message {i}"),
+                String::new(),
             ));
         }
 
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let max = area.max_scroll(text_width);
 
         let backend = ratatui::backend::TestBackend::new(60, viewport + 2);
@@ -1232,7 +1364,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                 let mut scrolled_area =
-                    ConversationArea::new(&mut entries, false, None, "", max, viewport);
+                    ConversationArea::new(&mut entries, false, None, "", max, viewport, "");
                 scrolled_area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1253,6 +1385,7 @@ mod tests {
             entries.push(ConversationEntry::new(
                 ConversationRole::User,
                 format!("message {i}"),
+                String::new(),
             ));
         }
 
@@ -1261,7 +1394,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
-                let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+                let mut area =
+                    ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
                 area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1284,9 +1418,10 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             long_text,
+            String::new(),
         )];
 
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let max = area.max_scroll(text_width);
         assert!(max > 0, "should have scrollable content");
 
@@ -1300,7 +1435,7 @@ mod tests {
                 .draw(|frame| {
                     let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
                     let mut area =
-                        ConversationArea::new(&mut entries, false, None, "", scroll, viewport);
+                        ConversationArea::new(&mut entries, false, None, "", scroll, viewport, "");
                     area.render(frame, rect, text_width);
                 })
                 .expect("draw");
@@ -1334,11 +1469,17 @@ mod tests {
         // Create entries whose total lines *almost* fill the viewport, so the
         // streaming response straddles the boundary.
         let mut entries: Vec<ConversationEntry> = (0..3)
-            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .map(|i| {
+                ConversationEntry::new(
+                    ConversationRole::User,
+                    format!("message {i}"),
+                    String::new(),
+                )
+            })
             .collect();
 
         // Verify entries exist so the boundary scenario is meaningful.
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let entry_only_max = area.max_scroll(text_width);
         assert!(
             entry_only_max == 0,
@@ -1360,7 +1501,7 @@ mod tests {
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, text_width + 2, viewport + 2);
                 let mut area =
-                    ConversationArea::new(&mut entries, false, None, &streaming, 0, viewport);
+                    ConversationArea::new(&mut entries, false, None, &streaming, 0, viewport, "");
                 area.render(frame, rect, text_width);
             })
             .expect("draw");
@@ -1387,6 +1528,7 @@ mod tests {
                     &streaming,
                     scroll_up_amount,
                     viewport,
+                    "",
                 );
                 area.render(frame, rect, text_width);
             })
@@ -1412,11 +1554,15 @@ mod tests {
         let viewport = 8u16;
         let long_text = "word ".repeat(200);
         let mut entries = vec![
-            ConversationEntry::new(ConversationRole::Assistant, long_text),
-            ConversationEntry::new(ConversationRole::User, "final message".to_string()),
+            ConversationEntry::new(ConversationRole::Assistant, long_text, String::new()),
+            ConversationEntry::new(
+                ConversationRole::User,
+                "final message".to_string(),
+                String::new(),
+            ),
         ];
 
-        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport);
+        let mut area = ConversationArea::new(&mut entries, false, None, "", 0, viewport, "");
         let max = area.max_scroll(text_width);
         assert!(
             max > viewport,
@@ -1434,7 +1580,7 @@ mod tests {
                 .draw(|frame| {
                     let rect = ratatui::layout::Rect::new(0, 0, 60, viewport + 2);
                     let mut area =
-                        ConversationArea::new(entries, false, None, "", scroll, viewport);
+                        ConversationArea::new(entries, false, None, "", scroll, viewport, "");
                     area.render(frame, rect, text_width);
                 })
                 .expect("draw");
@@ -1457,13 +1603,15 @@ mod tests {
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Assistant,
             table.to_string(),
+            String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(40, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
         terminal
             .draw(|frame| {
                 let rect = ratatui::layout::Rect::new(0, 0, 40, 20);
-                let mut area_widget = ConversationArea::new(&mut entries, false, None, "", 0, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
                 area_widget.render(frame, rect, 38);
             })
             .expect("draw");
@@ -1480,7 +1628,11 @@ mod tests {
         let table = "| Column One | Column Two | Column Three | Column Four |\n\
                      |------------|------------|--------------|-------------|\n\
                      | Long value here | Another long value | Yet another long value | Final long value |";
-        let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
+        let mut entry = ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+            String::new(),
+        );
         let wide_count = entry.wrapped_line_count(80);
         let wide_render: String = entry
             .lines()
@@ -1526,7 +1678,11 @@ mod tests {
         let table = "| Column One | Column Two | Column Three | Column Four |\n\
                      |------------|------------|--------------|-------------|\n\
                      | Long value here | Another long value | Yet another long value | Final long value |";
-        let mut entry = ConversationEntry::new(ConversationRole::Assistant, table.to_string());
+        let mut entry = ConversationEntry::new(
+            ConversationRole::Assistant,
+            table.to_string(),
+            String::new(),
+        );
         let wide_count = entry.wrapped_line_count(80);
         let lines_at_80 = entry.lines().len();
         let render_at_80: String = entry
@@ -1637,7 +1793,7 @@ mod tests {
 
     #[test]
     fn thinking_indicator_lines_with_preview() {
-        let lines = thinking_indicator_lines(Some("preview text"), 80);
+        let lines = thinking_indicator_lines(Some("preview text"), 80, "");
         assert_eq!(lines.len(), 3, "should have 3 lines with preview");
         let label_line = format!("{:?}", lines[0]);
         assert!(
@@ -1671,7 +1827,7 @@ mod tests {
 
     #[test]
     fn thinking_indicator_lines_without_preview() {
-        let lines = thinking_indicator_lines(None, 80);
+        let lines = thinking_indicator_lines(None, 80, "");
         assert_eq!(lines.len(), 2, "should have 2 lines without preview");
         let label_line = format!("{:?}", lines[0]);
         assert!(
@@ -1686,10 +1842,10 @@ mod tests {
 
     #[test]
     fn thinking_indicator_lines_empty_preview() {
-        let lines = thinking_indicator_lines(Some(""), 80);
+        let lines = thinking_indicator_lines(Some(""), 80, "");
         assert_eq!(lines.len(), 2, "empty preview should fall back to 2 lines");
 
-        let lines = thinking_indicator_lines(Some("   "), 80);
+        let lines = thinking_indicator_lines(Some("   "), 80, "");
         assert_eq!(
             lines.len(),
             2,
@@ -1712,6 +1868,7 @@ mod tests {
                     "",
                     0,
                     18,
+                    "",
                 );
                 area.render(frame, rect, 56);
             })
@@ -1723,14 +1880,20 @@ mod tests {
     #[test]
     fn max_scroll_includes_thinking_preview_line() {
         let mut entries: Vec<ConversationEntry> = (0..6)
-            .map(|i| ConversationEntry::new(ConversationRole::User, format!("message {i}")))
+            .map(|i| {
+                ConversationEntry::new(
+                    ConversationRole::User,
+                    format!("message {i}"),
+                    String::new(),
+                )
+            })
             .collect();
 
-        let mut area_no_preview = ConversationArea::new(&mut entries, true, None, "", 0, 10);
+        let mut area_no_preview = ConversationArea::new(&mut entries, true, None, "", 0, 10, "");
         let max_no_preview = area_no_preview.max_scroll(58);
 
         let mut area_with_preview =
-            ConversationArea::new(&mut entries, true, Some("test preview"), "", 0, 10);
+            ConversationArea::new(&mut entries, true, Some("test preview"), "", 0, 10, "");
         let max_with_preview = area_with_preview.max_scroll(58);
 
         assert_eq!(
