@@ -514,9 +514,6 @@ pub fn handle_agent_event(
     }
     match event {
         AgentEvent::TokenReceived(text) => {
-            if app.current_response.is_empty() {
-                app.streaming_timestamp = crate::timestamp::format_now_timestamp();
-            }
             app.current_response.push_str(&text);
             app.scroll_offset = 0;
         }
@@ -1059,6 +1056,7 @@ pub async fn submit_message(
     ));
 
     app.scroll_offset = 0;
+    app.streaming_timestamp = crate::timestamp::format_now_timestamp();
     app.set_state(AppState::Streaming);
 
     let (confirm_tx, confirm_rx) = fmpsc::unbounded::<ConfirmationResponse>();
