@@ -162,7 +162,7 @@ impl App {
             let timestamp = crate::timestamp::format_timestamp(message.created_at);
 
             // Re-derive per-turn 1-based indices for tool entries within each message.
-            let tool_count = message
+            let tool_block_count = message
                 .content
                 .iter()
                 .filter(|b| {
@@ -173,7 +173,7 @@ impl App {
                     )
                 })
                 .count();
-            let is_indexed = tool_count > 0;
+            let is_indexed = tool_block_count > 0;
             let mut tool_index: usize = 0;
 
             for block in &message.content {
