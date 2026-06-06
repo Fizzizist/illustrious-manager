@@ -178,13 +178,11 @@ impl App {
 
             for block in &message.content {
                 let entry = match block {
-                    crate::types::ContentBlock::Text(text) => {
-                        Some(ConversationEntry::new_with_timestamp(
-                            role.clone(),
-                            text.clone(),
-                            timestamp.clone(),
-                        ))
-                    }
+                    crate::types::ContentBlock::Text(text) => Some(ConversationEntry::new(
+                        role.clone(),
+                        text.clone(),
+                        timestamp.clone(),
+                    )),
                     crate::types::ContentBlock::ToolUse { name, input, .. } => {
                         tool_index += 1;
                         let idx = if is_indexed { Some(tool_index) } else { None };
@@ -206,30 +204,26 @@ impl App {
                             ConversationRole::ToolResult
                         };
                         let entry = if is_indexed && entry_role == ConversationRole::ToolResult {
-                            ConversationEntry::new_indexed_with_timestamp(
+                            ConversationEntry::new_indexed(
                                 entry_role,
                                 content.clone(),
                                 tool_index,
                                 timestamp.clone(),
                             )
                         } else {
-                            ConversationEntry::new_with_timestamp(
-                                entry_role,
-                                content.clone(),
-                                timestamp.clone(),
-                            )
+                            ConversationEntry::new(entry_role, content.clone(), timestamp.clone())
                         };
                         Some(entry)
                     }
                     crate::types::ContentBlock::Thinking { text, .. } => {
-                        Some(ConversationEntry::new_with_timestamp(
+                        Some(ConversationEntry::new(
                             ConversationRole::Thinking,
                             text.clone(),
                             timestamp.clone(),
                         ))
                     }
                     crate::types::ContentBlock::RedactedThinking { .. } => {
-                        Some(ConversationEntry::new_with_timestamp(
+                        Some(ConversationEntry::new(
                             ConversationRole::Thinking,
                             "[redacted thinking]".to_string(),
                             timestamp.clone(),
@@ -244,12 +238,11 @@ impl App {
     }
 
     pub fn set_intro_message(&mut self, message: String) {
-        self.conversation
-            .push(ConversationEntry::new_with_timestamp(
-                ConversationRole::Info,
-                message,
-                crate::timestamp::format_now_timestamp(),
-            ));
+        self.conversation.push(ConversationEntry::new(
+            ConversationRole::Info,
+            message,
+            crate::timestamp::format_now_timestamp(),
+        ));
     }
 
     pub fn input_text(&self) -> String {
@@ -308,7 +301,7 @@ impl App {
         match name {
             "edit_file" => {
                 if let Some(lines) = render_edit_file_diff(input, effective_width) {
-                    return ConversationEntry::new_with_lines_indexed_and_timestamp(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
@@ -319,7 +312,7 @@ impl App {
             }
             "write_file" => {
                 if let Some(lines) = render_write_file(input, effective_width) {
-                    return ConversationEntry::new_with_lines_indexed_and_timestamp(
+                    return ConversationEntry::new_with_lines_indexed(
                         ConversationRole::ToolUse,
                         content,
                         lines,
@@ -331,17 +324,15 @@ impl App {
             _ => {}
         }
         match index {
-            Some(i) => ConversationEntry::new_indexed_with_timestamp(
+            Some(i) => ConversationEntry::new_indexed(
                 ConversationRole::ToolUse,
                 content,
                 i,
                 timestamp.to_string(),
             ),
-            None => ConversationEntry::new_with_timestamp(
-                ConversationRole::ToolUse,
-                content,
-                timestamp.to_string(),
-            ),
+            None => {
+                ConversationEntry::new(ConversationRole::ToolUse, content, timestamp.to_string())
+            }
         }
     }
 
@@ -531,13 +522,13 @@ pub fn handle_agent_event(
         }
         AgentEvent::ResponseComplete(full) => {
             if !app.current_thinking.is_empty() {
-                app.conversation.push(ConversationEntry::new_with_timestamp(
+                app.conversation.push(ConversationEntry::new(
                     ConversationRole::Thinking,
                     std::mem::take(&mut app.current_thinking),
                     app.streaming_timestamp.clone(),
                 ));
             }
-            app.conversation.push(ConversationEntry::new_with_timestamp(
+            app.conversation.push(ConversationEntry::new(
                 ConversationRole::Assistant,
                 full,
                 app.streaming_timestamp.clone(),
@@ -552,7 +543,7 @@ pub fn handle_agent_event(
             app.git_branch = status_line::detect_git_branch();
         }
         AgentEvent::Error(msg) => {
-            app.conversation.push(ConversationEntry::new_with_timestamp(
+            app.conversation.push(ConversationEntry::new(
                 ConversationRole::Error,
                 msg,
                 crate::timestamp::format_now_timestamp(),
@@ -570,7 +561,7 @@ pub fn handle_agent_event(
             name, input, index, ..
         } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry::new_with_timestamp(
+                app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
                     app.streaming_timestamp.clone(),
@@ -605,18 +596,14 @@ pub fn handle_agent_event(
                 Err(_) => content,
             };
             let entry = if role == ConversationRole::ToolResult {
-                ConversationEntry::new_indexed_with_timestamp(
+                ConversationEntry::new_indexed(
                     role,
                     display,
                     index,
                     app.streaming_timestamp.clone(),
                 )
             } else {
-                ConversationEntry::new_with_timestamp(
-                    role,
-                    display,
-                    app.streaming_timestamp.clone(),
-                )
+                ConversationEntry::new(role, display, app.streaming_timestamp.clone())
             };
             app.conversation.push(entry);
             app.scroll_offset = 0;
@@ -625,7 +612,7 @@ pub fn handle_agent_event(
             name, input, index, ..
         } => {
             if !app.current_response.is_empty() {
-                app.conversation.push(ConversationEntry::new_with_timestamp(
+                app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
                     std::mem::take(&mut app.current_response),
                     app.streaming_timestamp.clone(),
@@ -651,13 +638,13 @@ pub fn handle_agent_event(
         }
         AgentEvent::Interrupted { partial_text } => {
             if !partial_text.is_empty() {
-                app.conversation.push(ConversationEntry::new_with_timestamp(
+                app.conversation.push(ConversationEntry::new(
                     ConversationRole::Assistant,
                     format!("{partial_text}\n*(interrupted)*"),
                     app.streaming_timestamp.clone(),
                 ));
             } else {
-                app.conversation.push(ConversationEntry::new_with_timestamp(
+                app.conversation.push(ConversationEntry::new(
                     ConversationRole::Info,
                     "*(interrupted)*".to_string(),
                     crate::timestamp::format_now_timestamp(),
@@ -765,7 +752,7 @@ async fn run_app(
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
                     if *is_error {
                         agent.reset_auto_compact_flag();
-                        app.conversation.push(ConversationEntry::new_with_timestamp(
+                        app.conversation.push(ConversationEntry::new(
                             ConversationRole::Error,
                             summary.clone(),
                             crate::timestamp::format_now_timestamp(),
@@ -782,7 +769,7 @@ async fn run_app(
                                 app.load_history(&history);
                             }
                             Err(e) => {
-                                app.conversation.push(ConversationEntry::new_with_timestamp(
+                                app.conversation.push(ConversationEntry::new(
                                     ConversationRole::Error,
                                     format!("Failed to reload history after compaction: {e}"),
                                     crate::timestamp::format_now_timestamp(),
@@ -794,7 +781,7 @@ async fn run_app(
                     app.scroll_offset = 0;
                     app.compaction_task = None;
                 } else if let AgentEvent::AutoCompactTriggered { current_tokens, threshold } = &agent_event {
-                    app.conversation.push(ConversationEntry::new_with_timestamp(
+                    app.conversation.push(ConversationEntry::new(
                         ConversationRole::Info,
                         format!(
                             "Auto-compact triggered: context ({} tokens) exceeded threshold ({} tokens)",
@@ -888,7 +875,7 @@ async fn run_app(
                                         }
                                         // Checkpoint current session WAL before switching
                                         if let Err(e) = agent.checkpoint_session().await {
-                                            app.conversation.push(ConversationEntry::new_with_timestamp(
+                                            app.conversation.push(ConversationEntry::new(
                                                 ConversationRole::Error,
                                                 format!("Failed to checkpoint session: {e}"),
                                                 crate::timestamp::format_now_timestamp(),
@@ -896,7 +883,7 @@ async fn run_app(
                                         }
                                         // Clean up current session if empty
                                         if let Err(e) = agent.cleanup_empty_session().await {
-                                            app.conversation.push(ConversationEntry::new_with_timestamp(
+                                            app.conversation.push(ConversationEntry::new(
                                                 ConversationRole::Error,
                                                 format!("Failed to clean up empty session: {e}"),
                                                 crate::timestamp::format_now_timestamp(),
@@ -920,7 +907,7 @@ async fn run_app(
                                                         agent.load_session(session).await;
                                                     }
                                                     Err(e) => {
-                                                        app.conversation.push(ConversationEntry::new_with_timestamp(
+                                                        app.conversation.push(ConversationEntry::new(
                                                             ConversationRole::Error,
                                                             format!("Failed to load session history: {e}"),
                                                             crate::timestamp::format_now_timestamp(),
@@ -929,7 +916,7 @@ async fn run_app(
                                                 }
                                             }
                                             Err(e) => {
-                                                app.conversation.push(ConversationEntry::new_with_timestamp(
+                                                app.conversation.push(ConversationEntry::new(
                                                     ConversationRole::Error,
                                                     format!("Failed to open session: {e}"),
                                                     crate::timestamp::format_now_timestamp(),
@@ -1000,7 +987,7 @@ async fn run_app(
                                 if sent {
                                     app.set_state(AppState::Streaming);
                                 } else {
-                                    app.conversation.push(ConversationEntry::new_with_timestamp(
+                                    app.conversation.push(ConversationEntry::new(
                                         ConversationRole::Error,
                                         "Confirmation channel closed unexpectedly.".to_string(),
                                         crate::timestamp::format_now_timestamp(),
@@ -1065,7 +1052,7 @@ pub async fn submit_message(
     let input = app.input_text();
     app.input.clear();
 
-    app.conversation.push(ConversationEntry::new_with_timestamp(
+    app.conversation.push(ConversationEntry::new(
         ConversationRole::User,
         input.clone(),
         crate::timestamp::format_now_timestamp(),
@@ -1122,6 +1109,7 @@ mod tests {
             app.conversation.push(ConversationEntry::new(
                 ConversationRole::User,
                 format!("line {i}"),
+                String::new(),
             ));
         }
         app
@@ -1144,6 +1132,7 @@ mod tests {
             app.conversation.push(ConversationEntry::new(
                 ConversationRole::User,
                 format!("line {i}"),
+                String::new(),
             ));
         }
         assert_eq!(app.text_width, 0);
@@ -2142,6 +2131,7 @@ mod tests {
         app.conversation.push(ConversationEntry::new(
             ConversationRole::User,
             "old message".to_string(),
+            String::new(),
         ));
         app.scroll_offset = 10;
 
@@ -3029,6 +3019,7 @@ mod tests {
             ConversationRole::ToolUse,
             "**bash**\n```sh\necho hi\n```".to_string(),
             1,
+            String::new(),
         ));
 
         let backend = ratatui::backend::TestBackend::new(60, 20);
