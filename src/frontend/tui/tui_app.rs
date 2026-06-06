@@ -75,6 +75,7 @@ pub struct App {
     /// JoinHandle for the in-flight compaction task, if any.
     /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
+    pub activity_start: Option<std::time::Instant>,
     tools: std::sync::Arc<ToolRegistry>,
 }
 
@@ -111,6 +112,12 @@ impl App {
                 self.pending_g = false;
             }
         }
+        self.activity_start = match &self.state {
+            AppState::Streaming | AppState::RunningBash | AppState::Compacting => {
+                Some(std::time::Instant::now())
+            }
+            _ => None,
+        };
     }
 
     pub fn new(tools: std::sync::Arc<ToolRegistry>) -> Self {
@@ -137,6 +144,7 @@ impl App {
             chat_mode: crate::types::ChatMode::default(),
             pending_g: false,
             compaction_task: None,
+            activity_start: None,
             tools,
         }
     }
@@ -394,6 +402,7 @@ impl App {
         self.tasks_picker = None;
         self.session_picker = None;
         self.pending_g = false;
+        self.activity_start = None;
     }
 }
 
@@ -739,6 +748,9 @@ async fn run_app(
         stream_task = Some(submit_message(&mut app, agent.clone(), &event_tx).await?);
     }
 
+    let mut tick_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+    tick_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     let mut terminal_events = EventStream::new();
 
     loop {
@@ -801,6 +813,12 @@ async fn run_app(
                     app.compaction_task = Some(compact_task);
                 } else {
                     handle_agent_event(&mut app, agent_event, logger.as_mut())?;
+                }
+            }
+            _ = tick_interval.tick() => {
+                if let Some(start) = app.activity_start {
+                    let elapsed = start.elapsed();
+                    app.input.set_elapsed_title(elapsed);
                 }
             }
             Some(Ok(terminal_event)) = terminal_events.next() => {
