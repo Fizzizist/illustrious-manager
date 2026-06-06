@@ -2730,10 +2730,15 @@ mod tests {
     fn reset_for_session_switch_clears_pending_g() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.pending_g = true;
+        app.activity_start = Some(std::time::Instant::now());
         app.reset_for_session_switch();
         assert!(
             !app.pending_g,
             "pending_g should be false after reset_for_session_switch"
+        );
+        assert!(
+            app.activity_start.is_none(),
+            "reset_for_session_switch should clear activity_start"
         );
     }
 
@@ -2794,6 +2799,10 @@ mod tests {
 
         app.set_state(AppState::Streaming);
         assert!(!app.pending_g, "Streaming state should clear pending_g");
+        assert!(
+            app.activity_start.is_some(),
+            "Streaming should set activity_start"
+        );
 
         app.pending_g = true;
         app.set_state(AppState::SessionPicker);
@@ -2817,6 +2826,35 @@ mod tests {
         app.pending_g = true;
         app.set_state(AppState::Compacting);
         assert!(!app.pending_g, "Compacting state should clear pending_g");
+        assert!(
+            app.activity_start.is_some(),
+            "Compacting should set activity_start"
+        );
+    }
+
+    #[test]
+    fn set_state_input_clears_activity_start() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        assert!(
+            app.activity_start.is_some(),
+            "Streaming should set activity_start"
+        );
+        app.set_state(AppState::Input);
+        assert!(
+            app.activity_start.is_none(),
+            "Input should clear activity_start"
+        );
+    }
+
+    #[test]
+    fn set_state_running_bash_sets_activity_start() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::RunningBash);
+        assert!(
+            app.activity_start.is_some(),
+            "RunningBash should set activity_start"
+        );
     }
 
     #[test]

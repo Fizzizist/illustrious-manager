@@ -660,6 +660,42 @@ mod tests {
     }
 
     #[test]
+    fn render_compacting_with_elapsed() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Compacting);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_compacting_with_elapsed", terminal.backend());
+    }
+
+    #[test]
+    fn render_running_bash_with_elapsed() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::RunningBash);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_running_bash_with_elapsed", terminal.backend());
+    }
+
+    #[test]
     fn set_mode_tool_confirmation_updates_title() {
         let mut input = InputArea::new();
         input.set_mode(InputMode::ToolConfirmation {
