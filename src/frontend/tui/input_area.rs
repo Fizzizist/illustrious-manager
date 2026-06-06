@@ -9,9 +9,6 @@ use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const VISUAL_TITLE: &str = " -- VISUAL -- ";
-const STREAMING_TITLE: &str = "Streaming... (Esc to interrupt)";
-const COMPACTING_TITLE: &str = "Compacting...";
-const RUNNING_BASH_TITLE: &str = "Running bash... (Esc to cancel)";
 const SESSIONS_TITLE: &str = " Sessions ";
 const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
@@ -280,29 +277,52 @@ impl<'a> InputArea<'a> {
         &self.mode
     }
 
-    fn apply_block(&mut self) {
-        let block = match &self.mode {
-            InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
-            InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
-            InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
-            InputMode::Streaming => Block::default()
-                .borders(Borders::ALL)
-                .title(STREAMING_TITLE),
-            InputMode::SessionPicker => {
-                Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
+    pub fn set_elapsed_title(&mut self, duration: std::time::Duration) {
+        let elapsed = crate::timestamp::format_elapsed(duration);
+        match &self.mode {
+            InputMode::Streaming => {
+                let title = format!("{elapsed} Streaming... (Esc to interrupt)");
+                self.textarea
+                    .set_block(Block::default().borders(Borders::ALL).title(title));
             }
-            InputMode::TasksPicker => Block::default().borders(Borders::ALL).title(TASKS_TITLE),
-            InputMode::Compacting => Block::default()
-                .borders(Borders::ALL)
-                .title(COMPACTING_TITLE),
-            InputMode::RunningBash => Block::default()
-                .borders(Borders::ALL)
-                .title(RUNNING_BASH_TITLE),
-            InputMode::ToolConfirmation { name, .. } => Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Allow '{name}'? [y/n]")),
-        };
-        self.textarea.set_block(block);
+            InputMode::Compacting => {
+                let title = format!("{elapsed} Compacting...");
+                self.textarea
+                    .set_block(Block::default().borders(Borders::ALL).title(title));
+            }
+            InputMode::RunningBash => {
+                let title = format!("{elapsed} Running bash... (Esc to cancel)");
+                self.textarea
+                    .set_block(Block::default().borders(Borders::ALL).title(title));
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_block(&mut self) {
+        match &self.mode {
+            InputMode::Streaming | InputMode::Compacting | InputMode::RunningBash => {
+                self.set_elapsed_title(std::time::Duration::ZERO);
+            }
+            _ => {
+                let block = match &self.mode {
+                    InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
+                    InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
+                    InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
+                    InputMode::SessionPicker => {
+                        Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
+                    }
+                    InputMode::TasksPicker => {
+                        Block::default().borders(Borders::ALL).title(TASKS_TITLE)
+                    }
+                    InputMode::ToolConfirmation { name, .. } => Block::default()
+                        .borders(Borders::ALL)
+                        .title(format!("Allow '{name}'? [y/n]")),
+                    _ => unreachable!(),
+                };
+                self.textarea.set_block(block);
+            }
+        }
     }
 
     pub fn height_for_width(&self, width: u16, available_height: u16) -> u16 {
@@ -617,6 +637,60 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_streaming", terminal.backend());
+    }
+
+    #[test]
+    fn render_streaming_with_elapsed() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Streaming);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_streaming_with_elapsed", terminal.backend());
+    }
+
+    #[test]
+    fn render_compacting_with_elapsed() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::Compacting);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_compacting_with_elapsed", terminal.backend());
+    }
+
+    #[test]
+    fn render_running_bash_with_elapsed() {
+        let mut input = InputArea::new();
+        input.set_mode(InputMode::RunningBash);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_running_bash_with_elapsed", terminal.backend());
     }
 
     #[test]

@@ -17,6 +17,18 @@ pub fn format_timestamp(unix_secs: f64) -> String {
     )
 }
 
+pub fn format_elapsed(duration: std::time::Duration) -> String {
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("[{hours}:{mins:02}:{secs:02}]")
+    } else {
+        format!("[{mins:02}:{secs:02}]")
+    }
+}
+
 pub fn now_timestamp() -> f64 {
     OffsetDateTime::now_utc().unix_timestamp() as f64
 }
@@ -58,5 +70,58 @@ mod tests {
     fn format_timestamp_negative_timestamp() {
         let result = format_timestamp(-1.0);
         assert!(result.starts_with('['), "should start with '[': {result}");
+    }
+
+    #[test]
+    fn format_elapsed_zero() {
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(0)), "[00:00]");
+    }
+
+    #[test]
+    fn format_elapsed_under_one_minute() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(59)),
+            "[00:59]"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_exactly_one_minute() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(60)),
+            "[01:00]"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_under_one_hour() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(3599)),
+            "[59:59]"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_exactly_one_hour() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(3600)),
+            "[1:00:00]"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_over_one_hour() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(5432)),
+            "[1:30:32]"
+        );
+    }
+
+    #[test]
+    fn format_elapsed_subsecond_truncated() {
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_millis(1500)),
+            "[00:01]"
+        );
     }
 }
