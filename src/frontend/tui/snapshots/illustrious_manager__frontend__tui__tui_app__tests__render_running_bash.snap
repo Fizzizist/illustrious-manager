@@ -1,15 +1,14 @@
 ---
 source: src/frontend/tui/tui_app.rs
-assertion_line: 3049
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
 "│[Tool(1)]:                                                │"
 "│  bash                                                    │"
 "│                                                          │"
-"│  ```sh                                                   │"
+"│  [sh]                                                    │"
 "│  echo hi                                                 │"
-"│  ```                                                     │"
+"│                                                          │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

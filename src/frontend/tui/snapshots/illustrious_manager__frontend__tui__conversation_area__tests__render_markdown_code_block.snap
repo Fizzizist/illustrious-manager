@@ -4,9 +4,9 @@ expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
 "│Assistant:                                                │"
-"│  ```rust                                                 │"
+"│  [rust]                                                  │"
 "│  fn main() {}                                            │"
-"│  ```                                                     │"
+"│                                                          │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

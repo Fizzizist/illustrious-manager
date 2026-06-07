@@ -3,7 +3,7 @@ pub mod conversation_area;
 pub mod diff;
 pub mod input_area;
 pub mod list_picker;
-pub mod markdown_tables;
+pub mod markdown_theme;
 pub mod session_picker;
 pub mod status_line;
 pub mod tasks_picker;
