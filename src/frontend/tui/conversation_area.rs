@@ -8,11 +8,15 @@ use the_other_tui_markdown::{Renderer, RendererBuilder, into_text_with_renderer}
 
 use super::markdown_theme::monokai_theme;
 use super::syntect_highlight::highlight_code_block;
+use super::table_renderer::render_table;
+
+const TABLE_MAX_WIDTH: usize = 56;
 
 static RENDERER: LazyLock<Renderer> = LazyLock::new(|| {
     RendererBuilder::new()
         .with_theme(monokai_theme())
         .with_code_block(highlight_code_block)
+        .with_table(|header, rows, theme| render_table(header, rows, theme, TABLE_MAX_WIDTH))
         .build()
 });
 

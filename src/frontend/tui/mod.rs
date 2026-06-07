@@ -7,6 +7,7 @@ pub mod markdown_theme;
 pub mod session_picker;
 pub mod status_line;
 pub mod syntect_highlight;
+pub mod table_renderer;
 pub mod tasks_picker;
 mod tui_app;
 

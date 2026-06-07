@@ -23,7 +23,7 @@ serde_json = "1.0.149"
 similar = "3.1.0"
 syntect = { version = "5.3.0", features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 syntect-assets = "0.23.6"
-the-other-tui-markdown = "0.1.0"
+the-other-tui-markdown = { git = "https://github.com/Fizzizist/the-other-tui-markdown.git", branch = "main", version = "0.1.0" }
 time = { version = "0.3.47", features = ["local-offset", "formatting"] }
 tokio = { version = "1.50.0", features = ["full"] }
 tokio-util = "0.7.18"
