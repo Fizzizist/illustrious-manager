@@ -26,16 +26,17 @@ pub fn render_table(
 
     let mut out = Vec::new();
 
-    // Header row
-    out.push(make_row(header, ncols, &col_widths, theme.table_header));
+    // Header row (may wrap if header text exceeds column width)
+    for line in wrap_row(header, ncols, &col_widths, theme.table_header) {
+        out.push(line);
+    }
 
     // Separator row
     out.push(make_separator(&col_widths, theme.table_separator));
 
     // Body rows
     for row in rows {
-        let wrapped = wrap_row(row, ncols, &col_widths);
-        for line in wrapped {
+        for line in wrap_row(row, ncols, &col_widths, theme.table_cell) {
             out.push(line);
         }
     }
@@ -94,19 +95,6 @@ fn compute_col_widths(
     widths
 }
 
-fn make_row(cells: &[String], ncols: usize, col_widths: &[usize], style: Style) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (i, width) in col_widths.iter().enumerate().take(ncols) {
-        if i > 0 {
-            spans.push(Span::styled(TABLE_SEP.to_string(), style));
-        }
-        let cell = cells.get(i).map(|s| s.as_str()).unwrap_or("");
-        let padded = pad_cell(cell, *width);
-        spans.push(Span::styled(padded, style));
-    }
-    Line::from(spans)
-}
-
 fn make_separator(col_widths: &[usize], style: Style) -> Line<'static> {
     let mut spans = Vec::new();
     for (i, w) in col_widths.iter().enumerate() {
@@ -118,7 +106,12 @@ fn make_separator(col_widths: &[usize], style: Style) -> Line<'static> {
     Line::from(spans)
 }
 
-fn wrap_row(row: &[String], ncols: usize, col_widths: &[usize]) -> Vec<Line<'static>> {
+fn wrap_row(
+    row: &[String],
+    ncols: usize,
+    col_widths: &[usize],
+    style: Style,
+) -> Vec<Line<'static>> {
     let wrapped_cells: Vec<Vec<String>> = (0..ncols)
         .map(|i| {
             let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
@@ -133,7 +126,7 @@ fn wrap_row(row: &[String], ncols: usize, col_widths: &[usize]) -> Vec<Line<'sta
         let mut spans = Vec::new();
         for (i, width) in col_widths.iter().enumerate().take(ncols) {
             if i > 0 {
-                spans.push(Span::raw(TABLE_SEP));
+                spans.push(Span::styled(TABLE_SEP.to_string(), style));
             }
             let text = wrapped_cells
                 .get(i)
@@ -141,7 +134,7 @@ fn wrap_row(row: &[String], ncols: usize, col_widths: &[usize]) -> Vec<Line<'sta
                 .map(|s| s.as_str())
                 .unwrap_or("");
             let padded = pad_cell(text, *width);
-            spans.push(Span::raw(padded));
+            spans.push(Span::styled(padded, style));
         }
         out.push(Line::from(spans));
     }
