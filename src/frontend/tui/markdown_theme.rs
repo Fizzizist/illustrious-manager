@@ -25,12 +25,16 @@ fn monokai_orange() -> Color {
     Color::Rgb(253, 151, 31)
 }
 
-fn monokai_comment() -> Color {
+pub fn monokai_comment() -> Color {
     Color::Rgb(117, 113, 94)
 }
 
 fn monokai_foreground() -> Color {
     Color::Rgb(248, 248, 242)
+}
+
+fn monokai_pale_purple() -> Color {
+    Color::Rgb(197, 174, 255)
 }
 
 pub fn monokai_theme() -> Theme {
@@ -59,7 +63,7 @@ pub fn monokai_theme() -> Theme {
         strikethrough: Style::new().add_modifier(Modifier::CROSSED_OUT),
         superscript: Style::new().add_modifier(Modifier::DIM),
         subscript: Style::new().add_modifier(Modifier::DIM),
-        inline_code: Style::new().fg(monokai_yellow()),
+        inline_code: Style::new().fg(monokai_pale_purple()),
         link: Style::new()
             .fg(monokai_blue())
             .add_modifier(Modifier::UNDERLINED),

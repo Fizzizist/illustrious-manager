@@ -6,13 +6,15 @@ use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
 use syntect_assets::assets::HighlightingAssets;
 
+use super::markdown_theme::monokai_comment;
+
 pub static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 pub static MONOKAI_EXTENDED: LazyLock<Theme> = LazyLock::new(|| {
     let assets = HighlightingAssets::from_binary();
     assets.get_theme("Monokai Extended Origin").clone()
 });
 
-fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
+pub fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
     Color::Rgb(c.r, c.g, c.b)
 }
 
@@ -33,7 +35,7 @@ pub fn highlight_code_block(lang: &str, content: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(Span::styled(
             format!("[{lang}]"),
             ratatui::style::Style::new()
-                .fg(Color::Rgb(117, 113, 94))
+                .fg(monokai_comment())
                 .add_modifier(ratatui::style::Modifier::ITALIC),
         )));
     }
@@ -149,6 +151,45 @@ mod tests {
         assert!(
             unique_colors.len() > 1,
             "syntax-highlighted Rust code should have more than one color"
+        );
+    }
+
+    #[test]
+    fn highlight_empty_content() {
+        let lines = highlight_code_block("rust", "");
+        assert!(
+            lines.len() <= 1,
+            "empty content should produce at most 1 line, got {} lines",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn highlight_blank_only_content() {
+        let lines = highlight_code_block("rust", "   \n   \n");
+        assert!(
+            !lines.is_empty(),
+            "blank-only content should produce at least 1 line"
+        );
+    }
+
+    #[test]
+    fn highlight_blank_lines_between_code() {
+        let content = "line1\n\nline3\n";
+        let lines = highlight_code_block("rust", content);
+        assert!(
+            lines.len() >= 3,
+            "should have at least 3 lines (label + 3 code lines), got {}",
+            lines.len()
+        );
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            text.contains("line1") && text.contains("line3"),
+            "should contain line1 and line3, got: {text}"
         );
     }
 }

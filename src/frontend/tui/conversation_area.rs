@@ -3,10 +3,18 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
-use the_other_tui_markdown::{RendererBuilder, into_text_with_renderer};
+use std::sync::LazyLock;
+use the_other_tui_markdown::{Renderer, RendererBuilder, into_text_with_renderer};
 
 use super::markdown_theme::monokai_theme;
 use super::syntect_highlight::highlight_code_block;
+
+static RENDERER: LazyLock<Renderer> = LazyLock::new(|| {
+    RendererBuilder::new()
+        .with_theme(monokai_theme())
+        .with_code_block(highlight_code_block)
+        .build()
+});
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
@@ -63,7 +71,7 @@ pub struct ConversationEntry {
 
 impl ConversationEntry {
     pub fn new(role: ConversationRole, content: String, timestamp: String) -> Self {
-        let cached_lines = render_entry_lines(&role, None, &content, 0, &timestamp);
+        let cached_lines = render_role_lines(&role, None, &content, true, &timestamp);
         Self {
             role,
             content,
@@ -82,7 +90,7 @@ impl ConversationEntry {
         index: usize,
         timestamp: String,
     ) -> Self {
-        let cached_lines = render_entry_lines(&role, Some(index), &content, 0, &timestamp);
+        let cached_lines = render_role_lines(&role, Some(index), &content, true, &timestamp);
         Self {
             role,
             content,
@@ -135,11 +143,11 @@ impl ConversationEntry {
 
     pub fn wrapped_line_count(&mut self, text_width: u16) -> u16 {
         if self.cached_lines_width != u16::MAX && self.cached_lines_width != text_width {
-            self.cached_lines = render_entry_lines(
+            self.cached_lines = render_role_lines(
                 &self.role,
                 self.tool_index,
                 &self.content,
-                text_width,
+                true,
                 &self.timestamp,
             );
             self.cached_lines_width = text_width;
@@ -183,12 +191,7 @@ fn render_role_lines(
         Style::default().fg(role.color()),
     )));
     let display_content = maybe_truncate(content, role);
-    let theme = monokai_theme();
-    let renderer = RendererBuilder::new()
-        .with_theme(theme)
-        .with_code_block(highlight_code_block)
-        .build();
-    let rendered = into_text_with_renderer(&display_content, &renderer);
+    let rendered = into_text_with_renderer(&display_content, &RENDERER);
     for line in rendered.lines {
         let mut prefixed = Line::from(Span::raw("  "));
         prefixed.spans.extend(
@@ -202,16 +205,6 @@ fn render_role_lines(
         lines.push(Line::from(""));
     }
     lines
-}
-
-fn render_entry_lines(
-    role: &ConversationRole,
-    index: Option<usize>,
-    content: &str,
-    _text_width: u16,
-    timestamp: &str,
-) -> Vec<Line<'static>> {
-    render_role_lines(role, index, content, true, timestamp)
 }
 
 fn render_current_response_lines(current_response: &str, timestamp: &str) -> Vec<Line<'static>> {
