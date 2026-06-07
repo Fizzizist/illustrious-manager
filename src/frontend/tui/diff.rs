@@ -2,17 +2,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
-use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::Theme;
-use syntect::parsing::SyntaxSet;
-use syntect_assets::assets::HighlightingAssets;
 
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static MONOKAI_EXTENDED: LazyLock<Theme> = LazyLock::new(|| {
-    let assets = HighlightingAssets::from_binary();
-    assets.get_theme("Monokai Extended Origin").clone()
-});
+use super::syntect_highlight::{MONOKAI_EXTENDED, SYNTAX_SET};
 
 /// Minimum digits reserved for each line-number column in the gutter.
 const MIN_LINE_NO_DIGITS: usize = 1;
@@ -144,8 +136,7 @@ pub fn build_file_diff_from_snapshots(path: &str, before: &str, after: &str) -> 
     }
 }
 
-/// Return the Monokai Extended theme used throughout this module.
-fn default_theme() -> &'static Theme {
+fn default_theme() -> &'static syntect::highlighting::Theme {
     &MONOKAI_EXTENDED
 }
 

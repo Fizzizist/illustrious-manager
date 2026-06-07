@@ -3,9 +3,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
-use the_other_tui_markdown::into_text_with_theme;
+use the_other_tui_markdown::{RendererBuilder, into_text_with_renderer};
 
 use super::markdown_theme::monokai_theme;
+use super::syntect_highlight::highlight_code_block;
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
 
@@ -183,7 +184,11 @@ fn render_role_lines(
     )));
     let display_content = maybe_truncate(content, role);
     let theme = monokai_theme();
-    let rendered = into_text_with_theme(&display_content, theme);
+    let renderer = RendererBuilder::new()
+        .with_theme(theme)
+        .with_code_block(highlight_code_block)
+        .build();
+    let rendered = into_text_with_renderer(&display_content, &renderer);
     for line in rendered.lines {
         let mut prefixed = Line::from(Span::raw("  "));
         prefixed.spans.extend(
