@@ -4,19 +4,23 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use std::borrow::Cow;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use the_other_tui_markdown::{Renderer, RendererBuilder, into_text_with_renderer};
 
 use super::markdown_theme::monokai_theme;
 use super::syntect_highlight::highlight_code_block;
 use super::table_renderer::render_table;
 
-const TABLE_MAX_WIDTH: usize = 56;
+static TABLE_WIDTH: AtomicUsize = AtomicUsize::new(56);
 
 static RENDERER: LazyLock<Renderer> = LazyLock::new(|| {
     RendererBuilder::new()
         .with_theme(monokai_theme())
         .with_code_block(highlight_code_block)
-        .with_table(|header, rows, theme| render_table(header, rows, theme, TABLE_MAX_WIDTH))
+        .with_table(|header, rows, theme| {
+            let width = TABLE_WIDTH.load(Ordering::Relaxed);
+            render_table(header, rows, theme, width)
+        })
         .build()
 });
 
@@ -367,6 +371,7 @@ impl<'a> ConversationArea<'a> {
     }
 
     pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
+        TABLE_WIDTH.store(text_width.saturating_sub(2) as usize, Ordering::Relaxed);
         let visible_height = area.height.saturating_sub(2);
 
         let entry_counts = self.compute_entry_counts(text_width);

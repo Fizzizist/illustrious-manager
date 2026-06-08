@@ -313,4 +313,24 @@ mod tests {
         let text: String = sep_line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains('┼'), "separator should contain ┼");
     }
+
+    #[test]
+    fn separator_and_data_alignment() {
+        let header = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let rows = vec![vec!["1".to_string(), "2".to_string(), "3".to_string()]];
+        let lines = render_table(&header, &rows, &test_theme(), 80);
+        let header_line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let sep_line: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let data_line: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            UnicodeWidthStr::width(header_line.as_str()),
+            UnicodeWidthStr::width(sep_line.as_str()),
+            "header and separator should have same width\nheader: {header_line}\nsep:    {sep_line}"
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(header_line.as_str()),
+            UnicodeWidthStr::width(data_line.as_str()),
+            "header and data should have same width\nheader: {header_line}\ndata:   {data_line}"
+        );
+    }
 }
