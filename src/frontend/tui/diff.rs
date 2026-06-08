@@ -2,17 +2,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
-use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::Theme;
-use syntect::parsing::SyntaxSet;
-use syntect_assets::assets::HighlightingAssets;
 
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static MONOKAI_EXTENDED: LazyLock<Theme> = LazyLock::new(|| {
-    let assets = HighlightingAssets::from_binary();
-    assets.get_theme("Monokai Extended Origin").clone()
-});
+use super::syntect_highlight::{MONOKAI_EXTENDED, SYNTAX_SET, syntect_to_ratatui_color};
 
 /// Minimum digits reserved for each line-number column in the gutter.
 const MIN_LINE_NO_DIGITS: usize = 1;
@@ -144,16 +136,6 @@ pub fn build_file_diff_from_snapshots(path: &str, before: &str, after: &str) -> 
     }
 }
 
-/// Return the Monokai Extended theme used throughout this module.
-fn default_theme() -> &'static Theme {
-    &MONOKAI_EXTENDED
-}
-
-/// Convert a syntect `Color` to a ratatui `Color`.
-fn syntect_to_ratatui_color(c: syntect::highlighting::Color) -> Color {
-    Color::Rgb(c.r, c.g, c.b)
-}
-
 /// Highlight a single line of code using syntect, returning ratatui `Span`s with the
 /// base_style's background preserved and foreground colours from the theme.
 ///
@@ -170,7 +152,7 @@ fn highlight_code_line(line: &str, path: &str, base_style: Style) -> Vec<Span<'s
         .flatten()
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let mut highlighter = HighlightLines::new(syntax, default_theme());
+    let mut highlighter = HighlightLines::new(syntax, &MONOKAI_EXTENDED);
 
     let line_with_newline = format!("{line}\n");
     let ranges = highlighter
@@ -452,7 +434,7 @@ pub fn render_write_file(input: &serde_json::Value, width: usize) -> Option<Vec<
         .flatten()
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-    let mut highlighter = HighlightLines::new(syntax, default_theme());
+    let mut highlighter = HighlightLines::new(syntax, &MONOKAI_EXTENDED);
 
     let max_line_no = content.lines().count().max(1);
     let digits = max_line_no.to_string().len().max(MIN_LINE_NO_DIGITS);

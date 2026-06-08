@@ -4,15 +4,15 @@ expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
 "│Assistant:                                                │"
-"│  ```                                                     │"
-"│  ┌─────────┬──────┐                                      │"
-"│  │ 言語    │ 記号 │                                      │" Hidden by multi-width symbols: [(6, " "), (8, " "), (16, " "), (18, " ")]
-"│  ╞═════════╪══════╡                                      │"
-"│  │ 🦀 Rust │ ✓    │                                      │" Hidden by multi-width symbols: [(6, " ")]
-"│  ├─────────┼──────┤                                      │"
-"│  │ Python  │ ✗    │                                      │"
-"│  └─────────┴──────┘                                      │"
-"│  ```                                                     │"
+"│  言語    │ 記号                                          │" Hidden by multi-width symbols: [(4, " "), (6, " "), (14, " "), (16, " ")]
+"│  ────────┼─────                                          │"
+"│  🦀 Rust │ ✓                                             │" Hidden by multi-width symbols: [(4, " ")]
+"│  Python  │ ✗                                             │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"
