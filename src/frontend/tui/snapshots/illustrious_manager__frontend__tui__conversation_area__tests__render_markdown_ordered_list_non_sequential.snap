@@ -1,0 +1,25 @@
+---
+source: src/frontend/tui/conversation_area.rs
+assertion_line: 959
+expression: terminal.backend()
+---
+"┌Conversation──────────────────────────────────────────────┐"
+"│Assistant:                                                │"
+"│  2. first                                                │"
+"│  4. second                                               │"
+"│  8. third                                                │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

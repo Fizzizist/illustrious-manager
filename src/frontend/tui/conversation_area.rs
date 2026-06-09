@@ -939,6 +939,54 @@ mod tests {
     }
 
     #[test]
+    fn render_markdown_ordered_list_non_sequential() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            "2. first\n4. second\n8. third".to_string(),
+            String::new(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_ordered_list_non_sequential",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn render_markdown_ordered_list_sequential() {
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            "1. alpha\n2. beta\n3. gamma".to_string(),
+            String::new(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!(
+            "render_markdown_ordered_list_sequential",
+            terminal.backend()
+        );
+    }
+
+    #[test]
     fn render_markdown_table() {
         let table = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
         let mut entries = vec![ConversationEntry::new(
