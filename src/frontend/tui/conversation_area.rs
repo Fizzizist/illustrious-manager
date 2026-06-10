@@ -987,6 +987,57 @@ mod tests {
     }
 
     #[test]
+    fn render_ordered_list_as_only_entry() {
+        // Simulates a brand new conversation where the first and only message
+        // is an ordered list (as user or assistant)
+        let mut entries = vec![ConversationEntry::new(
+            ConversationRole::Assistant,
+            "1. test\n2. test\n3. test".to_string(),
+            String::new(),
+        )];
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let rect = ratatui::layout::Rect::new(0, 0, 60, 20);
+                let mut area_widget =
+                    ConversationArea::new(&mut entries, false, None, "", 0, 20, "");
+                area_widget.render(frame, rect, 58);
+            })
+            .expect("draw");
+
+        let rendered = format!("{:?}", terminal.backend());
+        // Each item must appear on its own line, not all on one line
+        assert!(
+            rendered.contains("1. test"),
+            "should contain '1. test', got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("2. test"),
+            "should contain '2. test', got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("3. test"),
+            "should contain '3. test', got:\n{rendered}"
+        );
+        // Verify items are on different lines by checking line structure
+        let entry_lines = entries[0].lines();
+        // First line is the label ("Assistant:"), then list items
+        assert!(
+            entry_lines.len() >= 4,
+            "ordered list entry should have label + 3 items + blank, got {}",
+            entry_lines.len()
+        );
+        for (i, line) in entry_lines.iter().enumerate().skip(1).take(3) {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.trim_start().starts_with(|c: char| c.is_ascii_digit()),
+                "line {i} should start with a digit, got: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn render_markdown_table() {
         let table = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |";
         let mut entries = vec![ConversationEntry::new(
