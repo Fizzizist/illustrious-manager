@@ -4302,7 +4302,7 @@ dependencies = [
 [[package]]
 name = "the-other-tui-markdown"
 version = "0.1.0"
-source = "git+https://github.com/robot-fizzizist/the-other-tui-markdown.git?branch=feature%2Fordered-list-preserve-numbers#49d0388e1306b42dd96fd3a3d4def1d7102061ab"
+source = "git+https://github.com/robot-fizzizist/the-other-tui-markdown.git?branch=feature%2Fordered-list-preserve-numbers#34b57e3b44c05c67620945cfab341aa54eb04884"
 dependencies = [
  "pulldown-cmark",
  "ratatui-core",

@@ -1,11 +1,12 @@
 ---
 source: src/frontend/tui/conversation_area.rs
+assertion_line: 1235
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
 "│[Tool]:                                                   │"
-"│  bash {"command": "ls"}                                  │"
-"│                                                          │"
+"│  bash                                                    │"
+"│  {"command": "ls"}                                       │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"
