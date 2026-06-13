@@ -7,6 +7,7 @@ use std::io::Write;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
@@ -29,6 +30,7 @@ impl LlmBackend for NullBackend {
         &self,
         _messages: &[Message],
         _config: &RequestConfig,
+        _cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let stream = futures::stream::iter(vec![Ok(StreamEvent::Done)]);
         Ok(Box::pin(stream))

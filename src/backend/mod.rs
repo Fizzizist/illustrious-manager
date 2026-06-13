@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
@@ -17,6 +18,7 @@ pub trait LlmBackend: Send + Sync {
         &self,
         messages: &[Message],
         config: &RequestConfig,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>>;
 }
 
@@ -146,13 +148,14 @@ impl BackendFactory {
 #[cfg(test)]
 mod tests {
     use crate::config::CompactionConfig;
+    use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::{StreamExt, stream};
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     use super::LlmBackend;
-    use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
     struct EchoBackend;
 
@@ -162,6 +165,7 @@ mod tests {
             &self,
             _messages: &[Message],
             _config: &RequestConfig,
+            _cancel_token: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             let events = vec![
                 Ok(StreamEvent::TextDelta("hello".to_string())),
@@ -183,7 +187,7 @@ mod tests {
         };
 
         let mut stream = backend
-            .send_message(&messages, &config)
+            .send_message(&messages, &config, None)
             .await
             .expect("send_message should succeed");
 

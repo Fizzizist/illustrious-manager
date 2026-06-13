@@ -808,6 +808,7 @@ mod tests {
             &self,
             _: &[crate::types::Message],
             _: &crate::types::RequestConfig,
+            _: Option<tokio_util::sync::CancellationToken>,
         ) -> anyhow::Result<crate::types::BoxStream<anyhow::Result<crate::types::StreamEvent>>>
         {
             Ok(Box::pin(futures::stream::empty()))

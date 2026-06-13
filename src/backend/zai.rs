@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::CancellationToken;
 use super::LlmBackend;
 use super::openai_compat::{OpenAiCompatBackend, OpenAiCompatConfig, ReasoningStyle};
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
@@ -35,8 +36,9 @@ impl LlmBackend for ZaiBackend {
         &self,
         messages: &[Message],
         config: &RequestConfig,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
-        self.0.send_message(messages, config).await
+        self.0.send_message(messages, config, cancel_token).await
     }
 }
 

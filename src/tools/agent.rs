@@ -387,6 +387,7 @@ mod tests {
                 &self,
                 _: &[Message],
                 _: &RequestConfig,
+                _: Option<tokio_util::sync::CancellationToken>,
             ) -> Result<BoxStream<Result<StreamEvent>>> {
                 Ok(Box::pin(stream::iter(vec![
                     Ok(StreamEvent::TextDelta("sub-agent done".to_string())),

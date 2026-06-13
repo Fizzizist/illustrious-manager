@@ -170,6 +170,7 @@ async fn user_message_appears_immediately() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
     use tokio::time::Duration;
+    use tokio_util::sync::CancellationToken;
 
     struct SlowBackend {
         delay_ms: u64,
@@ -182,6 +183,7 @@ async fn user_message_appears_immediately() {
             &self,
             _messages: &[Message],
             _config: &RequestConfig,
+            _cancel_token: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;

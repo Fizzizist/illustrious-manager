@@ -419,6 +419,7 @@ mod tests {
     use crate::types::AgentEvent;
     use futures::channel::mpsc;
     use futures::stream;
+    use tokio_util::sync::CancellationToken;
 
     fn make_confirm_channel() -> (
         mpsc::UnboundedSender<ConfirmationResponse>,
@@ -820,6 +821,7 @@ mod tests {
                 &self,
                 _: &[crate::types::Message],
                 _: &RequestConfig,
+                _: Option<CancellationToken>,
             ) -> Result<BoxStream<Result<StreamEvent>>> {
                 let mut lock = self.responses.lock().await;
                 let events: Vec<AgentEvent> = if lock.is_empty() {

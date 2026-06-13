@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use reqwest::Client;
 
+use super::CancellationToken;
 use super::LlmBackend;
 use super::ndjson::create_ndjson_event_stream;
 use crate::config::OllamaConfig;
@@ -268,6 +269,7 @@ impl LlmBackend for OllamaBackend {
         &self,
         messages: &[Message],
         config: &RequestConfig,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config);
 
@@ -297,8 +299,9 @@ impl LlmBackend for OllamaBackend {
 
         let byte_stream = response.bytes_stream();
         let mut parser = OllamaParser::new();
-        let event_stream =
-            create_ndjson_event_stream(byte_stream, move |line| parser.parse_chunk(line));
+        let event_stream = create_ndjson_event_stream(byte_stream, cancel_token, move |line| {
+            parser.parse_chunk(line)
+        });
         Ok(event_stream)
     }
 }

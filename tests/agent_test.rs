@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 
 use illustrious_manager::agent::Agent;
 use illustrious_manager::backend::LlmBackend;
@@ -37,6 +38,7 @@ impl LlmBackend for MockBackend {
         &self,
         _messages: &[Message],
         _config: &RequestConfig,
+        _cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let idx = self
             .call_count
@@ -130,6 +132,7 @@ async fn test_agent_backend_error_emits_error_event() {
             &self,
             _messages: &[Message],
             _config: &RequestConfig,
+            _cancel_token: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             let stream = futures::stream::iter(vec![
                 Ok(StreamEvent::TextDelta("partial".to_string())),

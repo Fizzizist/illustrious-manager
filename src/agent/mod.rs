@@ -431,7 +431,10 @@ impl Agent {
                 iterations += 1;
 
                 let history_snapshot = lock(&history_arc).clone();
-                let backend_stream = match backend.send_message(&history_snapshot, &config).await {
+                let backend_stream = match backend
+                    .send_message(&history_snapshot, &config, cancel_token.clone())
+                    .await
+                {
                     Ok(s) => s,
                     Err(e) => {
                         record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
@@ -556,6 +559,36 @@ impl Agent {
                             break 'outer;
                         }
                     }
+                }
+
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    persist_partial_and_interrupt(
+                        &text_accumulated,
+                        &history_arc,
+                        &session,
+                        &event_tx,
+                    )
+                    .await;
+                    if !thinking_accumulated.is_empty() {
+                        let thinking_msg = Message {
+                            role: Role::Assistant,
+                            content: vec![ContentBlock::Thinking {
+                                text: thinking_accumulated.clone(),
+                                signature: thinking_signature.clone(),
+                            }],
+                            created_at: now_timestamp(),
+                        };
+                        lock(&history_arc).push(thinking_msg.clone());
+                        let _ = session
+                            .lock()
+                            .await
+                            .conversation()
+                            .insert_message(&thinking_msg)
+                            .await;
+                    }
+                    break 'outer;
                 }
 
                 if tool_calls.is_empty() {
@@ -1091,6 +1124,7 @@ mod tests {
             &self,
             _: &[Message],
             _: &RequestConfig,
+            _: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             let mut lock = self.responses.lock().await;
             let events = if lock.is_empty() {
@@ -1688,6 +1722,7 @@ mod tests {
             &self,
             _: &[Message],
             _: &RequestConfig,
+            _: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             Err(anyhow::anyhow!("{}", self.error_message))
         }
@@ -2967,6 +3002,7 @@ mod tests {
             &self,
             _: &[Message],
             _: &RequestConfig,
+            _: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             let tokens: Vec<Result<StreamEvent>> = self
                 .initial_tokens
@@ -2985,7 +3021,6 @@ mod tests {
                     if let Some(item) = iter.next() {
                         return Some((item, (iter, token, false)));
                     }
-                    // No more tokens — block until cancelled, then end.
                     token.cancelled().await;
                     None
                 },
@@ -3113,17 +3148,16 @@ mod tests {
                     &self,
                     _: &[Message],
                     _: &RequestConfig,
+                    _: Option<CancellationToken>,
                 ) -> Result<BoxStream<Result<StreamEvent>>> {
                     let already_called = self
                         .first_done
                         .swap(true, std::sync::atomic::Ordering::SeqCst);
                     if !already_called {
-                        // First call: return a tool use.
                         Ok(Box::pin(futures::stream::iter(tool_call_response(
                             "t1", "bash", r#"{}"#,
                         ))))
                     } else {
-                        // Second call: block until cancelled, return nothing.
                         let cancel = self.cancel.clone();
                         let s = stream::unfold(cancel, |token| async move {
                             token.cancelled().await;
@@ -3340,6 +3374,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn cancel_between_buffered_stream_events_is_detected_by_per_event_check() {
+        // When cancel_token is cancelled while the stream still has buffered events,
+        // the per-event check after each match arm should catch cancellation
+        // even though tokio::select! { biased } would otherwise drain buffered items.
+        // We test this by cancelling BEFORE the stream starts (pre-cancelled token),
+        // which means the backend stream receives the token and the per-event check
+        // fires immediately after the first event.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        // The backend receives a pre-cancelled token. Even though it yields TextDelta,
+        // the agent's per-event check should detect cancellation after processing
+        // the first event and break.
+        let backend = SequencedBackend::new(vec![text_response("hello")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        // The stream should have been interrupted — no ResponseComplete.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted event when pre-cancelled; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear when pre-cancelled"
+        );
+    }
+
     // ── Thinking accumulation tests (Finding 6) ──────────────────────────
 
     #[tokio::test]
@@ -3488,6 +3560,7 @@ mod tests {
                 &self,
                 _: &[Message],
                 _: &RequestConfig,
+                _: Option<CancellationToken>,
             ) -> Result<BoxStream<Result<StreamEvent>>> {
                 let token = self.token.clone();
                 let events: Vec<Result<StreamEvent>> = vec![
@@ -4565,6 +4638,7 @@ mod tests {
             &self,
             messages: &[Message],
             _: &RequestConfig,
+            _: Option<CancellationToken>,
         ) -> Result<BoxStream<Result<StreamEvent>>> {
             *self.captured.lock().unwrap_or_else(|e| e.into_inner()) = messages.to_vec();
             let (tx, rx) = futures::channel::mpsc::unbounded();
@@ -4748,6 +4822,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 config: &RequestConfig,
+                _cancel_token: Option<CancellationToken>,
             ) -> Result<BoxStream<Result<StreamEvent>>> {
                 self.captured
                     .lock()

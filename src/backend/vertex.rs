@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use tokio::sync::OnceCell;
 
+use super::CancellationToken;
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
@@ -322,6 +323,7 @@ impl LlmBackend for VertexBackend {
         &self,
         messages: &[Message],
         config: &RequestConfig,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
         let token = self
@@ -362,7 +364,7 @@ impl LlmBackend for VertexBackend {
 
         let byte_stream = response.bytes_stream();
         let mut sse_parser = VertexSseParser::new();
-        let event_stream = create_sse_event_stream(byte_stream, move |data| {
+        let event_stream = create_sse_event_stream(byte_stream, cancel_token, move |data| {
             sse_parser.fill_buffer(data)?;
             let events = std::mem::take(&mut sse_parser.event_buffer);
             Ok(events)

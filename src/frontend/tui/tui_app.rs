@@ -1196,6 +1196,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _config: &RequestConfig,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
                 Ok(Box::pin(futures::stream::empty()))
             }
@@ -2105,6 +2106,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _config: &RequestConfig,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
                 Ok(Box::pin(futures::stream::empty()))
             }
@@ -2396,6 +2398,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _config: &RequestConfig,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
                 Ok(Box::pin(futures::stream::empty()))
             }
@@ -2441,6 +2444,7 @@ mod tests {
                 &self,
                 _messages: &[Message],
                 _config: &RequestConfig,
+                _cancel_token: Option<CancellationToken>,
             ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
                 Ok(Box::pin(futures::stream::empty()))
             }

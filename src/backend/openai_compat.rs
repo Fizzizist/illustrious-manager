@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 
+use super::CancellationToken;
 use super::LlmBackend;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent};
@@ -391,6 +392,7 @@ impl LlmBackend for OpenAiCompatBackend {
         &self,
         messages: &[Message],
         config: &RequestConfig,
+        cancel_token: Option<CancellationToken>,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config);
 
@@ -415,7 +417,7 @@ impl LlmBackend for OpenAiCompatBackend {
 
         let byte_stream = response.bytes_stream();
         let mut parser = OpenAiCompatSseParser::new();
-        let event_stream = create_sse_event_stream(byte_stream, move |data| {
+        let event_stream = create_sse_event_stream(byte_stream, cancel_token, move |data| {
             parser.fill_buffer(data)?;
             let events = std::mem::take(&mut parser.event_buffer);
             Ok(events)
