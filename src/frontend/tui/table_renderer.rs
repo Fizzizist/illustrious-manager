@@ -144,6 +144,10 @@ fn wrap_cell_spans(
     width: usize,
     base_style: Style,
 ) -> Vec<Vec<Span<'static>>> {
+    // Invariant: wrap_cell_text must not collapse or elide whitespace. src_pos
+    // tracks position in the flat char vector, advancing only for characters
+    // that exist in the original cell content. If wrap_cell_text were changed
+    // to collapse whitespace, this mapping would desync.
     if width == 0 {
         return vec![vec![]];
     }
@@ -539,5 +543,205 @@ mod tests {
             .collect::<Vec<&str>>()
             .join("");
         assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn render_table_preserves_styled_spans() {
+        let header = vec![
+            vec![Span::styled(
+                "Name".to_string(),
+                Style::default().fg(Color::Cyan),
+            )],
+            vec![Span::styled(
+                "Value".to_string(),
+                Style::default().fg(Color::Yellow),
+            )],
+        ];
+        let rows = vec![vec![
+            vec![Span::styled(
+                "alpha".to_string(),
+                Style::default().fg(Color::Red),
+            )],
+            vec![Span::styled(
+                "beta".to_string(),
+                Style::default().fg(Color::Green),
+            )],
+        ]];
+        let lines = render_table(&header, &rows, &test_theme(), 80);
+        assert!(
+            lines.len() >= 3,
+            "should have header, separator, and body row"
+        );
+
+        let header_line = &lines[0];
+        let header_text: String = header_line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            header_text.contains("Name"),
+            "header should contain 'Name': {header_text}"
+        );
+        assert!(
+            header_text.contains("Value"),
+            "header should contain 'Value': {header_text}"
+        );
+
+        let has_cyan_header = header_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::Cyan));
+        let has_yellow_header = header_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::Yellow));
+        assert!(
+            has_cyan_header,
+            "header should preserve cyan style on 'Name' span"
+        );
+        assert!(
+            has_yellow_header,
+            "header should preserve yellow style on 'Value' span"
+        );
+
+        let body_line = &lines[2];
+        let body_text: String = body_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            body_text.contains("alpha"),
+            "body should contain 'alpha': {body_text}"
+        );
+        assert!(
+            body_text.contains("beta"),
+            "body should contain 'beta': {body_text}"
+        );
+
+        let has_red_body = body_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::Red));
+        let has_green_body = body_line
+            .spans
+            .iter()
+            .any(|s| s.style.fg == Some(Color::Green));
+        assert!(
+            has_red_body,
+            "body should preserve red style on 'alpha' span"
+        );
+        assert!(
+            has_green_body,
+            "body should preserve green style on 'beta' span"
+        );
+    }
+
+    #[test]
+    fn styled_spans_character_level_mapping() {
+        let cell = vec![
+            Span::styled("AB".to_string(), Style::default().fg(Color::Red)),
+            Span::styled("CD".to_string(), Style::default().fg(Color::Blue)),
+        ];
+        let wrapped = wrap_cell_spans(&cell, 20, Style::default());
+        assert_eq!(wrapped.len(), 1, "should fit on one line at width 20");
+
+        let line = &wrapped[0];
+        let ab_span = line
+            .iter()
+            .find(|s| s.content.contains('A'))
+            .expect("should find span containing 'A'");
+        assert_eq!(
+            ab_span.style.fg,
+            Some(Color::Red),
+            "'AB' span should be Red"
+        );
+
+        let cd_span = line
+            .iter()
+            .find(|s| s.content.contains('C'))
+            .expect("should find span containing 'C'");
+        assert_eq!(
+            cd_span.style.fg,
+            Some(Color::Blue),
+            "'CD' span should be Blue"
+        );
+    }
+
+    #[test]
+    fn styled_spans_wrapping_maps_characters_correctly() {
+        let cell = vec![
+            Span::styled("redtext".to_string(), Style::default().fg(Color::Red)),
+            Span::styled(" bluepart".to_string(), Style::default().fg(Color::Blue)),
+        ];
+        let wrapped = wrap_cell_spans(&cell, 8, Style::default());
+        assert!(wrapped.len() > 1, "should wrap at width 8");
+
+        let first_line_text: String = wrapped[0]
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<&str>>()
+            .join("");
+        assert!(
+            first_line_text.trim().starts_with("redtext"),
+            "first line should start with 'redtext': {first_line_text}"
+        );
+
+        let first_line_has_red = wrapped[0]
+            .iter()
+            .any(|s| s.content.contains("red") && s.style.fg == Some(Color::Red));
+        assert!(
+            first_line_has_red,
+            "first line should have 'red' characters with Red style"
+        );
+
+        let blue_spans: Vec<&ratatui::text::Span> = wrapped
+            .iter()
+            .flat_map(|line| line.iter())
+            .filter(|s| s.style.fg == Some(Color::Blue))
+            .collect();
+        assert!(
+            !blue_spans.is_empty(),
+            "should have at least one Blue span across wrapped lines"
+        );
+        let blue_text: String = blue_spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<&str>>()
+            .join("");
+        assert!(
+            blue_text.contains("blue"),
+            "Blue spans should contain 'bluepart' text: {blue_text}"
+        );
+    }
+
+    #[test]
+    fn span_cell_width_with_wide_characters() {
+        let cell = vec![Span::raw("你好世界".to_string())];
+        let width = span_cell_width(&cell);
+        assert_eq!(
+            width, 8,
+            "CJK characters should be 2 display width each: 4 chars × 2 = 8"
+        );
+
+        let cell_mixed = vec![Span::raw("🦀Rust".to_string())];
+        let width_mixed = span_cell_width(&cell_mixed);
+        assert_eq!(
+            width_mixed, 6,
+            "emoji is 2 display width + 4 ASCII chars = 6"
+        );
+    }
+
+    #[test]
+    fn wrap_cell_spans_with_wide_characters() {
+        let cell = vec![Span::raw("你好世界测试".to_string())];
+        let wrapped = wrap_cell_spans(&cell, 6, Style::default());
+        assert!(wrapped.len() > 1, "wide text should wrap at narrow width");
+        let total_text: String = wrapped
+            .iter()
+            .flat_map(|line| line.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<&str>>()
+            .join("");
+        assert!(
+            total_text.contains("你"),
+            "wrapped output should preserve all characters"
+        );
     }
 }
