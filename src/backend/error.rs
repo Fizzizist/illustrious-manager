@@ -1,10 +1,5 @@
 use std::fmt;
 
-/// Structured errors emitted by backends.
-///
-/// `HttpStatus` carries the HTTP status code and response body for
-/// programmatic classification (retryable vs non-retryable). `Other` covers
-/// transport failures, parse errors, and other non-HTTP failures.
 #[derive(Debug, Clone)]
 pub enum BackendError {
     HttpStatus { code: u16, body: String },
@@ -12,9 +7,6 @@ pub enum BackendError {
 }
 
 impl BackendError {
-    /// Returns `true` for status codes that are worth retrying: 429 (rate
-    /// limit) and all 5xx codes except 501 (Not Implemented). Other 4xx
-    /// codes are not retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
             BackendError::HttpStatus { code, .. } => *code == 429 || (*code >= 500 && *code != 501),

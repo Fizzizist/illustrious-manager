@@ -28,11 +28,6 @@ pub struct BackendSelection {
     pub model: String,
 }
 
-/// Adapter that wraps an inner backend and retries `send_message` on
-/// retryable HTTP errors (429, 500, 502, 503, 504) with exponential backoff
-/// and jitter. Non-retryable errors propagate immediately. During the backoff
-/// sleep, the `RequestConfig.cancel_token` is polled via `tokio::select!`
-/// so a cancellation aborts the retry loop without further attempts.
 pub struct RetryingBackend {
     inner: Box<dyn LlmBackend>,
     config: RetryConfig,
