@@ -3625,7 +3625,7 @@ mod tests {
 
     #[test]
     fn compaction_role_falls_back_to_default_when_not_in_models() {
-        use crate::config::AppConfig;
+        use crate::config::{AppConfig, RetryConfig};
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: crate::config::VertexConfig {
@@ -3641,6 +3641,7 @@ mod tests {
             models: std::collections::BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let role = if config.models.contains_key(&config.compaction.role) {
             config.compaction.role.clone()
@@ -3655,7 +3656,7 @@ mod tests {
 
     #[test]
     fn compaction_role_uses_configured_role_when_in_models() {
-        use crate::config::{AppConfig, ModelRole};
+        use crate::config::{AppConfig, ModelRole, RetryConfig};
         let mut models = std::collections::BTreeMap::new();
         models.insert(
             "compaction".to_string(),
@@ -3679,6 +3680,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let role = if config.models.contains_key(&config.compaction.role) {
             config.compaction.role.clone()

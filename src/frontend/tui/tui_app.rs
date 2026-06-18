@@ -2220,7 +2220,9 @@ mod tests {
 
     #[test]
     fn render_intro_message_snapshot() {
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+        use crate::config::{
+            AppConfig, RetryConfig, ToolsConfig, VertexConfig, generate_intro_message,
+        };
 
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -2237,6 +2239,7 @@ mod tests {
             models: std::collections::BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_intro_message(generate_intro_message(&config));

@@ -410,7 +410,11 @@ impl LlmBackend for OpenAiCompatBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| String::from("<failed to read response body>"));
-            anyhow::bail!("{} returned {}: {}", self.endpoint, status, body);
+            return Err(super::error::BackendError::HttpStatus {
+                code: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         let byte_stream = response.bytes_stream();

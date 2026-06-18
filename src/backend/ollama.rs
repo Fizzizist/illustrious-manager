@@ -1,8 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 
 use super::LlmBackend;
+use super::error::BackendError;
 use super::ndjson::create_ndjson_event_stream;
 use crate::config::OllamaConfig;
 use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent};
@@ -24,7 +25,7 @@ impl OllamaParser {
             .with_context(|| format!("Failed to parse NDJSON line: {}", data))?;
 
         if let Some(error_msg) = json.get("error").and_then(|v| v.as_str()) {
-            bail!("Ollama error: {}", error_msg);
+            return Err(BackendError::Other(format!("Ollama error: {}", error_msg)).into());
         }
 
         if let Some(content) = json["message"]["content"].as_str()
@@ -45,10 +46,11 @@ impl OllamaParser {
                 let name = match function["name"].as_str() {
                     Some(n) if !n.is_empty() => n.to_string(),
                     _ => {
-                        bail!(
+                        return Err(BackendError::Other(format!(
                             "Malformed tool call at index {}: missing or empty function name",
                             idx
-                        );
+                        ))
+                        .into());
                     }
                 };
                 let id = match tool_call
@@ -104,9 +106,10 @@ pub struct OllamaBackend {
 impl OllamaBackend {
     pub fn new(config: &OllamaConfig) -> Result<Self> {
         if config.base_url == DEFAULT_CLOUD_ENDPOINT && config.api_key.is_empty() {
-            bail!(
+            return Err(BackendError::Other(String::from(
                 "API key is required for Ollama Cloud. Set it in your config, or set base_url to your self-hosted endpoint."
-            );
+            ))
+            .into());
         }
         Ok(Self {
             client: Client::new(),
@@ -292,7 +295,11 @@ impl LlmBackend for OllamaBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| String::from("<failed to read response body>"));
-            bail!("Ollama returned {}: {}", status, body);
+            return Err(super::error::BackendError::HttpStatus {
+                code: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         let byte_stream = response.bytes_stream();
