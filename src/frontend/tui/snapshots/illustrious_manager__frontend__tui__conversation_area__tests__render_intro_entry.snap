@@ -3,12 +3,12 @@ source: src/frontend/tui/conversation_area.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│Info:                                                     │"
-"│  # Illustrious Manager                                   │"
-"│                                                          │"
 "│  • backend: vertex                                       │"
 "│  • compaction.max_context_window_len: 0                  │"
 "│  • compaction.role: compaction                           │"
+"│  • retry.initial_delay_ms: 1000                          │"
+"│  • retry.max_delay_ms: 8000                              │"
+"│  • retry.max_retries: 3                                  │"
 "│  • sessions_dir: /sessions                               │"
 "│  • tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"
