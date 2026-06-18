@@ -77,35 +77,25 @@ impl Default for CompactionConfig {
     }
 }
 
-fn default_max_retries() -> u32 {
-    3
+fn default_retry_config() -> RetryConfig {
+    RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1000,
+        max_delay_ms: 8000,
+    }
 }
 
-fn default_initial_delay_ms() -> u64 {
-    1000
-}
-
-fn default_max_delay_ms() -> u64 {
-    8000
-}
-
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(default = "default_retry_config")]
 pub struct RetryConfig {
-    #[serde(default = "default_max_retries")]
     pub max_retries: u32,
-    #[serde(default = "default_initial_delay_ms")]
     pub initial_delay_ms: u64,
-    #[serde(default = "default_max_delay_ms")]
     pub max_delay_ms: u64,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
-        Self {
-            max_retries: default_max_retries(),
-            initial_delay_ms: default_initial_delay_ms(),
-            max_delay_ms: default_max_delay_ms(),
-        }
+        default_retry_config()
     }
 }
 

@@ -13,11 +13,11 @@ pub enum BackendError {
 
 impl BackendError {
     /// Returns `true` for status codes that are worth retrying: 429 (rate
-    /// limit) and 500/502/503/504 (server-side transient failures). 501
-    /// (Not Implemented) and all other 4xx codes are not retryable.
+    /// limit) and all 5xx codes except 501 (Not Implemented). Other 4xx
+    /// codes are not retryable.
     pub fn is_retryable(&self) -> bool {
         match self {
-            BackendError::HttpStatus { code, .. } => matches!(*code, 429 | 500 | 502 | 503 | 504),
+            BackendError::HttpStatus { code, .. } => *code == 429 || (*code >= 500 && *code != 501),
             BackendError::Other(_) => false,
         }
     }
@@ -81,6 +81,24 @@ mod tests {
         let err = BackendError::HttpStatus {
             code: 504,
             body: "timeout".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_status_505_is_retryable() {
+        let err = BackendError::HttpStatus {
+            code: 505,
+            body: "http version not supported".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn http_status_599_is_retryable() {
+        let err = BackendError::HttpStatus {
+            code: 599,
+            body: "network timeout".to_string(),
         };
         assert!(err.is_retryable());
     }

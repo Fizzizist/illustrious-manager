@@ -387,18 +387,6 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let config = if self.chat_mode.is_on() {
-            RequestConfig {
-                tools: self.tools.read_only_definitions(),
-                cancel_token: cancel_token.clone(),
-                ..config
-            }
-        } else {
-            RequestConfig {
-                cancel_token: cancel_token.clone(),
-                ..config
-            }
-        };
         let chat_mode = self.chat_mode.clone();
         let max_iterations = self.max_tool_iterations;
         let confirmation_mode = self.confirmation_mode.clone();
@@ -413,6 +401,17 @@ impl Agent {
             .conversation()
             .insert_message(&user_msg)
             .await?;
+
+        let request_tools = if self.chat_mode.is_on() {
+            self.tools.read_only_definitions()
+        } else {
+            config.tools.clone()
+        };
+        let config = RequestConfig {
+            tools: request_tools,
+            cancel_token: cancel_token.clone(),
+            ..config
+        };
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
