@@ -1,7 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::time::Duration;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, RetryConfig};
+use crate::logging::log_warn;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 pub mod error;
@@ -24,6 +26,105 @@ pub trait LlmBackend: Send + Sync {
 pub struct BackendSelection {
     pub backend: Box<dyn LlmBackend>,
     pub model: String,
+}
+
+/// Adapter that wraps an inner backend and retries `send_message` on
+/// retryable HTTP errors (429, 500, 502, 503, 504) with exponential backoff
+/// and jitter. Non-retryable errors propagate immediately. During the backoff
+/// sleep, the `RequestConfig.cancel_token` is polled via `tokio::select!`
+/// so a cancellation aborts the retry loop without further attempts.
+pub struct RetryingBackend {
+    inner: Box<dyn LlmBackend>,
+    config: RetryConfig,
+}
+
+impl RetryingBackend {
+    pub fn new(inner: Box<dyn LlmBackend>, config: RetryConfig) -> Self {
+        Self { inner, config }
+    }
+
+    fn next_delay(&self, attempt: u32) -> Duration {
+        let shift = attempt.min(20);
+        let multiplier = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+        let base = self.config.initial_delay_ms.saturating_mul(multiplier);
+        let capped = base.min(self.config.max_delay_ms);
+        let jitter = capped.saturating_mul(rand_fraction()) / (u64::MAX / 4);
+        Duration::from_millis(capped.saturating_add(jitter))
+    }
+}
+
+/// Simple pseudo-random fraction in [0, 1) using thread-local state.
+/// We avoid pulling in a full `rand` crate dependency for this.
+fn rand_fraction() -> u64 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0xDEADBEEF);
+            nanos.wrapping_mul(0x2545F4914F6CDD1D)
+        });
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        x
+    })
+}
+
+#[async_trait]
+impl LlmBackend for RetryingBackend {
+    async fn send_message(
+        &self,
+        messages: &[Message],
+        config: &RequestConfig,
+    ) -> Result<BoxStream<Result<StreamEvent>>> {
+        let max_retries = self.config.max_retries;
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for attempt in 0..=max_retries {
+            match self.inner.send_message(messages, config).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    let retryable = e
+                        .downcast_ref::<error::BackendError>()
+                        .is_some_and(|be| be.is_retryable());
+
+                    if !retryable || attempt >= max_retries {
+                        return Err(e);
+                    }
+
+                    last_err = Some(e);
+                    let delay = self.next_delay(attempt);
+                    log_warn(&format!(
+                        "Backend returned retryable error (attempt {}/{max_retries}); \
+                         retrying in {}ms",
+                        attempt + 1,
+                        delay.as_millis()
+                    ));
+
+                    if let Some(ref token) = config.cancel_token {
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {}
+                            _ = token.cancelled() => {
+                                return Err(last_err
+                                    .expect("error was set before sleep")
+                                    .context("retry cancelled by user"));
+                            }
+                        }
+                    } else {
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_err.expect("loop ran at least once"))
+    }
 }
 
 /// Factory that constructs backends on demand, sharing expensive auth state
@@ -61,7 +162,10 @@ impl BackendFactory {
                     .await?;
                 let backend = vertex::VertexBackend::with_auth(project, region, auth);
                 Ok(BackendSelection {
-                    backend: Box::new(backend),
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
                     model: resolved.model,
                 })
             }
@@ -73,7 +177,10 @@ impl BackendFactory {
                 })?;
                 let backend = zai::ZaiBackend::new(zai_config.api_key.clone())?;
                 Ok(BackendSelection {
-                    backend: Box::new(backend),
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
                     model: resolved.model,
                 })
             }
@@ -85,7 +192,10 @@ impl BackendFactory {
                 })?;
                 let backend = ollama::OllamaBackend::new(ollama_config)?;
                 Ok(BackendSelection {
-                    backend: Box::new(backend),
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
                     model: resolved.model,
                 })
             }
@@ -115,7 +225,10 @@ impl BackendFactory {
                 };
                 let backend = openai_compat::OpenAiCompatBackend::new(oc_config)?;
                 Ok(BackendSelection {
-                    backend: Box::new(backend),
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
                     model: resolved.model,
                 })
             }
@@ -181,6 +294,7 @@ mod tests {
             max_tokens: 1024,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
 
         let mut stream = backend
@@ -313,6 +427,267 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, cell.get().expect("cell initialised")),
             "returned provider must be the one we seeded"
+        );
+    }
+
+    // ── RetryingBackend tests ───────────────────────────────────────────
+
+    use crate::backend::RetryingBackend;
+    use crate::backend::error::BackendError;
+    use crate::config::RetryConfig;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    /// Mock backend that returns a sequence of pre-set results, one per
+    /// `send_message` call.  Each entry is either `Ok(stream)` or
+    /// `Err(BackendError)`.
+    struct FlakyBackend {
+        responses: Vec<Result<Vec<StreamEvent>, BackendError>>,
+        call_count: AtomicUsize,
+    }
+
+    impl FlakyBackend {
+        fn new(responses: Vec<Result<Vec<StreamEvent>, BackendError>>) -> Self {
+            Self {
+                responses,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for FlakyBackend {
+        async fn send_message(
+            &self,
+            _messages: &[Message],
+            _config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let idx = self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+            match self.responses.get(idx) {
+                Some(Ok(events)) => {
+                    let owned: Vec<Result<StreamEvent>> = events.iter().cloned().map(Ok).collect();
+                    Ok(Box::pin(stream::iter(owned)))
+                }
+                Some(Err(e)) => Err(e.clone().into()),
+                None => {
+                    let events: Vec<Result<StreamEvent>> = vec![
+                        Ok(StreamEvent::TextDelta("fallback".to_string())),
+                        Ok(StreamEvent::Done),
+                    ];
+                    Ok(Box::pin(stream::iter(events)))
+                }
+            }
+        }
+    }
+
+    fn retry_config_fast() -> RetryConfig {
+        RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 8,
+        }
+    }
+
+    fn request_config() -> RequestConfig {
+        RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 1024,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        }
+    }
+
+    fn ok_stream() -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::TextDelta("hello".to_string()),
+            StreamEvent::Done,
+        ]
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_succeeds_on_first_try() {
+        let mock = FlakyBackend::new(vec![Ok(ok_stream())]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let mut stream = backend
+            .send_message(&[], &config)
+            .await
+            .expect("should succeed");
+        let first = stream.next().await.expect("has event").expect("ok");
+        assert!(matches!(first, StreamEvent::TextDelta(_)));
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_retries_on_503_then_succeeds() {
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Ok(ok_stream()),
+        ]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_ok(), "should succeed after retry");
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_retries_on_429_then_succeeds() {
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 429,
+                body: "rate limited".to_string(),
+            }),
+            Ok(ok_stream()),
+        ]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_ok(), "should succeed after retry on 429");
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_exhausts_retries_and_propagates_error() {
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+        ]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_err(), "should fail after exhausting retries");
+        let err = result.err().expect("should have error");
+        assert!(err.to_string().contains("503"));
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_does_not_retry_on_400() {
+        let mock = FlakyBackend::new(vec![Err(BackendError::HttpStatus {
+            code: 400,
+            body: "bad request".to_string(),
+        })]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_err(), "400 should propagate immediately");
+        assert!(
+            result
+                .err()
+                .expect("should have error")
+                .to_string()
+                .contains("400")
+        );
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_does_not_retry_on_501() {
+        let mock = FlakyBackend::new(vec![Err(BackendError::HttpStatus {
+            code: 501,
+            body: "not implemented".to_string(),
+        })]);
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_err(), "501 should not be retried");
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_cancellation_aborts_retry() {
+        use tokio_util::sync::CancellationToken;
+
+        let token = CancellationToken::new();
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+        ]);
+        // Use a large delay so the cancellation triggers during sleep
+        let retry_config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 10000,
+            max_delay_ms: 30000,
+        };
+        let backend = RetryingBackend::new(Box::new(mock), retry_config);
+        let mut config = request_config();
+        config.cancel_token = Some(token.clone());
+
+        // Cancel after a short delay
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_err(), "should error when cancelled");
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_backoff_is_exponential() {
+        // Verify delays increase by using a config with measurable delays
+        // and tracking time between calls
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Ok(ok_stream()),
+        ]);
+        let retry_config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 10,
+            max_delay_ms: 80,
+        };
+        let backend = RetryingBackend::new(Box::new(mock), retry_config);
+        let config = request_config();
+
+        let start = std::time::Instant::now();
+        let result = backend.send_message(&[], &config).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "should succeed after 2 retries");
+        // With 10ms initial, exponential: 10ms + 20ms = 30ms minimum
+        assert!(
+            elapsed >= std::time::Duration::from_millis(25),
+            "total elapsed should reflect exponential backoff: {elapsed:?}"
         );
     }
 

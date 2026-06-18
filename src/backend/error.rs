@@ -5,7 +5,7 @@ use std::fmt;
 /// `HttpStatus` carries the HTTP status code and response body for
 /// programmatic classification (retryable vs non-retryable). `Other` covers
 /// transport failures, parse errors, and other non-HTTP failures.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BackendError {
     HttpStatus { code: u16, body: String },
     Other(String),
@@ -134,12 +134,16 @@ mod tests {
     }
 
     #[test]
-    fn converts_to_anyhow() {
+    fn converts_to_anyhow_and_downcasts() {
         let original = BackendError::HttpStatus {
             code: 503,
             body: "overloaded".to_string(),
         };
         let err: anyhow::Error = original.into();
         assert!(err.to_string().contains("503"));
+        let recovered = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(recovered.is_retryable());
     }
 }

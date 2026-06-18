@@ -1215,6 +1215,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -2136,6 +2137,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 initial_session,
             )
@@ -2418,6 +2420,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -2463,6 +2466,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )

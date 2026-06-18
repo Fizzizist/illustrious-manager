@@ -390,10 +390,14 @@ impl Agent {
         let config = if self.chat_mode.is_on() {
             RequestConfig {
                 tools: self.tools.read_only_definitions(),
+                cancel_token: cancel_token.clone(),
                 ..config
             }
         } else {
-            config
+            RequestConfig {
+                cancel_token: cancel_token.clone(),
+                ..config
+            }
         };
         let chat_mode = self.chat_mode.clone();
         let max_iterations = self.max_tool_iterations;
@@ -1196,6 +1200,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         if let Some(t) = tool {
@@ -1303,6 +1308,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1348,6 +1354,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1394,6 +1401,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1444,6 +1452,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1501,6 +1510,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1803,6 +1813,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1875,6 +1886,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1923,6 +1935,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -1961,6 +1974,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -2000,6 +2014,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2049,6 +2064,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -2103,6 +2119,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2130,6 +2147,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2160,6 +2178,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2293,6 +2312,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2455,6 +2475,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2598,6 +2619,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2727,6 +2749,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "hi".to_string()).await;
@@ -2753,6 +2776,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2797,6 +2821,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "fail".to_string()).await;
@@ -2831,6 +2856,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "test".to_string()).await;
@@ -2864,6 +2890,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "test".to_string()).await;
@@ -2917,6 +2944,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -3607,6 +3635,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let session = test_session_arc().await;
         let agent = Agent::new(Box::new(backend), config, session).await;
@@ -3719,6 +3748,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -3761,6 +3791,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -3797,6 +3828,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -3855,6 +3887,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -3918,6 +3951,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -3980,6 +4014,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -4031,6 +4066,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -4073,6 +4109,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -4136,6 +4173,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -4300,6 +4338,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -4381,6 +4420,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
         assert_eq!(agent.model(), "model-one");
@@ -4417,6 +4457,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let initial_len = agent.history().len();
@@ -4461,6 +4502,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let session_arc = test_session_arc().await;
         let agent = Agent::new(Box::new(backend), config, Arc::clone(&session_arc)).await;
@@ -4489,6 +4531,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = crate::config::ToolsConfig {
             confirmation: crate::config::ConfirmationMode::Never,
@@ -4534,6 +4577,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -4599,6 +4643,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -4654,6 +4699,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let tool_config = crate::config::ToolsConfig {
             confirmation: crate::config::ConfirmationMode::Never,
@@ -4713,6 +4759,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         assert!(!agent.is_chat_mode());
@@ -4726,6 +4773,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         agent.set_chat_mode(true);
@@ -4789,6 +4837,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -4851,6 +4900,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -4913,6 +4963,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -4978,6 +5029,7 @@ mod tests {
             max_tokens: 100,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -5003,5 +5055,180 @@ mod tests {
                 "error should mention chat mode"
             );
         }
+    }
+
+    // ── Retry integration tests ──────────────────────────────────────────
+
+    use crate::backend::RetryingBackend;
+    use crate::backend::error::BackendError;
+    use crate::config::RetryConfig;
+
+    struct AlwaysBackendError {
+        error: BackendError,
+    }
+
+    impl AlwaysBackendError {
+        fn new(error: BackendError) -> Self {
+            Self { error }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for AlwaysBackendError {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(self.error.clone().into())
+        }
+    }
+
+    struct RetryableThenSuccessBackend {
+        responses: Vec<Result<Vec<Result<StreamEvent>>, BackendError>>,
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RetryableThenSuccessBackend {
+        fn new(responses: Vec<Result<Vec<Result<StreamEvent>>, BackendError>>) -> Self {
+            Self {
+                responses,
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RetryableThenSuccessBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let idx = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.responses.get(idx) {
+                Some(Ok(events)) => {
+                    let owned: Vec<Result<StreamEvent>> = events
+                        .iter()
+                        .map(|r| match r {
+                            Ok(ev) => Ok(ev.clone()),
+                            Err(e) => Err(anyhow::anyhow!("{e}")),
+                        })
+                        .collect();
+                    Ok(Box::pin(stream::iter(owned)))
+                }
+                Some(Err(e)) => Err(e.clone().into()),
+                None => Ok(Box::pin(stream::iter(vec![
+                    Ok(StreamEvent::TextDelta("fallback".to_string())),
+                    Ok(StreamEvent::Done),
+                ]))),
+            }
+        }
+    }
+
+    fn fast_retry() -> RetryConfig {
+        RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            max_delay_ms: 8,
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_retries_on_5xx_and_succeeds() {
+        let inner = RetryableThenSuccessBackend::new(vec![
+            Err(BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }),
+            Ok(vec![
+                Ok(StreamEvent::TextDelta("recovered".to_string())),
+                Ok(StreamEvent::Done),
+            ]),
+        ]);
+        let backend = RetryingBackend::new(Box::new(inner), fast_retry());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let events = collect_events(
+            agent
+                .send("hi".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::ResponseComplete(t) if t == "recovered"
+            )),
+            "should complete successfully after retry; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_5xx_exhausts_retries_emits_error() {
+        let inner = AlwaysBackendError::new(BackendError::HttpStatus {
+            code: 503,
+            body: "overloaded".to_string(),
+        });
+        let backend = RetryingBackend::new(Box::new(inner), fast_retry());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let events = collect_events(
+            agent
+                .send("hi".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("503"))),
+            "should emit Error after exhausting retries; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_cancellation_during_retry_aborts() {
+        use tokio_util::sync::CancellationToken;
+
+        let token = CancellationToken::new();
+        let inner = AlwaysBackendError::new(BackendError::HttpStatus {
+            code: 503,
+            body: "overloaded".to_string(),
+        });
+        let retry_config = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 10000,
+            max_delay_ms: 30000,
+        };
+        let backend = RetryingBackend::new(Box::new(inner), retry_config);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let events = collect_events(
+            agent
+                .send("hi".to_string(), None, Some(token))
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| { matches!(e, AgentEvent::Error(_) | AgentEvent::Interrupted { .. }) }),
+            "should emit Error or Interrupted when cancelled during retry; got {events:?}"
+        );
     }
 }

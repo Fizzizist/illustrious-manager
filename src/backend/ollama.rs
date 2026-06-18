@@ -420,6 +420,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -457,6 +458,7 @@ mod tests {
                 }),
             }],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -487,6 +489,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -520,6 +523,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
             thinking: None,
+            cancel_token: None,
         };
         let body = backend.build_request_body(&[], &config);
         assert!(
@@ -541,6 +545,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::Assistant,
@@ -582,6 +587,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -614,6 +620,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![
             Message {
@@ -772,6 +779,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: Some(crate::types::ThinkingConfig::default()),
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,
@@ -796,6 +804,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let messages = vec![Message {
             role: Role::User,

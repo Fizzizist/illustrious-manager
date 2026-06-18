@@ -60,6 +60,7 @@ async fn test_agent_single_message() {
         max_tokens: 1024,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -104,6 +105,7 @@ async fn test_agent_history_accumulates() {
         max_tokens: 1024,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -144,6 +146,7 @@ async fn test_agent_backend_error_emits_error_event() {
         max_tokens: 1024,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(Box::new(ErrorBackend), config, test_session_arc().await).await;
 
@@ -179,6 +182,7 @@ async fn cleanup_empty_session_integration_deletes_db_on_exit_with_no_messages()
         max_tokens: 100,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),
@@ -210,6 +214,7 @@ async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
         max_tokens: 100,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),
@@ -243,6 +248,7 @@ async fn agent_checkpoint_session_persists_messages_to_main_db() {
         max_tokens: 100,
         tools: vec![],
         thinking: None,
+        cancel_token: None,
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),

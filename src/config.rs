@@ -2214,4 +2214,40 @@ mod tests {
             "error should mention query string; got: {msg}"
         );
     }
+
+    // ── RetryConfig tests ────────────────────────────────────────────────
+
+    #[test]
+    fn retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.initial_delay_ms, 1000);
+        assert_eq!(config.max_delay_ms, 8000);
+    }
+
+    #[test]
+    fn retry_config_parses_from_toml() {
+        let toml_str = r#"
+            max_retries = 5
+            initial_delay_ms = 500
+            max_delay_ms = 20000
+        "#;
+        let config: RetryConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.initial_delay_ms, 500);
+        assert_eq!(config.max_delay_ms, 20000);
+    }
+
+    #[test]
+    fn retry_config_missing_section_uses_defaults() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.retry.max_retries, 3);
+        assert_eq!(config.retry.initial_delay_ms, 1000);
+        assert_eq!(config.retry.max_delay_ms, 8000);
+    }
 }
