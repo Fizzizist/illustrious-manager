@@ -410,7 +410,11 @@ impl LlmBackend for OpenAiCompatBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| String::from("<failed to read response body>"));
-            anyhow::bail!("{} returned {}: {}", self.endpoint, status, body);
+            return Err(super::error::BackendError::HttpStatus {
+                code: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         let byte_stream = response.bytes_stream();
@@ -446,6 +450,7 @@ mod tests {
             max_tokens: 4096,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         }
     }
 
@@ -574,6 +579,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
             thinking: None,
+            cancel_token: None,
         };
         let body = b.build_request_body(&[], &config);
         assert!(body["tools"].as_array().is_some());
@@ -602,6 +608,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[], &config);
         assert_eq!(body["enable_thinking"], true);
@@ -626,6 +633,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[], &config);
         assert!(body.get("enable_thinking").is_none());
@@ -831,6 +839,7 @@ mod tests {
             max_tokens: 1024,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -854,6 +863,7 @@ mod tests {
             max_tokens: 1024,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -876,6 +886,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -900,6 +911,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -924,6 +936,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert!(
@@ -948,6 +961,7 @@ mod tests {
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert!(

@@ -253,6 +253,7 @@ pub async fn spawn_agent_with_selection(
         max_tokens: DEFAULT_MAX_TOKENS,
         tools: tools.definitions(),
         thinking: None,
+        cancel_token: None,
     };
     Ok(Agent::new(selection.backend, request_config, session)
         .await

@@ -1078,7 +1078,9 @@ mod tests {
 
     #[test]
     fn render_intro_entry() {
-        use crate::config::{AppConfig, ToolsConfig, VertexConfig, generate_intro_message};
+        use crate::config::{
+            AppConfig, RetryConfig, ToolsConfig, VertexConfig, generate_intro_message,
+        };
 
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -1095,6 +1097,7 @@ mod tests {
             models: std::collections::BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,

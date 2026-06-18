@@ -3,8 +3,8 @@ source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
-"│  • compaction.max_context_window_len: 0                  │"
-"│  • compaction.role: compaction                           │"
+"│  • retry.max_delay_ms: 8000                              │"
+"│  • retry.max_retries: 3                                  │"
 "│  • sessions_dir: /sessions                               │"
 "│  • tools.bash_allowlist: cat, ls, grep, find, head, tail,│"
 "│wc, tree                                                  │"

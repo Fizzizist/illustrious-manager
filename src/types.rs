@@ -307,6 +307,7 @@ pub struct RequestConfig {
     pub max_tokens: u32,
     pub tools: Vec<ToolDefinition>,
     pub thinking: Option<ThinkingConfig>,
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Events emitted by the LLM backend during streaming

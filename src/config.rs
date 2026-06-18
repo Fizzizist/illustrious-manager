@@ -77,6 +77,28 @@ impl Default for CompactionConfig {
     }
 }
 
+fn default_retry_config() -> RetryConfig {
+    RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1000,
+        max_delay_ms: 8000,
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq)]
+#[serde(default = "default_retry_config")]
+pub struct RetryConfig {
+    pub max_retries: u32,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        default_retry_config()
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ToolsConfig {
     #[serde(default = "default_confirmation")]
@@ -175,6 +197,14 @@ model = "glm-5.1"
 # When input_tokens exceeds this value, the agent automatically compacts the conversation.
 # max_context_window_len = 0
 
+# [retry]
+# Maximum number of retry attempts for transient HTTP errors (5xx, 429).
+# max_retries = 3
+# Initial delay in milliseconds before the first retry.
+# initial_delay_ms = 1000
+# Maximum delay in milliseconds for backoff (caps exponential growth).
+# max_delay_ms = 8000
+
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
 # confirmation = "WriteOnly"
@@ -255,6 +285,8 @@ pub struct AppConfig {
     pub thinking: Option<crate::types::ThinkingConfig>,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub retry: RetryConfig,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -828,6 +860,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -851,6 +884,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -873,6 +907,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -899,6 +934,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -925,6 +961,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -947,6 +984,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -970,6 +1008,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
@@ -1001,6 +1040,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
@@ -1030,6 +1070,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
@@ -1055,6 +1096,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(
@@ -1080,6 +1122,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
@@ -1136,6 +1179,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
         assert!(
@@ -1185,6 +1229,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
         assert_eq!(
@@ -1239,6 +1284,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let resolved = config.resolve_role("fast").expect("should resolve");
         assert_eq!(resolved.backend_name, "vertex");
@@ -1262,6 +1308,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = config.resolve_role("nonexistent");
         assert!(result.is_err());
@@ -1293,6 +1340,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1331,6 +1379,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1358,6 +1407,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1385,6 +1435,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1412,6 +1463,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1438,6 +1490,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok());
@@ -1464,6 +1517,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         apply_overrides(&mut config, None, None, Some("custom-model"));
         assert_eq!(
@@ -1498,6 +1552,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1532,6 +1587,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1564,6 +1620,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
 
@@ -1600,6 +1657,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1639,6 +1697,7 @@ mod tests {
             models,
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_ok(), "ollama role with valid config should pass");
@@ -1698,6 +1757,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let msg = generate_intro_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
@@ -1878,6 +1938,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1910,6 +1971,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -1942,6 +2004,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(
@@ -1974,6 +2037,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
         assert!(
@@ -2051,6 +2115,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         config.normalize_back_compat();
         apply_overrides(&mut config, None, None, Some("Qwen/Qwen3-235B"));
@@ -2095,6 +2160,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -2128,6 +2194,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         };
         let result = validate(&config, None);
         assert!(result.is_err());
@@ -2136,5 +2203,41 @@ mod tests {
             msg.contains("query string"),
             "error should mention query string; got: {msg}"
         );
+    }
+
+    // ── RetryConfig tests ────────────────────────────────────────────────
+
+    #[test]
+    fn retry_config_defaults() {
+        let config = RetryConfig::default();
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.initial_delay_ms, 1000);
+        assert_eq!(config.max_delay_ms, 8000);
+    }
+
+    #[test]
+    fn retry_config_parses_from_toml() {
+        let toml_str = r#"
+            max_retries = 5
+            initial_delay_ms = 500
+            max_delay_ms = 20000
+        "#;
+        let config: RetryConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.initial_delay_ms, 500);
+        assert_eq!(config.max_delay_ms, 20000);
+    }
+
+    #[test]
+    fn retry_config_missing_section_uses_defaults() {
+        let toml_str = r#"
+            backend = "vertex"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.retry.max_retries, 3);
+        assert_eq!(config.retry.initial_delay_ms, 1000);
+        assert_eq!(config.retry.max_delay_ms, 8000);
     }
 }

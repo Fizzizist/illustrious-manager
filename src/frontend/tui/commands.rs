@@ -525,7 +525,7 @@ pub fn default_registry() -> CommandRegistry {
 mod tests {
     use super::*;
     use crate::config::CompactionConfig;
-    use crate::config::{AppConfig, ToolsConfig, VertexConfig};
+    use crate::config::{AppConfig, RetryConfig, ToolsConfig, VertexConfig};
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
@@ -545,6 +545,7 @@ mod tests {
             models: BTreeMap::new(),
             thinking: None,
             compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
         }
     }
 
@@ -601,6 +602,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -644,6 +646,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -686,6 +689,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -728,6 +732,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -770,6 +775,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -835,6 +841,7 @@ mod tests {
                         max_tokens: 1024,
                         tools: vec![],
                         thinking: None,
+                        cancel_token: None,
                     },
                     session,
                 )
@@ -886,6 +893,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session_arc,
             )
@@ -928,6 +936,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1000,6 +1009,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1044,6 +1054,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1089,6 +1100,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1197,6 +1209,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1268,6 +1281,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1316,6 +1330,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1369,6 +1384,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1417,6 +1433,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1520,6 +1537,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )
@@ -1565,6 +1583,7 @@ mod tests {
                     max_tokens: 1024,
                     tools: vec![],
                     thinking: None,
+                    cancel_token: None,
                 },
                 session,
             )

@@ -357,7 +357,11 @@ impl LlmBackend for VertexBackend {
                 .text()
                 .await
                 .unwrap_or_else(|_| String::from("<failed to read response body>"));
-            anyhow::bail!("Vertex AI returned {}: {}", status, body);
+            return Err(super::error::BackendError::HttpStatus {
+                code: status.as_u16(),
+                body,
+            }
+            .into());
         }
 
         let byte_stream = response.bytes_stream();
@@ -480,6 +484,7 @@ mod tests {
             max_tokens: 32768,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["max_tokens"], 32768);
@@ -493,6 +498,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -512,6 +518,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
             }],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         let tools = body["tools"].as_array().expect("tools should be an array");
@@ -531,6 +538,7 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["tool_choice"]["type"], "auto");
@@ -544,6 +552,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -899,6 +908,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[message], &config).expect("build");
         let content = &body["messages"][0]["content"];
@@ -925,6 +935,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&messages, &config).expect("build");
         let content = body["messages"][0]["content"]
@@ -959,6 +970,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&messages, &config).expect("build");
         let content = body["messages"][0]["content"]
@@ -984,6 +996,7 @@ mod tests {
                 enabled: true,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -1002,6 +1015,7 @@ mod tests {
                 enabled: true,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "adaptive");
@@ -1019,6 +1033,7 @@ mod tests {
                 enabled: true,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["max_tokens"], 24576);
@@ -1031,6 +1046,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -1050,6 +1066,7 @@ mod tests {
                 enabled: false,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert!(
@@ -1069,6 +1086,7 @@ mod tests {
                 enabled: true,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -1085,6 +1103,7 @@ mod tests {
                 enabled: true,
                 display: None,
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -1101,6 +1120,7 @@ mod tests {
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "omitted");
@@ -1117,6 +1137,7 @@ mod tests {
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["display"], "summarized");
@@ -1133,6 +1154,7 @@ mod tests {
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -1151,6 +1173,7 @@ mod tests {
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
+            cancel_token: None,
         };
         let body = build_request_body(&[], &config).expect("should build successfully");
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -1230,6 +1253,7 @@ mod tests {
             max_tokens: 8192,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         let body = build_request_body(&messages, &config).expect("build");
         let msgs = body["messages"].as_array().expect("messages array");

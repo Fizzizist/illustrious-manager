@@ -864,6 +864,7 @@ mod tests {
             max_tokens: 1024,
             tools: vec![],
             thinking: None,
+            cancel_token: None,
         };
         Arc::new(Agent::new(Box::new(backend), config, session).await)
     }
