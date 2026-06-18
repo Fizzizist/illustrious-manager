@@ -307,9 +307,6 @@ pub struct RequestConfig {
     pub max_tokens: u32,
     pub tools: Vec<ToolDefinition>,
     pub thinking: Option<ThinkingConfig>,
-    /// Cancellation token checked by `RetryingBackend` during backoff sleep.
-    /// `None` means the call cannot be cancelled mid-retry. Backends ignore
-    /// this field; only the retry adapter reads it.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
