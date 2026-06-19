@@ -287,7 +287,7 @@ impl LlmBackend for OllamaBackend {
             .json(&body)
             .send()
             .await
-            .context("Failed to send request to Ollama")?;
+            .map_err(|e| BackendError::transport("Ollama", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
