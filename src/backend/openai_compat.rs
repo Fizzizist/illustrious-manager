@@ -402,7 +402,7 @@ impl LlmBackend for OpenAiCompatBackend {
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("Failed to send request to {}", self.endpoint))?;
+            .map_err(|e| super::error::BackendError::transport(&self.endpoint, &e))?;
 
         if !response.status().is_success() {
             let status = response.status();

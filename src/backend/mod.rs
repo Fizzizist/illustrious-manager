@@ -437,15 +437,19 @@ mod tests {
     /// `Err(BackendError)`.
     struct FlakyBackend {
         responses: Vec<Result<Vec<StreamEvent>, BackendError>>,
-        call_count: AtomicUsize,
+        call_count: Arc<AtomicUsize>,
     }
 
     impl FlakyBackend {
         fn new(responses: Vec<Result<Vec<StreamEvent>, BackendError>>) -> Self {
             Self {
                 responses,
-                call_count: AtomicUsize::new(0),
+                call_count: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn counter(&self) -> Arc<AtomicUsize> {
+            Arc::clone(&self.call_count)
         }
     }
 
@@ -543,6 +547,30 @@ mod tests {
 
         let result = backend.send_message(&[], &config).await;
         assert!(result.is_ok(), "should succeed after retry on 429");
+    }
+
+    #[tokio::test]
+    async fn retrying_backend_retries_on_transport_then_succeeds() {
+        let mock = FlakyBackend::new(vec![
+            Err(BackendError::Transport {
+                message: "Failed to send request to Ollama: connection refused".to_string(),
+            }),
+            Ok(ok_stream()),
+        ]);
+        let counter = mock.counter();
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let config = request_config();
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(
+            result.is_ok(),
+            "should succeed after retry on transport error"
+        );
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            2,
+            "should have called the backend twice: one failure then one success"
+        );
     }
 
     #[tokio::test]

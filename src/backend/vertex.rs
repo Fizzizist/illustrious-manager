@@ -349,7 +349,7 @@ impl LlmBackend for VertexBackend {
             .json(&body)
             .send()
             .await
-            .context("Failed to send request to Vertex AI")?;
+            .map_err(|e| super::error::BackendError::transport("Vertex AI", &e))?;
 
         if !response.status().is_success() {
             let status = response.status();
