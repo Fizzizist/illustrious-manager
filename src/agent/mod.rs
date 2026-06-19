@@ -1778,6 +1778,46 @@ mod tests {
         );
     }
 
+    struct TransportBackend;
+
+    #[async_trait]
+    impl LlmBackend for TransportBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(crate::backend::error::BackendError::Transport {
+                message: "Failed to send request to Ollama: error sending request: \
+                          Connection refused (os error 61)"
+                    .to_string(),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_error_variant_surfaces_flattened_message() {
+        let agent = agent_with_mode(TransportBackend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error(msg)
+                    if msg.contains("Failed to send request to Ollama")
+                        && msg.contains("Connection refused (os error 61)")
+            )),
+            "the BackendError::Transport variant, propagated via ? into anyhow, must reach \
+             the agent and surface its flattened message via {{e:#}}"
+        );
+    }
+
     #[tokio::test]
     async fn stream_error_preserves_partial_text_in_history() {
         let backend = SequencedBackend::new(vec![vec![
