@@ -258,16 +258,16 @@ impl InputArea {
 
     fn build_block(&self, _area: Rect) -> Block<'static> {
         let title = match &self.mode {
-            AppMode::Insert => match self.editor.vim_mode() {
-                VimMode::Normal => NORMAL_TITLE,
-                VimMode::Insert => INSERT_TITLE,
-                VimMode::Visual => VISUAL_TITLE,
-                VimMode::VisualLine => VISUAL_LINE_TITLE,
-                VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
+            AppMode::Insert | AppMode::Normal | AppMode::Visual => {
+                match self.editor.vim_mode() {
+                    VimMode::Normal => NORMAL_TITLE,
+                    VimMode::Insert => INSERT_TITLE,
+                    VimMode::Visual => VISUAL_TITLE,
+                    VimMode::VisualLine => VISUAL_LINE_TITLE,
+                    VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
+                }
+                .to_string()
             }
-            .to_string(),
-            AppMode::Normal => NORMAL_TITLE.to_string(),
-            AppMode::Visual => VISUAL_TITLE.to_string(),
             AppMode::Streaming => {
                 if let Some(elapsed) = self.elapsed {
                     format!(
