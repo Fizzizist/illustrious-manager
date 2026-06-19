@@ -1,0 +1,14 @@
+---
+source: src/frontend/tui/input_area.rs
+expression: terminal.backend()
+---
+"┌ Tasks ───────────────────────────────┐"
+"│                                      │"
+"└──────────────────────────────────────┘"
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "
+"                                        "

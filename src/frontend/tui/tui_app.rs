@@ -84,34 +84,19 @@ impl App {
         self.state = state;
         match &self.state {
             AppState::Input => self.input.set_mode(AppMode::Editing),
-            AppState::Streaming => {
-                self.input.set_mode(AppMode::Streaming);
-                self.pending_g = false;
-            }
+            AppState::Streaming => self.input.set_mode(AppMode::Streaming),
             AppState::ToolConfirmation { name, input, .. } => {
                 self.input.set_mode(AppMode::ToolConfirmation {
                     name: name.clone(),
                     input: input.clone(),
                 });
-                self.pending_g = false;
             }
-            AppState::SessionPicker => {
-                self.input.set_mode(AppMode::SessionPicker);
-                self.pending_g = false;
-            }
-            AppState::TasksPicker => {
-                self.input.set_mode(AppMode::TasksPicker);
-                self.pending_g = false;
-            }
-            AppState::Compacting => {
-                self.input.set_mode(AppMode::Compacting);
-                self.pending_g = false;
-            }
-            AppState::RunningBash => {
-                self.input.set_mode(AppMode::RunningBash);
-                self.pending_g = false;
-            }
+            AppState::SessionPicker => self.input.set_mode(AppMode::SessionPicker),
+            AppState::TasksPicker => self.input.set_mode(AppMode::TasksPicker),
+            AppState::Compacting => self.input.set_mode(AppMode::Compacting),
+            AppState::RunningBash => self.input.set_mode(AppMode::RunningBash),
         }
+        self.pending_g = false;
         self.activity_start = match &self.state {
             AppState::Streaming | AppState::RunningBash | AppState::Compacting => {
                 Some(std::time::Instant::now())
@@ -410,6 +395,17 @@ fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
     thinking.lines().rev().find(|line| !line.trim().is_empty())
 }
 
+fn finish_turn_reset(app: &mut App) {
+    app.current_response.clear();
+    app.current_thinking.clear();
+    app.streaming_timestamp.clear();
+    app.confirmation_tx = None;
+    app.cancel_token = None;
+    app.set_state(AppState::Input);
+    app.scroll_offset = 0;
+    app.git_branch = status_line::detect_git_branch();
+}
+
 impl App {
     fn max_scroll(&mut self) -> u16 {
         if self.text_width == 0 {
@@ -539,14 +535,7 @@ pub fn handle_agent_event(
                 full,
                 app.streaming_timestamp.clone(),
             ));
-            app.current_response.clear();
-            app.current_thinking.clear();
-            app.streaming_timestamp.clear();
-            app.confirmation_tx = None;
-            app.cancel_token = None;
-            app.set_state(AppState::Input);
-            app.scroll_offset = 0;
-            app.git_branch = status_line::detect_git_branch();
+            finish_turn_reset(app);
         }
         AgentEvent::Error(msg) => {
             app.conversation.push(ConversationEntry::new(
@@ -554,14 +543,7 @@ pub fn handle_agent_event(
                 msg,
                 crate::timestamp::format_now_timestamp(),
             ));
-            app.current_response.clear();
-            app.current_thinking.clear();
-            app.streaming_timestamp.clear();
-            app.confirmation_tx = None;
-            app.cancel_token = None;
-            app.set_state(AppState::Input);
-            app.scroll_offset = 0;
-            app.git_branch = status_line::detect_git_branch();
+            finish_turn_reset(app);
         }
         AgentEvent::ToolUseReceived {
             name, input, index, ..

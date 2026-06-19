@@ -85,13 +85,12 @@ impl InputArea {
     }
 
     pub fn insert_paste(&mut self, text: &str) {
+        // TextFieldEditor exposes no paste method; insert_str is the
+        // engine's public insertion API and calls mark_content_dirty().
         self.editor.editor.insert_str(text);
     }
 
     pub fn set_mode(&mut self, mode: AppMode) {
-        if mode == AppMode::Editing {
-            self.editor.enter_insert_at_end();
-        }
         self.mode = mode;
     }
 
@@ -240,36 +239,9 @@ impl InputArea {
                 VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
             }
             .to_string(),
-            AppMode::Streaming => {
-                if let Some(elapsed) = self.elapsed {
-                    format!(
-                        "{} Streaming... (Esc to interrupt)",
-                        crate::timestamp::format_elapsed(elapsed)
-                    )
-                } else {
-                    " Streaming... (Esc to interrupt) ".to_string()
-                }
-            }
-            AppMode::Compacting => {
-                if let Some(elapsed) = self.elapsed {
-                    format!(
-                        "{} Compacting...",
-                        crate::timestamp::format_elapsed(elapsed)
-                    )
-                } else {
-                    " Compacting... ".to_string()
-                }
-            }
-            AppMode::RunningBash => {
-                if let Some(elapsed) = self.elapsed {
-                    format!(
-                        "{} Running bash... (Esc to cancel)",
-                        crate::timestamp::format_elapsed(elapsed)
-                    )
-                } else {
-                    " Running bash... (Esc to cancel) ".to_string()
-                }
-            }
+            AppMode::Streaming => elapsed_title(self.elapsed, "Streaming... (Esc to interrupt)"),
+            AppMode::Compacting => elapsed_title(self.elapsed, "Compacting..."),
+            AppMode::RunningBash => elapsed_title(self.elapsed, "Running bash... (Esc to cancel)"),
             AppMode::SessionPicker => SESSIONS_TITLE.to_string(),
             AppMode::TasksPicker => TASKS_TITLE.to_string(),
             AppMode::ToolConfirmation { name, .. } => {
@@ -284,6 +256,13 @@ impl InputArea {
 impl Default for InputArea {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn elapsed_title(elapsed: Option<std::time::Duration>, label: &str) -> String {
+    match elapsed {
+        Some(d) => format!("{} {}", crate::timestamp::format_elapsed(d), label),
+        None => format!(" {} ", label),
     }
 }
 
@@ -891,5 +870,217 @@ mod tests {
         let mut input = InputArea::new();
         input.set_mode(AppMode::Compacting);
         assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
+    }
+
+    #[test]
+    fn cursor_xy_on_first_line() {
+        let mut editor = TextFieldEditor::new(false);
+        editor.set_text("hello");
+        let rect = Rect::new(0, 0, 40, 10);
+        {
+            let v = editor.editor.host_mut().viewport_mut();
+            v.wrap = Wrap::Word;
+            v.text_width = rect.width;
+            v.width = rect.width;
+            v.height = rect.height;
+        }
+        let mut viewport = *editor.editor.host().viewport();
+        editor
+            .editor
+            .buffer_mut()
+            .ensure_cursor_visible(&mut viewport);
+        *editor.editor.host_mut().viewport_mut() = viewport;
+
+        let result = cursor_xy(&editor, rect, rect.width);
+        assert!(
+            result.is_some(),
+            "cursor_xy should return Some for cursor on first line"
+        );
+        let (x, y) = result.expect("cursor_xy should return Some");
+        assert_eq!(y, 0, "cursor should be on first visual row");
+        assert!(x >= 5, "cursor x should be at least 5 for 'hello'");
+    }
+
+    #[test]
+    fn cursor_xy_on_wrapped_line_second_segment() {
+        let mut editor = TextFieldEditor::new(false);
+        editor.set_text("abcdefghijklmnopqrst");
+        let rect = Rect::new(0, 0, 10, 10);
+        {
+            let v = editor.editor.host_mut().viewport_mut();
+            v.wrap = Wrap::Word;
+            v.text_width = rect.width;
+            v.width = rect.width;
+            v.height = rect.height;
+        }
+        let mut viewport = *editor.editor.host().viewport();
+        editor
+            .editor
+            .buffer_mut()
+            .ensure_cursor_visible(&mut viewport);
+        *editor.editor.host_mut().viewport_mut() = viewport;
+
+        let result = cursor_xy(&editor, rect, rect.width);
+        assert!(result.is_some(), "cursor_xy should return Some");
+        let (_x, y) = result.expect("cursor_xy should return Some");
+        assert!(
+            y >= 1,
+            "cursor at col 20 should be on second visual row or later"
+        );
+    }
+
+    #[test]
+    fn cursor_xy_returns_none_when_cursor_outside_area() {
+        let mut editor = TextFieldEditor::new(false);
+        editor.set_text("line1\nline2\nline3\nline4\nline5\nline6");
+        let rect = Rect::new(0, 0, 40, 1);
+        {
+            let v = editor.editor.host_mut().viewport_mut();
+            v.wrap = Wrap::Word;
+            v.text_width = rect.width;
+            v.width = rect.width;
+            v.height = rect.height;
+        }
+        let mut viewport = *editor.editor.host().viewport();
+        editor
+            .editor
+            .buffer_mut()
+            .ensure_cursor_visible(&mut viewport);
+        *editor.editor.host_mut().viewport_mut() = viewport;
+
+        let result = cursor_xy(&editor, rect, rect.width);
+        assert!(
+            result.is_none(),
+            "cursor_xy should return None when cursor is outside tiny area"
+        );
+    }
+
+    #[test]
+    fn make_selection_lines_full_segment_selected() {
+        let segments = [(0, 5), (5, 10)];
+        let lines = make_selection_lines("0123456789", &segments, 0, 10);
+        assert_eq!(lines.len(), 2, "should produce 2 lines");
+        for line in &lines {
+            assert!(
+                line.spans
+                    .iter()
+                    .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+                "each line should have reversed span when fully selected"
+            );
+        }
+    }
+
+    #[test]
+    fn make_selection_lines_partial_selection() {
+        let segments = [(0, 5), (5, 10)];
+        let lines = make_selection_lines("0123456789", &segments, 2, 8);
+        assert_eq!(lines.len(), 2, "should produce 2 lines");
+    }
+
+    #[test]
+    fn make_selection_lines_spanning_segments() {
+        let segments = [(0, 3), (3, 6), (6, 9)];
+        let lines = make_selection_lines("012345678", &segments, 2, 7);
+        assert_eq!(lines.len(), 3, "should produce 3 lines");
+    }
+
+    #[test]
+    fn make_selection_lines_empty_selection_range() {
+        let segments = [(0, 5)];
+        let lines = make_selection_lines("hello", &segments, 3, 3);
+        assert_eq!(lines.len(), 1, "should produce 1 line");
+        let line = &lines[0];
+        assert!(
+            !line
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "empty selection should produce raw (non-reversed) line"
+        );
+    }
+
+    #[test]
+    fn lines_from_segments_empty() {
+        let lines = lines_from_segments("hello", &[]);
+        assert_eq!(lines.len(), 1, "empty segments should produce 1 line");
+    }
+
+    #[test]
+    fn lines_from_segments_nonempty() {
+        let lines = lines_from_segments("hello", &[(0, 5)]);
+        assert_eq!(lines.len(), 1, "should produce 1 line");
+        assert_eq!(lines[0].to_string(), "hello");
+    }
+
+    #[test]
+    fn render_visual_line_mode() {
+        let mut input = InputArea::new();
+        input.set_text("hello");
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.input(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_visual_line_mode", terminal.backend());
+    }
+
+    #[test]
+    fn render_visual_block_mode() {
+        let mut input = InputArea::new();
+        input.set_text("hello");
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.input(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_visual_block_mode", terminal.backend());
+    }
+
+    #[test]
+    fn render_session_picker() {
+        let mut input = InputArea::new();
+        input.set_mode(AppMode::SessionPicker);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_session_picker", terminal.backend());
+    }
+
+    #[test]
+    fn render_tasks_picker() {
+        let mut input = InputArea::new();
+        input.set_mode(AppMode::TasksPicker);
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_tasks_picker", terminal.backend());
     }
 }
