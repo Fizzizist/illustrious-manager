@@ -83,7 +83,7 @@ impl App {
     pub fn set_state(&mut self, state: AppState) {
         self.state = state;
         match &self.state {
-            AppState::Input => self.input.set_mode(AppMode::Insert),
+            AppState::Input => self.input.set_mode(AppMode::Editing),
             AppState::Streaming => {
                 self.input.set_mode(AppMode::Streaming);
                 self.pending_g = false;
@@ -2638,7 +2638,8 @@ mod tests {
     #[test]
     fn single_g_sets_pending_flag() {
         let mut app = app_with_content(10);
-        app.input.set_mode(AppMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let before_offset = app.scroll_offset;
         let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         let consumed = app.handle_scroll_key(&key);
@@ -2653,7 +2654,8 @@ mod tests {
     #[test]
     fn gg_jumps_to_top() {
         let mut app = app_with_content(10);
-        app.input.set_mode(AppMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let max = app.max_scroll();
         assert!(max > 0, "content should be scrollable");
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
@@ -2669,7 +2671,8 @@ mod tests {
     #[test]
     fn capital_g_jumps_to_bottom() {
         let mut app = app_with_content(10);
-        app.input.set_mode(AppMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.scroll_offset = 20;
         let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let consumed = app.handle_scroll_key(&key);
@@ -2681,7 +2684,8 @@ mod tests {
     #[test]
     fn non_g_key_clears_pending_g() {
         let mut app = app_with_content(10);
-        app.input.set_mode(AppMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         app.handle_scroll_key(&g_key);
         assert!(app.pending_g);
@@ -2695,8 +2699,8 @@ mod tests {
     #[test]
     fn gg_inert_in_insert_mode() {
         let mut app = app_with_content(10);
-        // default mode is Insert (from App::new)
-        assert_eq!(app.input.mode(), &AppMode::Insert);
+        // default mode is Editing/Insert (from App::new)
+        assert!(!app.input.is_normal());
         let before_offset = app.scroll_offset;
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         let consumed1 = app.handle_scroll_key(&g_key);
@@ -2717,7 +2721,7 @@ mod tests {
     fn capital_g_inert_in_insert_mode() {
         let mut app = app_with_content(10);
         app.scroll_offset = 15;
-        assert_eq!(app.input.mode(), &AppMode::Insert);
+        assert!(!app.input.is_normal());
         let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let consumed = app.handle_scroll_key(&key);
         assert!(!consumed, "G should not be consumed in Insert mode");

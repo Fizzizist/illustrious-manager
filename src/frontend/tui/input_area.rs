@@ -24,9 +24,7 @@ const MAX_INPUT_RATIO: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppMode {
-    Insert,
-    Normal,
-    Visual,
+    Editing,
     Streaming,
     SessionPicker,
     TasksPicker,
@@ -49,7 +47,7 @@ impl InputArea {
         let editor = TextFieldEditor::new(false);
         let mut input = Self {
             editor,
-            mode: AppMode::Insert,
+            mode: AppMode::Editing,
             elapsed: None,
         };
         input.editor.enter_insert_at_end();
@@ -58,20 +56,13 @@ impl InputArea {
 
     pub fn input(&mut self, event: KeyEvent) -> bool {
         match self.mode {
-            AppMode::Insert | AppMode::Normal | AppMode::Visual => {}
+            AppMode::Editing => {}
             _ => return false,
         }
 
         let planned = crossterm_key_event_to_input(event);
         if let Some(input) = decode_planned_input(planned) {
             self.editor.handle_input(input);
-            self.mode = match self.editor.vim_mode() {
-                VimMode::Normal => AppMode::Normal,
-                VimMode::Insert => AppMode::Insert,
-                VimMode::Visual => AppMode::Visual,
-                VimMode::VisualLine => AppMode::Visual,
-                VimMode::VisualBlock => AppMode::Visual,
-            };
             return true;
         }
         false
@@ -98,23 +89,8 @@ impl InputArea {
     }
 
     pub fn set_mode(&mut self, mode: AppMode) {
-        match &mode {
-            AppMode::Insert => {
-                self.editor.enter_insert_at_end();
-            }
-            AppMode::Normal => {
-                self.editor.enter_normal();
-            }
-            AppMode::Visual => {
-                self.editor.enter_normal();
-                use hjkl_engine::Input;
-                use hjkl_engine::Key;
-                self.editor.handle_input(Input {
-                    key: Key::Char('v'),
-                    ..Input::default()
-                });
-            }
-            _ => {}
+        if mode == AppMode::Editing {
+            self.editor.enter_insert_at_end();
         }
         self.mode = mode;
     }
@@ -151,9 +127,7 @@ impl InputArea {
             | AppMode::TasksPicker
             | AppMode::Compacting
             | AppMode::RunningBash => MIN_HEIGHT,
-            AppMode::Insert | AppMode::Normal | AppMode::Visual => {
-                self.text_height_for_width(width, max_height)
-            }
+            AppMode::Editing => self.text_height_for_width(width, max_height),
         }
     }
 
@@ -258,16 +232,14 @@ impl InputArea {
 
     fn build_block(&self, _area: Rect) -> Block<'static> {
         let title = match &self.mode {
-            AppMode::Insert | AppMode::Normal | AppMode::Visual => {
-                match self.editor.vim_mode() {
-                    VimMode::Normal => NORMAL_TITLE,
-                    VimMode::Insert => INSERT_TITLE,
-                    VimMode::Visual => VISUAL_TITLE,
-                    VimMode::VisualLine => VISUAL_LINE_TITLE,
-                    VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
-                }
-                .to_string()
+            AppMode::Editing => match self.editor.vim_mode() {
+                VimMode::Normal => NORMAL_TITLE,
+                VimMode::Insert => INSERT_TITLE,
+                VimMode::Visual => VISUAL_TITLE,
+                VimMode::VisualLine => VISUAL_LINE_TITLE,
+                VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
             }
+            .to_string(),
             AppMode::Streaming => {
                 if let Some(elapsed) = self.elapsed {
                     format!(
@@ -740,7 +712,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.set_mode(AppMode::Streaming);
-        input.set_mode(AppMode::Insert);
+        input.set_mode(AppMode::Editing);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -760,25 +732,35 @@ mod tests {
         input.input(char_key('h'));
         input.input(char_key('i'));
         input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(input.mode(), &AppMode::Normal);
+        assert!(input.is_normal());
         assert_eq!(input.text(), "hi");
     }
 
     #[test]
     fn i_returns_to_insert_mode() {
         let mut input = InputArea::new();
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         input.input(char_key('i'));
-        assert_eq!(input.mode(), &AppMode::Insert);
+        assert_eq!(input.vim_mode(), VimMode::Insert);
     }
 
     #[test]
-    fn normal_mode_ignores_typing() {
+    fn normal_mode_x_deletes_char() {
         let mut input = InputArea::new();
         input.input(char_key('a'));
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.text(), "a");
         input.input(char_key('x'));
-        input.input(char_key('y'));
+        assert_eq!(input.text(), "");
+    }
+
+    #[test]
+    fn normal_mode_motion_keys_do_not_insert() {
+        let mut input = InputArea::new();
+        input.input(char_key('a'));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.input(char_key('h'));
+        input.input(char_key('l'));
         assert_eq!(input.text(), "a");
     }
 
@@ -787,7 +769,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.input(char_key('i'));
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -802,9 +784,9 @@ mod tests {
     }
 
     #[test]
-    fn mode_defaults_to_insert() {
+    fn mode_defaults_to_editing() {
         let input = InputArea::new();
-        assert_eq!(input.mode(), &AppMode::Insert);
+        assert_eq!(input.mode(), &AppMode::Editing);
     }
 
     #[test]
@@ -829,30 +811,34 @@ mod tests {
     fn normal_mode_v_enters_visual() {
         let mut input = InputArea::new();
         input.set_text("hello");
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let consumed = input.input(char_key('v'));
         assert!(consumed, "v should be consumed in Normal mode");
-        assert_eq!(input.mode(), &AppMode::Visual, "v should enter Visual mode");
+        assert_eq!(
+            input.vim_mode(),
+            VimMode::Visual,
+            "v should enter Visual mode"
+        );
     }
 
     #[test]
     fn visual_mode_esc_returns_to_normal() {
         let mut input = InputArea::new();
         input.set_text("hello");
-        input.set_mode(AppMode::Normal);
-        input.input(char_key('v'));
-        assert_eq!(input.mode(), &AppMode::Visual);
         input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(input.mode(), &AppMode::Normal);
+        input.input(char_key('v'));
+        assert_eq!(input.vim_mode(), VimMode::Visual);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.vim_mode(), VimMode::Normal);
     }
 
     #[test]
     fn is_normal_checks_editor_state() {
         let mut input = InputArea::new();
         assert!(!input.is_normal());
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(input.is_normal());
-        input.set_mode(AppMode::Insert);
+        input.input(char_key('i'));
         assert!(!input.is_normal());
     }
 
@@ -867,7 +853,7 @@ mod tests {
     fn render_visual_mode() {
         let mut input = InputArea::new();
         input.set_text("hello world");
-        input.set_mode(AppMode::Normal);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         input.input(char_key('v'));
         input.input(char_key('l'));
 
