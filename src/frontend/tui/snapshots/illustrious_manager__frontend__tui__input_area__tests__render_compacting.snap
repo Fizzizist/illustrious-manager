@@ -1,9 +1,9 @@
 ---
 source: src/frontend/tui/input_area.rs
-assertion_line: 1368
+assertion_line: 901
 expression: terminal.backend()
 ---
-"┌[00:00] Compacting...─────────────────┐"
+"┌ Compacting... ───────────────────────┐"
 "│                                      │"
 "└──────────────────────────────────────┘"
 "                                        "

@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::commands::{CommandContext, DispatchResult, default_registry};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
-use super::input_area::{InputArea, InputMode};
+use super::input_area::{AppMode, InputArea};
 use super::session_picker::{SessionPicker, SessionPickerAction};
 use super::status_line::{self, StatusLineInfo, TokenUsage};
 use super::tasks_picker::{TasksPicker, TasksPickerAction};
@@ -48,7 +48,7 @@ pub enum AppState {
 }
 
 pub struct App {
-    pub input: InputArea<'static>,
+    pub input: InputArea,
     pub conversation: Vec<ConversationEntry>,
     pub current_response: String,
     pub current_thinking: String,
@@ -83,35 +83,20 @@ impl App {
     pub fn set_state(&mut self, state: AppState) {
         self.state = state;
         match &self.state {
-            AppState::Input => self.input.set_mode(InputMode::Insert),
-            AppState::Streaming => {
-                self.input.set_mode(InputMode::Streaming);
-                self.pending_g = false;
-            }
+            AppState::Input => self.input.set_mode(AppMode::Editing),
+            AppState::Streaming => self.input.set_mode(AppMode::Streaming),
             AppState::ToolConfirmation { name, input, .. } => {
-                self.input.set_mode(InputMode::ToolConfirmation {
+                self.input.set_mode(AppMode::ToolConfirmation {
                     name: name.clone(),
                     input: input.clone(),
                 });
-                self.pending_g = false;
             }
-            AppState::SessionPicker => {
-                self.input.set_mode(InputMode::SessionPicker);
-                self.pending_g = false;
-            }
-            AppState::TasksPicker => {
-                self.input.set_mode(InputMode::TasksPicker);
-                self.pending_g = false;
-            }
-            AppState::Compacting => {
-                self.input.set_mode(InputMode::Compacting);
-                self.pending_g = false;
-            }
-            AppState::RunningBash => {
-                self.input.set_mode(InputMode::RunningBash);
-                self.pending_g = false;
-            }
+            AppState::SessionPicker => self.input.set_mode(AppMode::SessionPicker),
+            AppState::TasksPicker => self.input.set_mode(AppMode::TasksPicker),
+            AppState::Compacting => self.input.set_mode(AppMode::Compacting),
+            AppState::RunningBash => self.input.set_mode(AppMode::RunningBash),
         }
+        self.pending_g = false;
         self.activity_start = match &self.state {
             AppState::Streaming | AppState::RunningBash | AppState::Compacting => {
                 Some(std::time::Instant::now())
@@ -345,7 +330,7 @@ impl App {
     }
 
     pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
-        let is_normal = self.input.mode() == &InputMode::Normal;
+        let is_normal = self.input.is_normal();
         match key {
             KeyEvent {
                 code: KeyCode::Char('u'),
@@ -408,6 +393,17 @@ impl App {
 
 fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
     thinking.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+fn finish_turn_reset(app: &mut App) {
+    app.current_response.clear();
+    app.current_thinking.clear();
+    app.streaming_timestamp.clear();
+    app.confirmation_tx = None;
+    app.cancel_token = None;
+    app.set_state(AppState::Input);
+    app.scroll_offset = 0;
+    app.git_branch = status_line::detect_git_branch();
 }
 
 impl App {
@@ -539,14 +535,7 @@ pub fn handle_agent_event(
                 full,
                 app.streaming_timestamp.clone(),
             ));
-            app.current_response.clear();
-            app.current_thinking.clear();
-            app.streaming_timestamp.clear();
-            app.confirmation_tx = None;
-            app.cancel_token = None;
-            app.set_state(AppState::Input);
-            app.scroll_offset = 0;
-            app.git_branch = status_line::detect_git_branch();
+            finish_turn_reset(app);
         }
         AgentEvent::Error(msg) => {
             app.conversation.push(ConversationEntry::new(
@@ -554,14 +543,7 @@ pub fn handle_agent_event(
                 msg,
                 crate::timestamp::format_now_timestamp(),
             ));
-            app.current_response.clear();
-            app.current_thinking.clear();
-            app.streaming_timestamp.clear();
-            app.confirmation_tx = None;
-            app.cancel_token = None;
-            app.set_state(AppState::Input);
-            app.scroll_offset = 0;
-            app.git_branch = status_line::detect_git_branch();
+            finish_turn_reset(app);
         }
         AgentEvent::ToolUseReceived {
             name, input, index, ..
@@ -839,7 +821,7 @@ async fn run_app(
                                     code: KeyCode::Enter,
                                     modifiers: KeyModifiers::NONE,
                                     ..
-                                } => {
+                                } if app.input.is_normal() => {
                                     let text = app.input_text();
                                     if !text.trim().is_empty() {
                                         let mut ctx = CommandContext {
@@ -860,6 +842,13 @@ async fn run_app(
                                             );
                                         }
                                     }
+                                }
+                                KeyEvent {
+                                    code: KeyCode::Enter,
+                                    modifiers: KeyModifiers::NONE,
+                                    ..
+                                } => {
+                                    app.input.input(key);
                                 }
                                 _ => {
                                     app.input.input(key);
@@ -2631,7 +2620,8 @@ mod tests {
     #[test]
     fn single_g_sets_pending_flag() {
         let mut app = app_with_content(10);
-        app.input.set_mode(InputMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let before_offset = app.scroll_offset;
         let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         let consumed = app.handle_scroll_key(&key);
@@ -2646,7 +2636,8 @@ mod tests {
     #[test]
     fn gg_jumps_to_top() {
         let mut app = app_with_content(10);
-        app.input.set_mode(InputMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let max = app.max_scroll();
         assert!(max > 0, "content should be scrollable");
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
@@ -2662,7 +2653,8 @@ mod tests {
     #[test]
     fn capital_g_jumps_to_bottom() {
         let mut app = app_with_content(10);
-        app.input.set_mode(InputMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.scroll_offset = 20;
         let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let consumed = app.handle_scroll_key(&key);
@@ -2674,7 +2666,8 @@ mod tests {
     #[test]
     fn non_g_key_clears_pending_g() {
         let mut app = app_with_content(10);
-        app.input.set_mode(InputMode::Normal);
+        app.input
+            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         app.handle_scroll_key(&g_key);
         assert!(app.pending_g);
@@ -2688,8 +2681,8 @@ mod tests {
     #[test]
     fn gg_inert_in_insert_mode() {
         let mut app = app_with_content(10);
-        // default mode is Insert (from App::new)
-        assert_eq!(app.input.mode(), &InputMode::Insert);
+        // default mode is Editing/Insert (from App::new)
+        assert!(!app.input.is_normal());
         let before_offset = app.scroll_offset;
         let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
         let consumed1 = app.handle_scroll_key(&g_key);
@@ -2710,7 +2703,7 @@ mod tests {
     fn capital_g_inert_in_insert_mode() {
         let mut app = app_with_content(10);
         app.scroll_offset = 15;
-        assert_eq!(app.input.mode(), &InputMode::Insert);
+        assert!(!app.input.is_normal());
         let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         let consumed = app.handle_scroll_key(&key);
         assert!(!consumed, "G should not be consumed in Insert mode");
@@ -2868,7 +2861,7 @@ mod tests {
     fn compacting_state_sets_compacting_input_mode() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.set_state(AppState::Compacting);
-        assert_eq!(app.input.mode(), &InputMode::Compacting);
+        assert_eq!(app.input.mode(), &AppMode::Compacting);
     }
 
     #[test]
