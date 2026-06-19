@@ -1,9 +1,9 @@
 ---
 source: src/frontend/tui/input_area.rs
-assertion_line: 641
+assertion_line: 657
 expression: terminal.backend()
 ---
-"┌[00:00] Streaming... (Esc to interrupt┐"
+"┌ Streaming... (Esc to interrupt) ─────┐"
 "│                                      │"
 "└──────────────────────────────────────┘"
 "                                        "

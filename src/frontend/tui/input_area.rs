@@ -1,21 +1,29 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
+use hjkl_buffer::{
+    Viewport, Wrap,
+    wrap::{segment_for_col, wrap_segments},
+};
+use hjkl_editor_tui::crossterm_key_event_to_input;
+use hjkl_engine::{Host, decode_planned_input};
+use hjkl_form::{TextFieldEditor, VimMode};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders};
-#[cfg(test)]
-use ratatui_textarea::DataCursor;
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 const INSERT_TITLE: &str = " -- INSERT -- ";
 const NORMAL_TITLE: &str = " -- NORMAL -- ";
 const VISUAL_TITLE: &str = " -- VISUAL -- ";
+const VISUAL_LINE_TITLE: &str = " -- VISUAL LINE -- ";
+const VISUAL_BLOCK_TITLE: &str = " -- VISUAL BLOCK -- ";
 const SESSIONS_TITLE: &str = " Sessions ";
 const TASKS_TITLE: &str = " Tasks ";
 const MIN_HEIGHT: u16 = 3;
 const MAX_INPUT_RATIO: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputMode {
+pub enum AppMode {
     Insert,
     Normal,
     Visual,
@@ -30,305 +38,107 @@ pub enum InputMode {
     RunningBash,
 }
 
-pub struct InputArea<'a> {
-    textarea: TextArea<'a>,
-    mode: InputMode,
+pub struct InputArea {
+    editor: TextFieldEditor,
+    mode: AppMode,
+    elapsed: Option<std::time::Duration>,
 }
 
-impl<'a> InputArea<'a> {
+impl InputArea {
     pub fn new() -> Self {
-        let textarea = TextArea::default();
+        let editor = TextFieldEditor::new(false);
         let mut input = Self {
-            textarea,
-            mode: InputMode::Insert,
+            editor,
+            mode: AppMode::Insert,
+            elapsed: None,
         };
-        input.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        input
-            .textarea
-            .set_cursor_line_style(Style::default().add_modifier(Modifier::empty()));
-        input.apply_block();
+        input.editor.enter_insert_at_end();
         input
     }
 
-    fn handle_motion(&mut self, event: KeyEvent) -> bool {
-        match event {
-            KeyEvent {
-                code: KeyCode::Char('h'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Back);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('l'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Forward);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('j'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Down);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('k'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Up);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('w'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::WordForward);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('b'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::WordBack);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('e'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::WordEnd);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('0'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::Head);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('$'),
-                ..
-            } => {
-                self.textarea.move_cursor(CursorMove::End);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    pub fn input(&mut self, event: crossterm::event::KeyEvent) -> bool {
+    pub fn input(&mut self, event: KeyEvent) -> bool {
         match self.mode {
-            InputMode::Insert => match event {
-                KeyEvent {
-                    code: KeyCode::Esc, ..
-                } => {
-                    self.set_mode(InputMode::Normal);
-                    true
-                }
-                _ => self.textarea.input(event),
-            },
-            InputMode::Normal => match event {
-                KeyEvent {
-                    code: KeyCode::Char('i'),
-                    ..
-                } => {
-                    self.set_mode(InputMode::Insert);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('o'),
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::End);
-                    self.textarea.insert_newline();
-                    self.set_mode(InputMode::Insert);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('O'),
-                    ..
-                } => {
-                    self.textarea.move_cursor(CursorMove::Head);
-                    self.textarea.insert_newline();
-                    self.textarea.move_cursor(CursorMove::Up);
-                    self.set_mode(InputMode::Insert);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('v'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.start_selection();
-                    self.set_mode(InputMode::Visual);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('p'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.paste();
-                    true
-                }
-                other => self.handle_motion(other),
-            },
-            InputMode::Visual => match event {
-                KeyEvent {
-                    code: KeyCode::Char('d'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.cut();
-                    self.set_mode(InputMode::Normal);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('c'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    self.textarea.cut();
-                    self.set_mode(InputMode::Insert);
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Char('p'),
-                    modifiers: KeyModifiers::NONE,
-                    ..
-                } => {
-                    let saved = self.textarea.yank_text();
-                    if saved.is_empty() {
-                        self.textarea.cancel_selection();
-                        self.set_mode(InputMode::Normal);
-                    } else {
-                        self.textarea.cut();
-                        self.textarea.set_yank_text(saved);
-                        self.textarea.paste();
-                        self.set_mode(InputMode::Normal);
-                    }
-                    true
-                }
-                KeyEvent {
-                    code: KeyCode::Esc, ..
-                } => {
-                    self.set_mode(InputMode::Normal);
-                    true
-                }
-                other => self.handle_motion(other),
-            },
-            _ => false,
+            AppMode::Insert | AppMode::Normal | AppMode::Visual => {}
+            _ => return false,
         }
-    }
 
-    pub fn lines(&self) -> &[String] {
-        self.textarea.lines()
+        let planned = crossterm_key_event_to_input(event);
+        if let Some(input) = decode_planned_input(planned) {
+            self.editor.handle_input(input);
+            self.mode = match self.editor.vim_mode() {
+                VimMode::Normal => AppMode::Normal,
+                VimMode::Insert => AppMode::Insert,
+                VimMode::Visual => AppMode::Visual,
+                VimMode::VisualLine => AppMode::Visual,
+                VimMode::VisualBlock => AppMode::Visual,
+            };
+            return true;
+        }
+        false
     }
 
     pub fn is_empty(&self) -> bool {
-        self.textarea.is_empty()
+        self.editor.text().is_empty()
     }
 
     pub fn text(&self) -> String {
-        self.textarea.lines().join("\n")
+        self.editor.text()
     }
 
     pub fn set_text(&mut self, text: &str) {
-        let lines: Vec<String> = if text.is_empty() {
-            vec![String::new()]
-        } else {
-            text.lines().map(String::from).collect()
-        };
-        self.textarea = TextArea::new(lines);
-        self.textarea.set_wrap_mode(WrapMode::WordOrGlyph);
-        self.textarea
-            .set_cursor_line_style(Style::default().add_modifier(Modifier::empty()));
-        self.apply_block();
+        self.editor.set_text(text);
     }
 
     pub fn clear(&mut self) {
-        self.textarea.clear();
+        self.editor.set_text("");
     }
 
     pub fn insert_paste(&mut self, text: &str) {
-        self.textarea.insert_str(text);
+        self.editor.editor.insert_str(text);
     }
 
-    pub fn set_mode(&mut self, mode: InputMode) {
-        if self.mode == InputMode::Visual {
-            self.textarea.cancel_selection();
-        }
-        self.mode = mode;
-        self.apply_block();
-    }
-
-    pub fn mode(&self) -> &InputMode {
-        &self.mode
-    }
-
-    pub fn set_elapsed_title(&mut self, duration: std::time::Duration) {
-        let elapsed = crate::timestamp::format_elapsed(duration);
-        match &self.mode {
-            InputMode::Streaming => {
-                let title = format!("{elapsed} Streaming... (Esc to interrupt)");
-                self.textarea
-                    .set_block(Block::default().borders(Borders::ALL).title(title));
+    pub fn set_mode(&mut self, mode: AppMode) {
+        match &mode {
+            AppMode::Insert => {
+                self.editor.enter_insert_at_end();
             }
-            InputMode::Compacting => {
-                let title = format!("{elapsed} Compacting...");
-                self.textarea
-                    .set_block(Block::default().borders(Borders::ALL).title(title));
+            AppMode::Normal => {
+                self.editor.enter_normal();
             }
-            InputMode::RunningBash => {
-                let title = format!("{elapsed} Running bash... (Esc to cancel)");
-                self.textarea
-                    .set_block(Block::default().borders(Borders::ALL).title(title));
+            AppMode::Visual => {
+                self.editor.enter_normal();
+                use hjkl_engine::Input;
+                use hjkl_engine::Key;
+                self.editor.handle_input(Input {
+                    key: Key::Char('v'),
+                    ..Input::default()
+                });
             }
             _ => {}
         }
+        self.mode = mode;
     }
 
-    fn apply_block(&mut self) {
-        match &self.mode {
-            InputMode::Streaming | InputMode::Compacting | InputMode::RunningBash => {
-                self.set_elapsed_title(std::time::Duration::ZERO);
-            }
-            _ => {
-                let block = match &self.mode {
-                    InputMode::Insert => Block::default().borders(Borders::ALL).title(INSERT_TITLE),
-                    InputMode::Normal => Block::default().borders(Borders::ALL).title(NORMAL_TITLE),
-                    InputMode::Visual => Block::default().borders(Borders::ALL).title(VISUAL_TITLE),
-                    InputMode::SessionPicker => {
-                        Block::default().borders(Borders::ALL).title(SESSIONS_TITLE)
-                    }
-                    InputMode::TasksPicker => {
-                        Block::default().borders(Borders::ALL).title(TASKS_TITLE)
-                    }
-                    InputMode::ToolConfirmation { name, .. } => Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!("Allow '{name}'? [y/n]")),
-                    _ => unreachable!(),
-                };
-                self.textarea.set_block(block);
-            }
-        }
+    pub fn mode(&self) -> &AppMode {
+        &self.mode
+    }
+
+    pub fn vim_mode(&self) -> VimMode {
+        self.editor.vim_mode()
+    }
+
+    pub fn is_normal(&self) -> bool {
+        self.editor.vim_mode() == VimMode::Normal
+    }
+
+    pub fn set_elapsed_title(&mut self, duration: std::time::Duration) {
+        self.elapsed = Some(duration);
     }
 
     pub fn height_for_width(&self, width: u16, available_height: u16) -> u16 {
         let max_height = (available_height / MAX_INPUT_RATIO).max(MIN_HEIGHT);
         match &self.mode {
-            InputMode::ToolConfirmation { name, input } => {
+            AppMode::ToolConfirmation { name, input } => {
                 let confirmation_text = format!("Allow '{}' with input {}?", name, input);
                 let lines_needed = confirmation_text.lines().count() as u16;
                 lines_needed
@@ -336,12 +146,12 @@ impl<'a> InputArea<'a> {
                     .max(MIN_HEIGHT)
                     .min(max_height)
             }
-            InputMode::Streaming
-            | InputMode::SessionPicker
-            | InputMode::TasksPicker
-            | InputMode::Compacting
-            | InputMode::RunningBash => MIN_HEIGHT,
-            InputMode::Insert | InputMode::Normal | InputMode::Visual => {
+            AppMode::Streaming
+            | AppMode::SessionPicker
+            | AppMode::TasksPicker
+            | AppMode::Compacting
+            | AppMode::RunningBash => MIN_HEIGHT,
+            AppMode::Insert | AppMode::Normal | AppMode::Visual => {
                 self.text_height_for_width(width, max_height)
             }
         }
@@ -351,49 +161,262 @@ impl<'a> InputArea<'a> {
         if width == 0 {
             return MIN_HEIGHT;
         }
-        let inner_width = width.saturating_sub(2) as usize;
-        if inner_width == 0 {
+        let text_width = width.saturating_sub(2);
+        if text_width == 0 {
             return MIN_HEIGHT;
         }
-        let lines = self.textarea.lines();
-        if lines.is_empty() || lines.iter().all(|l| l.is_empty()) {
+        let viewport = Viewport {
+            wrap: Wrap::Word,
+            text_width,
+            ..Viewport::default()
+        };
+        let buffer = self.editor.buffer();
+        let row_count = buffer.row_count();
+        if row_count == 0 {
             return MIN_HEIGHT;
         }
-        let total_visual_lines: usize = lines
-            .iter()
-            .map(|line| {
-                if line.is_empty() {
-                    1
+        let screen_rows = buffer.screen_rows_between(&viewport, 0, row_count.saturating_sub(1));
+        let content_lines = screen_rows
+            .min(u16::MAX as usize)
+            .min(max_height.saturating_sub(2) as usize) as u16;
+        content_lines
+            .saturating_add(2)
+            .clamp(MIN_HEIGHT, max_height)
+    }
+
+    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect) {
+        let block = self.build_block(area);
+        let inner = block.inner(area);
+
+        if inner.width == 0 || inner.height == 0 {
+            frame.render_widget(block, area);
+            return;
+        }
+
+        let text_width = inner.width;
+        {
+            let v = self.editor.editor.host_mut().viewport_mut();
+            v.wrap = Wrap::Word;
+            v.text_width = text_width;
+            v.width = inner.width;
+            v.height = inner.height;
+        }
+        let mut viewport = *self.editor.editor.host().viewport();
+        self.editor
+            .editor
+            .buffer_mut()
+            .ensure_cursor_visible(&mut viewport);
+        *self.editor.editor.host_mut().viewport_mut() = viewport;
+
+        let buffer = self.editor.buffer();
+        let text = self.editor.text();
+        let row_count = buffer.row_count();
+
+        let lines: Vec<Line> = if row_count == 0 {
+            vec![Line::from("")]
+        } else {
+            let selection = self.editor.editor.selection_highlight();
+            let line_texts: Vec<&str> = text.split('\n').collect();
+
+            (0..row_count)
+                .flat_map(|row| {
+                    let line_text = line_texts.get(row).copied().unwrap_or("");
+                    let segments = wrap_segments(line_text, text_width, Wrap::Word);
+                    match &selection {
+                        Some(sel) => {
+                            let sel_start = sel.range.start.line as usize;
+                            let sel_end = sel.range.end.line as usize;
+                            if row >= sel_start && row <= sel_end {
+                                let col_start = if row == sel_start {
+                                    sel.range.start.col as usize
+                                } else {
+                                    0
+                                };
+                                let col_end = if row == sel_end {
+                                    (sel.range.end.col as usize).saturating_add(1)
+                                } else {
+                                    line_text.chars().count()
+                                };
+                                make_selection_lines(line_text, &segments, col_start, col_end)
+                            } else {
+                                lines_from_segments(line_text, &segments)
+                            }
+                        }
+                        None => lines_from_segments(line_text, &segments),
+                    }
+                })
+                .collect()
+        };
+
+        let paragraph = Paragraph::new(lines).block(block);
+        frame.render_widget(paragraph, area);
+
+        if let Some((x, y)) = cursor_xy(&self.editor, inner, text_width) {
+            frame.set_cursor_position(ratatui::layout::Position { x, y });
+        }
+    }
+
+    fn build_block(&self, _area: Rect) -> Block<'static> {
+        let title = match &self.mode {
+            AppMode::Insert => match self.editor.vim_mode() {
+                VimMode::Normal => NORMAL_TITLE,
+                VimMode::Insert => INSERT_TITLE,
+                VimMode::Visual => VISUAL_TITLE,
+                VimMode::VisualLine => VISUAL_LINE_TITLE,
+                VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
+            }
+            .to_string(),
+            AppMode::Normal => NORMAL_TITLE.to_string(),
+            AppMode::Visual => VISUAL_TITLE.to_string(),
+            AppMode::Streaming => {
+                if let Some(elapsed) = self.elapsed {
+                    format!(
+                        "{} Streaming... (Esc to interrupt)",
+                        crate::timestamp::format_elapsed(elapsed)
+                    )
                 } else {
-                    let width_val = unicode_width::UnicodeWidthStr::width(line.as_str());
-                    width_val.div_ceil(inner_width)
+                    " Streaming... (Esc to interrupt) ".to_string()
                 }
-            })
-            .sum();
-        let needed = (total_visual_lines as u16).saturating_add(2);
-        needed.clamp(MIN_HEIGHT, max_height)
-    }
+            }
+            AppMode::Compacting => {
+                if let Some(elapsed) = self.elapsed {
+                    format!(
+                        "{} Compacting...",
+                        crate::timestamp::format_elapsed(elapsed)
+                    )
+                } else {
+                    " Compacting... ".to_string()
+                }
+            }
+            AppMode::RunningBash => {
+                if let Some(elapsed) = self.elapsed {
+                    format!(
+                        "{} Running bash... (Esc to cancel)",
+                        crate::timestamp::format_elapsed(elapsed)
+                    )
+                } else {
+                    " Running bash... (Esc to cancel) ".to_string()
+                }
+            }
+            AppMode::SessionPicker => SESSIONS_TITLE.to_string(),
+            AppMode::TasksPicker => TASKS_TITLE.to_string(),
+            AppMode::ToolConfirmation { name, .. } => {
+                format!(" Allow '{}'? [y/n] ", name)
+            }
+        };
 
-    pub fn render(&self, frame: &mut ratatui::Frame, area: Rect) {
-        frame.render_widget(&self.textarea, area);
-    }
-
-    #[cfg(test)]
-    pub(super) fn cursor(&self) -> DataCursor {
-        self.textarea.cursor()
+        Block::default().borders(Borders::ALL).title(title)
     }
 }
 
-impl Default for InputArea<'_> {
+impl Default for InputArea {
     fn default() -> Self {
         Self::new()
     }
 }
 
+fn char_slice(line_text: &str, start: usize, end: usize) -> String {
+    line_text
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
+}
+
+fn make_selection_lines(
+    line_text: &str,
+    segments: &[(usize, usize)],
+    col_start: usize,
+    col_end: usize,
+) -> Vec<Line<'static>> {
+    segments
+        .iter()
+        .map(|&(seg_start, seg_end)| {
+            let seg_len = seg_end.saturating_sub(seg_start);
+            let local_sel_start = col_start.saturating_sub(seg_start).min(seg_len);
+            let local_sel_end = col_end.saturating_sub(seg_start).min(seg_len);
+
+            if local_sel_start == 0 && local_sel_end >= seg_len {
+                Line::from(Span::styled(
+                    char_slice(line_text, seg_start, seg_end),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ))
+            } else if local_sel_end <= local_sel_start {
+                Line::from(Span::raw(char_slice(line_text, seg_start, seg_end)))
+            } else {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let before = char_slice(line_text, seg_start, seg_start + local_sel_start);
+                if !before.is_empty() {
+                    spans.push(Span::raw(before));
+                }
+                let selected = char_slice(
+                    line_text,
+                    seg_start + local_sel_start,
+                    seg_start + local_sel_end,
+                );
+                if !selected.is_empty() {
+                    spans.push(Span::styled(
+                        selected,
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                }
+                let after = char_slice(line_text, seg_start + local_sel_end, seg_end);
+                if !after.is_empty() {
+                    spans.push(Span::raw(after));
+                }
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
+fn lines_from_segments(line_text: &str, segments: &[(usize, usize)]) -> Vec<Line<'static>> {
+    if segments.is_empty() {
+        vec![Line::from("")]
+    } else {
+        segments
+            .iter()
+            .map(|&(start, end)| Line::from(Span::raw(char_slice(line_text, start, end))))
+            .collect()
+    }
+}
+
+fn cursor_xy(editor: &TextFieldEditor, rect: Rect, text_width: u16) -> Option<(u16, u16)> {
+    let viewport = editor.editor.host().viewport();
+    let buffer = editor.buffer();
+    let (row, col) = editor.cursor();
+
+    let text = editor.text();
+    let line_text = text.split('\n').nth(row)?;
+    let segments = wrap_segments(line_text, text_width, Wrap::Word);
+    let seg_idx = segment_for_col(&segments, col);
+    let &(seg_start, _seg_end) = segments.get(seg_idx)?;
+
+    let prefix: String = line_text
+        .chars()
+        .skip(seg_start)
+        .take(col.saturating_sub(seg_start))
+        .collect();
+    let dx = UnicodeWidthStr::width(prefix.as_str()) as u16;
+
+    let dy = if row == 0 {
+        seg_idx as u16
+    } else {
+        let rows_before = buffer.screen_rows_between(viewport, 0, row.saturating_sub(1));
+        (rows_before.min(u16::MAX as usize) as u16).saturating_add(seg_idx as u16)
+    };
+
+    if dy >= rect.height {
+        return None;
+    }
+
+    Some((rect.x.saturating_add(dx), rect.y.saturating_add(dy)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn char_key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -435,13 +458,12 @@ mod tests {
     }
 
     #[test]
-    fn enter_key_inserts_newline() {
+    fn enter_in_insert_mode_inserts_newline() {
         let mut input = InputArea::new();
         input.input(char_key('a'));
         input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         input.input(char_key('b'));
         assert_eq!(input.text(), "a\nb");
-        assert_eq!(input.lines().len(), 2);
     }
 
     #[test]
@@ -459,7 +481,6 @@ mod tests {
         let mut input = InputArea::new();
         input.set_text("line1\nline2\nline3");
         assert_eq!(input.text(), "line1\nline2\nline3");
-        assert_eq!(input.lines().len(), 3);
     }
 
     #[test]
@@ -625,7 +646,7 @@ mod tests {
     #[test]
     fn set_mode_streaming_updates_title() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Streaming);
+        input.set_mode(AppMode::Streaming);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -642,7 +663,7 @@ mod tests {
     #[test]
     fn render_streaming_with_elapsed() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Streaming);
+        input.set_mode(AppMode::Streaming);
         input.set_elapsed_title(std::time::Duration::from_secs(55));
 
         let backend = ratatui::backend::TestBackend::new(60, 10);
@@ -660,7 +681,7 @@ mod tests {
     #[test]
     fn render_compacting_with_elapsed() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Compacting);
+        input.set_mode(AppMode::Compacting);
         input.set_elapsed_title(std::time::Duration::from_secs(55));
 
         let backend = ratatui::backend::TestBackend::new(60, 10);
@@ -678,7 +699,7 @@ mod tests {
     #[test]
     fn render_running_bash_with_elapsed() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::RunningBash);
+        input.set_mode(AppMode::RunningBash);
         input.set_elapsed_title(std::time::Duration::from_secs(55));
 
         let backend = ratatui::backend::TestBackend::new(60, 10);
@@ -696,7 +717,7 @@ mod tests {
     #[test]
     fn set_mode_tool_confirmation_updates_title() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::ToolConfirmation {
+        input.set_mode(AppMode::ToolConfirmation {
             name: "write_file".to_string(),
             input: serde_json::json!({"path": "/tmp/test.txt"}),
         });
@@ -718,8 +739,8 @@ mod tests {
     fn set_mode_back_to_input_restores_input_title() {
         let mut input = InputArea::new();
         input.input(char_key('h'));
-        input.set_mode(InputMode::Streaming);
-        input.set_mode(InputMode::Insert);
+        input.set_mode(AppMode::Streaming);
+        input.set_mode(AppMode::Insert);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -739,50 +760,26 @@ mod tests {
         input.input(char_key('h'));
         input.input(char_key('i'));
         input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(input.mode(), &InputMode::Normal);
+        assert_eq!(input.mode(), &AppMode::Normal);
         assert_eq!(input.text(), "hi");
     }
 
     #[test]
     fn i_returns_to_insert_mode() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Normal);
+        input.set_mode(AppMode::Normal);
         input.input(char_key('i'));
-        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.mode(), &AppMode::Insert);
     }
 
     #[test]
     fn normal_mode_ignores_typing() {
         let mut input = InputArea::new();
         input.input(char_key('a'));
-        input.set_mode(InputMode::Normal);
+        input.set_mode(AppMode::Normal);
         input.input(char_key('x'));
         input.input(char_key('y'));
         assert_eq!(input.text(), "a");
-    }
-
-    #[test]
-    fn o_opens_line_below_and_enters_insert() {
-        let mut input = InputArea::new();
-        input.set_text("first");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('o'));
-        assert_eq!(input.mode(), &InputMode::Insert);
-        assert_eq!(input.lines().len(), 2);
-        assert_eq!(input.lines()[0], "first");
-        assert_eq!(input.lines()[1], "");
-    }
-
-    #[test]
-    fn upper_o_opens_line_above_and_enters_insert() {
-        let mut input = InputArea::new();
-        input.set_text("first");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
-        assert_eq!(input.mode(), &InputMode::Insert);
-        assert_eq!(input.lines().len(), 2);
-        assert_eq!(input.lines()[0], "");
-        assert_eq!(input.lines()[1], "first");
     }
 
     #[test]
@@ -790,7 +787,7 @@ mod tests {
         let mut input = InputArea::new();
         input.input(char_key('h'));
         input.input(char_key('i'));
-        input.set_mode(InputMode::Normal);
+        input.set_mode(AppMode::Normal);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -805,22 +802,22 @@ mod tests {
     }
 
     #[test]
-    fn mode_defaults_to_input() {
+    fn mode_defaults_to_insert() {
         let input = InputArea::new();
-        assert_eq!(input.mode(), &InputMode::Insert);
+        assert_eq!(input.mode(), &AppMode::Insert);
     }
 
     #[test]
     fn height_for_width_streaming_returns_min() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Streaming);
+        input.set_mode(AppMode::Streaming);
         assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 
     #[test]
     fn height_for_width_tool_confirmation_scales_with_content() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::ToolConfirmation {
+        input.set_mode(AppMode::ToolConfirmation {
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls -la /some/long/path"}),
         });
@@ -829,331 +826,48 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_w_moves_cursor_word_forward() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let consumed = input.input(char_key('w'));
-        assert!(consumed, "w should be consumed in Normal mode");
-        assert_eq!(
-            input.cursor().1,
-            6,
-            "w from col 0 on 'hello world' should land at col 6 (start of 'world')"
-        );
-    }
-
-    #[test]
-    fn normal_mode_b_moves_cursor_word_back() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('w')); // now at col 6
-        let consumed = input.input(char_key('b'));
-        assert!(consumed, "b should be consumed in Normal mode");
-        assert_eq!(
-            input.cursor().1,
-            0,
-            "b from col 6 on 'hello world' should return to col 0"
-        );
-    }
-
-    #[test]
-    fn normal_mode_e_moves_cursor_word_end() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let consumed = input.input(char_key('e'));
-        assert!(consumed, "e should be consumed in Normal mode");
-        assert_eq!(
-            input.cursor().1,
-            4,
-            "e from col 0 on 'hello world' should land at col 4 (end of 'hello')"
-        );
-    }
-
-    #[test]
-    fn insert_mode_w_inserts_literal() {
-        let mut input = InputArea::new();
-        assert_eq!(input.mode(), &InputMode::Insert);
-        input.input(char_key('w'));
-        assert_eq!(
-            input.text(),
-            "w",
-            "w in Insert mode should insert literal 'w'"
-        );
-    }
-
-    #[test]
-    fn insert_mode_b_inserts_literal() {
-        let mut input = InputArea::new();
-        input.input(char_key('b'));
-        assert_eq!(
-            input.text(),
-            "b",
-            "b in Insert mode should insert literal 'b'"
-        );
-    }
-
-    #[test]
-    fn insert_mode_e_inserts_literal() {
-        let mut input = InputArea::new();
-        input.input(char_key('e'));
-        assert_eq!(
-            input.text(),
-            "e",
-            "e in Insert mode should insert literal 'e'"
-        );
-    }
-
-    // --- Visual mode and new Normal keybinding tests ---
-
-    #[test]
-    fn normal_mode_0_moves_to_line_start() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('w'));
-        let consumed = input.input(char_key('0'));
-        assert!(consumed, "0 should be consumed in Normal mode");
-        assert_eq!(input.cursor().1, 0, "0 should move cursor to line start");
-    }
-
-    #[test]
-    fn normal_mode_dollar_moves_to_line_end() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        let consumed = input.input(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
-        assert!(consumed, "$ should be consumed in Normal mode");
-        assert!(
-            input.cursor().1 >= 10,
-            "$ should move cursor near line end, got col {}",
-            input.cursor().1
-        );
-    }
-
-    #[test]
     fn normal_mode_v_enters_visual() {
         let mut input = InputArea::new();
         input.set_text("hello");
-        input.set_mode(InputMode::Normal);
+        input.set_mode(AppMode::Normal);
         let consumed = input.input(char_key('v'));
         assert!(consumed, "v should be consumed in Normal mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Visual,
-            "v should enter Visual mode"
-        );
+        assert_eq!(input.mode(), &AppMode::Visual, "v should enter Visual mode");
     }
 
     #[test]
-    fn normal_mode_p_pastes_register() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('d'));
-        assert_eq!(input.mode(), &InputMode::Normal);
-        let consumed = input.input(char_key('p'));
-        assert!(consumed, "p should be consumed in Normal mode");
-        assert!(
-            input.text().contains("h"),
-            "p should paste from register, got '{}'",
-            input.text()
-        );
-    }
-
-    #[test]
-    fn normal_mode_h_moves_left() {
+    fn visual_mode_esc_returns_to_normal() {
         let mut input = InputArea::new();
         input.set_text("hello");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('l'));
-        input.input(char_key('l'));
-        assert_eq!(
-            input.cursor().1,
-            2,
-            "should start at col 2 after two l presses"
-        );
-        let consumed = input.input(char_key('h'));
-        assert!(consumed, "h should be consumed in Normal mode");
-        assert_eq!(input.cursor().1, 1, "h should move cursor left by one");
-    }
-
-    #[test]
-    fn normal_mode_l_moves_right() {
-        let mut input = InputArea::new();
-        input.set_text("hello");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let consumed = input.input(char_key('l'));
-        assert!(consumed, "l should be consumed in Normal mode");
-        assert_eq!(input.cursor().1, 1, "l should move cursor right by one");
-    }
-
-    #[test]
-    fn normal_mode_j_moves_down() {
-        let mut input = InputArea::new();
-        input.set_text("line1\nline2");
-        input.set_mode(InputMode::Normal);
-        let start_row = input.cursor().0;
-        let consumed = input.input(char_key('j'));
-        assert!(consumed, "j should be consumed in Normal mode");
-        assert_eq!(
-            input.cursor().0,
-            start_row + 1,
-            "j should move cursor down one line"
-        );
-    }
-
-    #[test]
-    fn normal_mode_k_moves_up() {
-        let mut input = InputArea::new();
-        input.set_text("line1\nline2");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('j'));
-        let row_after_j = input.cursor().0;
-        assert!(row_after_j > 0, "should be on row > 0 after j");
-        let consumed = input.input(char_key('k'));
-        assert!(consumed, "k should be consumed in Normal mode");
-        assert_eq!(
-            input.cursor().0,
-            row_after_j - 1,
-            "k should move cursor up one line"
-        );
-    }
-
-    #[test]
-    fn visual_mode_motions_extend_selection() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.set_mode(AppMode::Normal);
         input.input(char_key('v'));
-        assert_eq!(input.mode(), &InputMode::Visual);
-        let consumed = input.input(char_key('l'));
-        assert!(consumed, "l should be consumed in Visual mode");
-        assert_eq!(input.cursor().1, 1, "l should move cursor to col 1");
-        let consumed = input.input(char_key('l'));
-        assert!(consumed, "second l should be consumed in Visual mode");
-        assert_eq!(input.cursor().1, 2, "second l should move cursor to col 2");
+        assert_eq!(input.mode(), &AppMode::Visual);
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.mode(), &AppMode::Normal);
     }
 
     #[test]
-    fn visual_mode_d_deletes_and_returns_normal() {
+    fn is_normal_checks_editor_state() {
         let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('l'));
-        let consumed = input.input(char_key('d'));
-        assert!(consumed, "d should be consumed in Visual mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Normal,
-            "d should return to Normal mode"
-        );
-        assert_eq!(input.text(), "llo world", "d should delete selected text");
+        assert!(!input.is_normal());
+        input.set_mode(AppMode::Normal);
+        assert!(input.is_normal());
+        input.set_mode(AppMode::Insert);
+        assert!(!input.is_normal());
     }
 
     #[test]
-    fn visual_mode_c_deletes_and_returns_insert() {
+    fn insert_paste_adds_text() {
         let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('l'));
-        let consumed = input.input(char_key('c'));
-        assert!(consumed, "c should be consumed in Visual mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Insert,
-            "c should enter Insert mode"
-        );
-        assert_eq!(input.text(), "llo world", "c should delete selected text");
-    }
-
-    #[test]
-    fn visual_mode_p_replaces_selection() {
-        let mut input = InputArea::new();
-        input.set_text("hello world foo");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('w'));
-        input.input(char_key('d'));
-        assert_eq!(input.mode(), &InputMode::Normal);
-        assert_eq!(input.text(), "world foo");
-        assert_eq!(input.cursor().1, 0, "cursor should be at start after cut");
-
-        input.input(char_key('w'));
-        assert_eq!(input.cursor().1, 6, "w should move to start of 'foo'");
-        input.input(char_key('v'));
-        input.input(char_key('w'));
-        let consumed = input.input(char_key('p'));
-        assert!(consumed, "p should be consumed in Visual mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Normal,
-            "p should return to Normal mode"
-        );
-        assert_eq!(
-            input.text(),
-            "world hello ",
-            "p should replace selection with register content"
-        );
-    }
-
-    #[test]
-    fn visual_mode_esc_cancels_and_returns_normal() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        assert_eq!(input.mode(), &InputMode::Visual);
-        let consumed = input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(consumed, "Esc should be consumed in Visual mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Normal,
-            "Esc should return to Normal mode"
-        );
-        assert_eq!(input.text(), "hello world", "Esc should not modify text");
-    }
-
-    #[test]
-    fn set_mode_from_visual_cancels_selection() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        assert_eq!(input.mode(), &InputMode::Visual);
-        input.set_mode(InputMode::Insert);
-        assert_eq!(input.mode(), &InputMode::Insert);
-        assert_eq!(
-            input.text(),
-            "hello world",
-            "transitioning out of Visual should not modify text"
-        );
+        input.insert_paste("pasted text");
+        assert_eq!(input.text(), "pasted text");
     }
 
     #[test]
     fn render_visual_mode() {
         let mut input = InputArea::new();
         input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        input.set_mode(AppMode::Normal);
         input.input(char_key('v'));
         input.input(char_key('l'));
 
@@ -1170,225 +884,9 @@ mod tests {
     }
 
     #[test]
-    fn visual_mode_w_moves_word_forward() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        let consumed = input.input(char_key('w'));
-        assert!(consumed, "w should be consumed in Visual mode");
-        assert_eq!(
-            input.cursor().1,
-            6,
-            "w in Visual should move to start of 'world'"
-        );
-    }
-
-    #[test]
-    fn visual_mode_b_moves_word_back() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('w'));
-        assert_eq!(input.cursor().1, 6);
-        let consumed = input.input(char_key('b'));
-        assert!(consumed, "b should be consumed in Visual mode");
-        assert_eq!(input.cursor().1, 0, "b in Visual should move back to start");
-    }
-
-    #[test]
-    fn visual_mode_e_moves_word_end() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        let consumed = input.input(char_key('e'));
-        assert!(consumed, "e should be consumed in Visual mode");
-        assert_eq!(
-            input.cursor().1,
-            4,
-            "e in Visual should move to end of 'hello'"
-        );
-    }
-
-    #[test]
-    fn visual_mode_0_moves_to_line_start() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        assert!(input.cursor().1 > 0);
-        let consumed = input.input(char_key('0'));
-        assert!(consumed, "0 should be consumed in Visual mode");
-        assert_eq!(
-            input.cursor().1,
-            0,
-            "0 in Visual should move cursor to line start"
-        );
-    }
-
-    #[test]
-    fn visual_mode_dollar_moves_to_line_end() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        let consumed = input.input(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE));
-        assert!(consumed, "$ should be consumed in Visual mode");
-        assert!(
-            input.cursor().1 >= 10,
-            "$ in Visual should move cursor near line end, got col {}",
-            input.cursor().1
-        );
-    }
-
-    #[test]
-    fn visual_mode_j_moves_down() {
-        let mut input = InputArea::new();
-        input.set_text("line1\nline2");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        let start_row = input.cursor().0;
-        let consumed = input.input(char_key('j'));
-        assert!(consumed, "j should be consumed in Visual mode");
-        assert_eq!(
-            input.cursor().0,
-            start_row + 1,
-            "j in Visual should move cursor down one line"
-        );
-    }
-
-    #[test]
-    fn visual_mode_k_moves_up() {
-        let mut input = InputArea::new();
-        input.set_text("line1\nline2");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('j'));
-        let row_after_j = input.cursor().0;
-        assert!(row_after_j > 0);
-        let consumed = input.input(char_key('k'));
-        assert!(consumed, "k should be consumed in Visual mode");
-        assert_eq!(
-            input.cursor().0,
-            row_after_j - 1,
-            "k in Visual should move cursor up one line"
-        );
-    }
-
-    #[test]
-    fn visual_mode_unrecognized_key_not_consumed() {
-        let mut input = InputArea::new();
-        input.set_text("hello");
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('v'));
-        let consumed = input.input(char_key('x'));
-        assert!(
-            !consumed,
-            "unrecognized key in Visual mode should not be consumed"
-        );
-    }
-
-    #[test]
-    fn normal_mode_p_empty_register_noop() {
-        let mut input = InputArea::new();
-        input.set_text("hello");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        let consumed = input.input(char_key('p'));
-        assert!(
-            consumed,
-            "p should be consumed in Normal mode even with empty register"
-        );
-        assert_eq!(
-            input.text(),
-            "hello",
-            "p with empty register should not change text"
-        );
-    }
-
-    #[test]
-    fn visual_d_then_normal_p_pastes_deleted_text() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('l'));
-        input.input(char_key('d'));
-        assert_eq!(input.mode(), &InputMode::Normal);
-        assert_eq!(input.text(), "llo world");
-
-        input.input(char_key('$'));
-        let consumed = input.input(char_key('p'));
-        assert!(consumed, "p should be consumed in Normal mode");
-        assert_eq!(
-            input.text(),
-            "llo worldhe",
-            "p should paste the deleted text at cursor position"
-        );
-    }
-
-    #[test]
-    fn visual_c_then_normal_p_pastes_deleted_text() {
-        let mut input = InputArea::new();
-        input.set_text("abc def ghi");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('w'));
-        input.input(char_key('c'));
-        assert_eq!(input.mode(), &InputMode::Insert);
-        assert_eq!(input.text(), "def ghi");
-
-        input.set_mode(InputMode::Normal);
-        input.input(char_key('$'));
-        let consumed = input.input(char_key('p'));
-        assert!(consumed, "p should be consumed in Normal mode");
-        assert_eq!(
-            input.text(),
-            "def ghiabc ",
-            "p should paste the cut text at cursor position"
-        );
-    }
-
-    #[test]
-    fn visual_p_with_empty_yank_cancels_without_data_loss() {
-        let mut input = InputArea::new();
-        input.set_text("hello world");
-        input.set_mode(InputMode::Normal);
-        input.input(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        input.input(char_key('v'));
-        input.input(char_key('l'));
-        input.input(char_key('l'));
-        let consumed = input.input(char_key('p'));
-        assert!(consumed, "p should be consumed in Visual mode");
-        assert_eq!(
-            input.mode(),
-            &InputMode::Normal,
-            "p with empty yank should return to Normal"
-        );
-        assert_eq!(
-            input.text(),
-            "hello world",
-            "p with empty yank should not delete text"
-        );
-    }
-
-    #[test]
     fn compacting_mode_shows_compacting_title() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Compacting);
+        input.set_mode(AppMode::Compacting);
 
         let backend = ratatui::backend::TestBackend::new(40, 10);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -1405,7 +903,7 @@ mod tests {
     #[test]
     fn compacting_mode_height_is_min() {
         let mut input = InputArea::new();
-        input.set_mode(InputMode::Compacting);
+        input.set_mode(AppMode::Compacting);
         assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
     }
 }

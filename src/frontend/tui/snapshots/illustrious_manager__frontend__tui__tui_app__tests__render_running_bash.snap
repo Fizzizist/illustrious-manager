@@ -1,5 +1,6 @@
 ---
 source: src/frontend/tui/tui_app.rs
+assertion_line: 3098
 expression: terminal.backend()
 ---
 "┌Conversation──────────────────────────────────────────────┐"
@@ -18,7 +19,7 @@ expression: terminal.backend()
 "│                                                          │"
 "│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
-"┌[00:00] Running bash... (Esc to cancel)───────────────────┐"
+"┌ Running bash... (Esc to cancel) ─────────────────────────┐"
 "│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
 " ↑0 ↓0   no git                                             "

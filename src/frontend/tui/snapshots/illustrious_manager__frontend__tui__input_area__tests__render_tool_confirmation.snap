@@ -1,8 +1,9 @@
 ---
 source: src/frontend/tui/input_area.rs
+assertion_line: 732
 expression: terminal.backend()
 ---
-"┌Allow 'write_file'? [y/n]─────────────────────────────────┐"
+"┌ Allow 'write_file'? [y/n] ───────────────────────────────┐"
 "│                                                          │"
 "└──────────────────────────────────────────────────────────┘"
 "                                                            "
