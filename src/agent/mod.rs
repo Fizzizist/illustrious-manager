@@ -437,7 +437,7 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
+                        record_error(&format!("{e:#}"), &history_arc, &session, &event_tx).await;
                         break;
                     }
                 };
@@ -555,7 +555,8 @@ impl Agent {
                                     .insert_message(&thinking_msg)
                                     .await;
                             }
-                            record_error(&e.to_string(), &history_arc, &session, &event_tx).await;
+                            record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                                .await;
                             break 'outer;
                         }
                     }
@@ -1739,6 +1740,81 @@ mod tests {
                     |b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]") && t.contains("connection refused"))
                 )),
             "error message with [ERROR] prefix must be in history"
+        );
+    }
+
+    struct ContextChainBackend;
+
+    #[async_trait]
+    impl LlmBackend for ContextChainBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(anyhow::anyhow!("connection refused").context("Failed to send request to Ollama"))
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_error_surfaces_full_cause_chain() {
+        let agent = agent_with_mode(ContextChainBackend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error(msg)
+                    if msg.contains("Failed to send request to Ollama")
+                        && msg.contains("connection refused")
+            )),
+            "Error event must surface both the outer context and the underlying cause, \
+             proving the chain is no longer flattened"
+        );
+    }
+
+    struct TransportBackend;
+
+    #[async_trait]
+    impl LlmBackend for TransportBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            Err(crate::backend::error::BackendError::Transport {
+                message: "Failed to send request to Ollama: error sending request: \
+                          Connection refused (os error 61)"
+                    .to_string(),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_error_variant_surfaces_flattened_message() {
+        let agent = agent_with_mode(TransportBackend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error(msg)
+                    if msg.contains("Failed to send request to Ollama")
+                        && msg.contains("Connection refused (os error 61)")
+            )),
+            "the BackendError::Transport variant, propagated via ? into anyhow, must reach \
+             the agent and surface its flattened message via {{e:#}}"
         );
     }
 
