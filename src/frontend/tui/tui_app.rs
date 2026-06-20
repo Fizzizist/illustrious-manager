@@ -230,7 +230,7 @@ impl App {
         }
     }
 
-    pub fn set_intro_message(&mut self, message: String) {
+    pub fn add_info_message(&mut self, message: String) {
         self.conversation.push(ConversationEntry::new(
             ConversationRole::Info,
             message,
@@ -717,7 +717,6 @@ async fn run_app(
     // we load just the session history here to avoid printing the loaded context messages from
     // skills and CLAUDE.md
     app.load_history(&agent.session_history().await?);
-    app.set_intro_message(crate::config::generate_intro_message(config));
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
     let cmd_registry = default_registry();
@@ -2182,58 +2181,17 @@ mod tests {
     }
 
     #[test]
-    fn set_intro_message_adds_intro_entry() {
+    fn add_info_message_adds_entry() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        app.set_intro_message("# Welcome\n\nHello!".to_string());
+        app.add_info_message("# Welcome\n\nHello!".to_string());
         assert_eq!(app.conversation.len(), 1);
         assert_eq!(app.conversation[0].role, ConversationRole::Info);
         assert_eq!(app.conversation[0].content, "# Welcome\n\nHello!");
     }
 
     #[test]
-    fn intro_message_displayed_after_history_when_resuming() {
-        use crate::types::{Message, Role};
-
+    fn render_splash_snapshot() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-
-        let messages = vec![
-            Message::text(Role::User, "hello".to_string()),
-            Message::text(Role::Assistant, "hi there".to_string()),
-        ];
-        app.load_history(&messages);
-        app.set_intro_message("# Welcome".to_string());
-
-        assert_eq!(app.conversation.len(), 3);
-        assert_eq!(app.conversation[0].role, ConversationRole::User);
-        assert_eq!(app.conversation[1].role, ConversationRole::Assistant);
-        assert_eq!(app.conversation[2].role, ConversationRole::Info);
-    }
-
-    #[test]
-    fn render_intro_message_snapshot() {
-        use crate::config::{
-            AppConfig, RetryConfig, ToolsConfig, VertexConfig, generate_intro_message,
-        };
-
-        let config = AppConfig {
-            backend: "vertex".to_string(),
-            vertex: VertexConfig {
-                project: "my-project".to_string(),
-                region: "us-east5".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-            },
-            zai: None,
-            ollama: None,
-            openai_compat: None,
-            tools: ToolsConfig::default(),
-            sessions_dir: std::path::PathBuf::from("/sessions"),
-            models: std::collections::BTreeMap::new(),
-            thinking: None,
-            compaction: CompactionConfig::default(),
-            retry: RetryConfig::default(),
-        };
-        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        app.set_intro_message(generate_intro_message(&config));
 
         let backend = ratatui::backend::TestBackend::new(60, 20);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
@@ -2243,7 +2201,7 @@ mod tests {
             })
             .expect("draw");
 
-        insta::assert_snapshot!("render_intro_message", terminal.backend());
+        insta::assert_snapshot!("render_splash", terminal.backend());
     }
 
     #[test]

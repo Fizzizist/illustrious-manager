@@ -1,6 +1,6 @@
 use crate::agent::Agent;
 use crate::backend::BackendFactory;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, generate_config_message};
 use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
 use crate::frontend::tui::{ConversationEntry, ConversationRole, SessionPicker};
@@ -507,6 +507,31 @@ impl SlashCommand for ChatCommand {
     }
 }
 
+pub struct ConfigCommand;
+
+impl SlashCommand for ConfigCommand {
+    fn name(&self) -> &str {
+        "config"
+    }
+
+    fn execute<'a>(
+        &self,
+        _args: &str,
+        ctx: &'a mut CommandContext<'_>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<DispatchResult>> + 'a>>
+    {
+        Box::pin(async move {
+            ctx.app.input.clear();
+            ctx.app.conversation.push(ConversationEntry::new(
+                ConversationRole::Info,
+                generate_config_message(ctx.config),
+                crate::timestamp::format_now_timestamp(),
+            ));
+            Ok(DispatchResult::Handled)
+        })
+    }
+}
+
 /// Build the default `CommandRegistry` with all built-in commands registered.
 pub fn default_registry() -> CommandRegistry {
     let mut registry = CommandRegistry::new();
@@ -518,6 +543,7 @@ pub fn default_registry() -> CommandRegistry {
     registry.register(Box::new(RoleCommand));
     registry.register(Box::new(ChatCommand));
     registry.register(Box::new(BashCommand));
+    registry.register(Box::new(ConfigCommand));
     registry
 }
 

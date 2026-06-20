@@ -519,7 +519,7 @@ pub fn apply_overrides(
 ///
 /// Serializes the config to TOML to ensure all fields are captured automatically,
 /// then formats each key-value pair as a markdown list item.
-pub fn generate_intro_message(config: &AppConfig) -> String {
+pub fn generate_config_message(config: &AppConfig) -> String {
     let toml_value = toml::Value::try_from(config).unwrap_or(toml::Value::String(
         "(error serializing config)".to_string(),
     ));
@@ -992,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_intro_message_contains_vertex_backend_settings() {
+    fn generate_config_message_contains_vertex_backend_settings() {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
@@ -1010,7 +1010,7 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(msg.contains("vertex"), "should mention backend name");
         assert!(msg.contains("my-gcp-project"), "should mention project");
         assert!(msg.contains("us-east5"), "should mention region");
@@ -1021,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_intro_message_contains_zai_backend_settings() {
+    fn generate_config_message_contains_zai_backend_settings() {
         let config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
@@ -1042,14 +1042,14 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(msg.contains("zai"), "should mention backend name");
         assert!(msg.contains("glm-5.1"), "should mention zai model");
         assert!(!msg.contains("secret-key"), "should not leak API key");
     }
 
     #[test]
-    fn generate_intro_message_contains_tool_config() {
+    fn generate_config_message_contains_tool_config() {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
@@ -1072,14 +1072,14 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(msg.contains("Always"), "should mention confirmation mode");
         assert!(msg.contains("/tmp/sandbox"), "should mention sandbox root");
         assert!(msg.contains("10"), "should mention max tool iterations");
     }
 
     #[test]
-    fn generate_intro_message_contains_sessions_dir() {
+    fn generate_config_message_contains_sessions_dir() {
         let sessions_dir = std::env::temp_dir().join("my-sessions");
         let config = AppConfig {
             backend: "vertex".to_string(),
@@ -1098,7 +1098,7 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(
             msg.contains(&sessions_dir.display().to_string()),
             "should mention sessions directory"
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_intro_message_contains_markdown_heading() {
+    fn generate_config_message_contains_markdown_heading() {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
@@ -1124,7 +1124,7 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(msg.starts_with("# "), "should start with markdown heading");
     }
 
@@ -1737,7 +1737,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_intro_message_contains_ollama_backend_settings() {
+    fn generate_config_message_contains_ollama_backend_settings() {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
@@ -1759,7 +1759,7 @@ mod tests {
             compaction: CompactionConfig::default(),
             retry: RetryConfig::default(),
         };
-        let msg = generate_intro_message(&config);
+        let msg = generate_config_message(&config);
         assert!(msg.contains("ollama"), "should mention backend name");
         assert!(msg.contains("gpt-oss:120b"), "should mention ollama model");
         assert!(msg.contains("ollama.com"), "should mention base_url");
