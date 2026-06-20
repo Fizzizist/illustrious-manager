@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,8 +25,6 @@ static RENDERER: LazyLock<Renderer> = LazyLock::new(|| {
 });
 
 const TOOL_RESULT_TRUNCATE_CHARS: usize = 200;
-
-const CONVERSATION_TITLE: &str = "Conversation";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationRole {
