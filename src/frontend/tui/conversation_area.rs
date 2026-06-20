@@ -423,7 +423,7 @@ impl<'a> ConversationArea<'a> {
             text_width,
         );
 
-        if window_lines.len() > 0 {
+        if !window_lines.is_empty() {
             let conversation = Paragraph::new(window_lines)
                 .block(Block::default())
                 .wrap(Wrap { trim: false })

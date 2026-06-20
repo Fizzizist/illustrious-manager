@@ -1,9 +1,7 @@
 //! Ratatui adapter for `hjkl-splash` — renders a [`hjkl_splash::StartScreen`]
 //! into a ratatui [`Frame`].
 
-use hjkl_splash::{
-    CellKind, Layout, Rgb, Splash, default_trail_color, presets, start_screen::StartScreen,
-};
+use hjkl_splash::{CellKind, Layout, Rgb, Splash, start_screen::StartScreen};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -30,7 +28,7 @@ fn rgb_to_color(Rgb(r, g, b): Rgb) -> Color {
 /// Paints the hjkl art animation centred in `area`, followed by a dim version
 /// line and a hint line below it.
 pub fn render(frame: &mut Frame, area: Rect, screen: &StartScreen) {
-    let splash = Splash::new(ART, &[(0 as u8, 0 as u8, '█')]);
+    let splash = Splash::new(ART, &[(0_u8, 0_u8, '█')]);
     let layout = Layout::centered(area.width, area.height, ROWS, COLS);
 
     let buf = frame.buffer_mut();
