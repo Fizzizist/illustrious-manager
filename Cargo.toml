@@ -10,6 +10,7 @@ path = "src/main.rs"
 [[bin]]
 name = "im"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 anyhow = "1.0.102"
