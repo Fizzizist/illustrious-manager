@@ -1097,7 +1097,6 @@ pub async fn submit_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CompactionConfig;
 
     #[test]
     fn scroll_offset_starts_at_zero() {

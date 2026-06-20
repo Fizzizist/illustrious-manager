@@ -1077,9 +1077,9 @@ mod tests {
     }
 
     #[test]
-    fn render_intro_entry() {
+    fn render_config_entry() {
         use crate::config::{
-            AppConfig, RetryConfig, ToolsConfig, VertexConfig, generate_intro_message,
+            AppConfig, RetryConfig, ToolsConfig, VertexConfig, generate_config_message,
         };
 
         let config = AppConfig {
@@ -1101,7 +1101,7 @@ mod tests {
         };
         let mut entries = vec![ConversationEntry::new(
             ConversationRole::Info,
-            generate_intro_message(&config),
+            generate_config_message(&config),
             String::new(),
         )];
         let backend = ratatui::backend::TestBackend::new(60, 20);
@@ -1115,7 +1115,7 @@ mod tests {
             })
             .expect("draw");
 
-        insta::assert_snapshot!("render_intro_entry", terminal.backend());
+        insta::assert_snapshot!("render_config_entry", terminal.backend());
     }
 
     #[test]

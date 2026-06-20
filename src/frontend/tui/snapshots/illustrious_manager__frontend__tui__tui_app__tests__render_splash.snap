@@ -1,9 +1,7 @@
 ---
-source: src/frontend/tui/conversation_area.rs
+source: src/frontend/tui/tui_app.rs
 expression: terminal.backend()
 ---
-"                                                            "
-"                                                            "
 "                                                            "
 "            █ █ █          █                                "
 "            █ █ █       █ ███ █  █            █             "
@@ -20,5 +18,7 @@ expression: terminal.backend()
 "                                                            "
 "                                                            "
 "                                                            "
-"                                                            "
-"                                                            "
+"┌ -- INSERT -- ────────────────────────────────────────────┐"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+" ↑0 ↓0   no git                                             "
