@@ -371,8 +371,8 @@ impl<'a> ConversationArea<'a> {
     }
 
     pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect, text_width: u16) {
-        TABLE_WIDTH.store(text_width.saturating_sub(2) as usize, Ordering::Relaxed);
-        let visible_height = area.height.saturating_sub(2);
+        TABLE_WIDTH.store(text_width as usize, Ordering::Relaxed);
+        let visible_height = area.height;
 
         let entry_counts = self.compute_entry_counts(text_width);
         let total_entries: u16 = entry_counts.iter().sum();
@@ -425,11 +425,7 @@ impl<'a> ConversationArea<'a> {
         );
 
         let conversation = Paragraph::new(window_lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(CONVERSATION_TITLE),
-            )
+            .block(Block::default())
             .wrap(Wrap { trim: false })
             .scroll((lines_to_skip, 0));
         frame.render_widget(conversation, area);
