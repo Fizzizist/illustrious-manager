@@ -5,6 +5,7 @@ pub mod input_area;
 pub mod list_picker;
 pub mod markdown_theme;
 pub mod session_picker;
+mod splash;
 pub mod status_line;
 pub mod syntect_highlight;
 pub mod table_renderer;

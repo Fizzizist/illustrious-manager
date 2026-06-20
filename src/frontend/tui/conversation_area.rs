@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use the_other_tui_markdown::{Renderer, RendererBuilder, into_text_with_renderer};
 
 use super::markdown_theme::monokai_theme;
+use super::splash;
 use super::syntect_highlight::highlight_code_block;
 use super::table_renderer::render_table;
 
@@ -422,11 +423,16 @@ impl<'a> ConversationArea<'a> {
             text_width,
         );
 
-        let conversation = Paragraph::new(window_lines)
-            .block(Block::default())
-            .wrap(Wrap { trim: false })
-            .scroll((lines_to_skip, 0));
-        frame.render_widget(conversation, area);
+        if window_lines.len() > 0 {
+            let conversation = Paragraph::new(window_lines)
+                .block(Block::default())
+                .wrap(Wrap { trim: false })
+                .scroll((lines_to_skip, 0));
+            frame.render_widget(conversation, area);
+        } else {
+            let screen = hjkl_splash::start_screen::StartScreen::build(env!("CARGO_PKG_VERSION"));
+            splash::render(frame, area, &screen);
+        }
     }
 
     fn collect_window_lines(

@@ -1669,6 +1669,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hjkl-splash"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e09e56adbc7e151ab71e6ed34474fabb32a84a9ecc2dd58047a28b8e6629cc7"
+
+[[package]]
+name = "hjkl-splash-tui"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fc985db9ec01a27ec735ba1bf0586effa4c1212355c367b25cae6606f50d0e8"
+dependencies = [
+ "hjkl-splash",
+ "ratatui",
+]
+
+[[package]]
 name = "hjkl-theme"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1987,6 +2003,8 @@ dependencies = [
  "hjkl-editor-tui",
  "hjkl-engine",
  "hjkl-form",
+ "hjkl-splash",
+ "hjkl-splash-tui",
  "insta",
  "jsonschema",
  "pin-project-lite",
