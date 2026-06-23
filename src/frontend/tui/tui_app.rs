@@ -83,7 +83,10 @@ impl App {
     pub fn set_state(&mut self, state: AppState) {
         self.state = state;
         match &self.state {
-            AppState::Input => self.input.set_mode(AppMode::Editing),
+            AppState::Input => {
+                self.input.set_mode(AppMode::Editing);
+                self.input.reset_to_insert();
+            }
             AppState::Streaming => self.input.set_mode(AppMode::Streaming),
             AppState::ToolConfirmation { name, input, .. } => {
                 self.input.set_mode(AppMode::ToolConfirmation {
@@ -2801,6 +2804,33 @@ mod tests {
         assert!(
             app.activity_start.is_none(),
             "Input should clear activity_start"
+        );
+    }
+
+    #[test]
+    fn set_state_input_resets_to_insert() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.input.set_text("hello");
+        app.input.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.input.is_normal(), "should be in Normal mode after Esc");
+        app.input.input(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('d'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+
+        app.set_state(AppState::Input);
+        assert_eq!(
+            app.input.vim_mode(),
+            hjkl_form::VimMode::Insert,
+            "set_state(Input) should reset to Insert mode"
+        );
+        assert_eq!(
+            app.input.text(),
+            "hello",
+            "text should be preserved across reset"
         );
     }
 
