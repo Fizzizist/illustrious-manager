@@ -94,6 +94,10 @@ impl InputArea {
         self.mode = mode;
     }
 
+    pub fn reset_to_insert(&mut self) {
+        self.editor.enter_insert_at_end();
+    }
+
     pub fn mode(&self) -> &AppMode {
         &self.mode
     }
@@ -1065,6 +1069,112 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_session_picker", terminal.backend());
+    }
+
+    #[test]
+    fn reset_to_insert_clears_pending_operator() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('e'));
+        input.input(char_key('l'));
+        input.input(char_key('l'));
+        input.input(char_key('o'));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.vim_mode(), VimMode::Normal);
+        input.input(char_key('d'));
+        assert_eq!(
+            input.vim_mode(),
+            VimMode::Normal,
+            "d should leave editor in Normal with pending operator"
+        );
+
+        input.reset_to_insert();
+        assert_eq!(
+            input.vim_mode(),
+            VimMode::Insert,
+            "reset_to_insert should enter Insert mode"
+        );
+
+        input.input(char_key('x'));
+        assert_eq!(
+            input.text(),
+            "hellox",
+            "text should be hellox, not corrupted by pending d"
+        );
+    }
+
+    #[test]
+    fn reset_to_insert_from_visual_mode() {
+        let mut input = InputArea::new();
+        input.set_text("hello");
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.input(char_key('v'));
+        assert_eq!(input.vim_mode(), VimMode::Visual);
+
+        input.reset_to_insert();
+        assert_eq!(
+            input.vim_mode(),
+            VimMode::Insert,
+            "reset_to_insert from Visual should enter Insert mode"
+        );
+    }
+
+    #[test]
+    fn reset_to_insert_preserves_text() {
+        let mut input = InputArea::new();
+        input.set_text("important text");
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.vim_mode(), VimMode::Normal);
+
+        input.reset_to_insert();
+        assert_eq!(
+            input.text(),
+            "important text",
+            "reset_to_insert should not destroy text content"
+        );
+        assert_eq!(input.vim_mode(), VimMode::Insert);
+    }
+
+    #[test]
+    fn operator_pending_survives_mode_cycle_regression() {
+        let mut input = InputArea::new();
+        input.input(char_key('h'));
+        input.input(char_key('e'));
+        input.input(char_key('l'));
+        input.input(char_key('l'));
+        input.input(char_key('o'));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.input(char_key('d'));
+
+        input.set_mode(AppMode::Streaming);
+        input.set_mode(AppMode::Editing);
+
+        input.input(char_key('i'));
+        assert_eq!(
+            input.vim_mode(),
+            VimMode::Normal,
+            "BUG: without reset_to_insert, i is consumed as operand of pending d"
+        );
+
+        let mut input2 = InputArea::new();
+        input2.input(char_key('h'));
+        input2.input(char_key('e'));
+        input2.input(char_key('l'));
+        input2.input(char_key('l'));
+        input2.input(char_key('o'));
+        input2.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input2.input(char_key('d'));
+
+        input2.set_mode(AppMode::Streaming);
+        input2.reset_to_insert();
+        input2.set_mode(AppMode::Editing);
+
+        input2.input(char_key('i'));
+        assert_eq!(
+            input2.vim_mode(),
+            VimMode::Insert,
+            "WITH reset_to_insert, i should enter Insert mode"
+        );
     }
 
     #[test]
