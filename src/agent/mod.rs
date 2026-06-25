@@ -4,7 +4,7 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::backend::LlmBackend;
-use crate::config::{ConfirmationMode, ToolsConfig};
+use crate::config::{ConfirmationMode, RetryConfig, ToolsConfig};
 use crate::context_files::{ContextFile, discover_context_files_from_env};
 use crate::session::Session;
 use crate::timestamp::now_timestamp;
@@ -41,6 +41,7 @@ pub struct Agent {
     config: Mutex<RequestConfig>,
     tools: Arc<ToolRegistry>,
     max_tool_iterations: u32,
+    max_token_retries: u32,
     confirmation_mode: ConfirmationMode,
     session: Arc<TokioMutex<Session>>,
     /// Spawner for creating compaction sub-agents. Set after construction via
@@ -90,6 +91,7 @@ impl Agent {
             config: Mutex::new(config),
             tools: Arc::new(ToolRegistry::new()),
             max_tool_iterations: 25,
+            max_token_retries: 3,
             confirmation_mode: ConfirmationMode::WriteOnly,
             session,
             compaction_spawner: None,
@@ -114,6 +116,11 @@ impl Agent {
 
     pub fn with_compaction_config(mut self, config: &crate::config::CompactionConfig) -> Self {
         self.max_context_window_len = config.max_context_window_len;
+        self
+    }
+
+    pub fn with_retry_config(mut self, config: &RetryConfig) -> Self {
+        self.max_token_retries = config.max_token_retries;
         self
     }
 
@@ -208,6 +215,11 @@ impl Agent {
     #[cfg(test)]
     pub fn max_tool_iterations_for_test(&self) -> u32 {
         self.max_tool_iterations
+    }
+
+    #[cfg(test)]
+    pub fn max_token_retries_for_test(&self) -> u32 {
+        self.max_token_retries
     }
 
     #[cfg(test)]
@@ -389,6 +401,7 @@ impl Agent {
             .clone();
         let chat_mode = self.chat_mode.clone();
         let max_iterations = self.max_tool_iterations;
+        let max_token_retries = self.max_token_retries;
         let confirmation_mode = self.confirmation_mode.clone();
         let session = Arc::clone(&self.session);
         let max_context_window_len = self.max_context_window_len;
@@ -415,6 +428,7 @@ impl Agent {
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
+            let mut max_token_retries_used = 0u32;
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
@@ -557,6 +571,14 @@ impl Agent {
                             }
                             record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
                                 .await;
+
+                            if max_token_retries_used < max_token_retries
+                                && e.downcast_ref::<crate::backend::error::BackendError>()
+                                    .is_some_and(|be| matches!(be, crate::backend::error::BackendError::MaxTokensExceeded { .. }))
+                            {
+                                max_token_retries_used += 1;
+                                continue 'outer;
+                            }
                             break 'outer;
                         }
                     }
@@ -1060,8 +1082,9 @@ pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::error::BackendError;
     use crate::config::CompactionConfig;
-    use crate::config::{ConfirmationMode, ToolsConfig};
+    use crate::config::{ConfirmationMode, RetryConfig, ToolsConfig};
     use crate::tools::{Tool, ToolError, ToolResult as ToolExecResult};
     use anyhow::Result;
     use async_trait::async_trait;
@@ -1223,6 +1246,16 @@ mod tests {
             events.push(event);
         }
         events
+    }
+
+    fn max_tokens_error_stream(text: &str) -> Vec<Result<StreamEvent>> {
+        vec![
+            Ok(StreamEvent::TextDelta(text.to_string())),
+            Err(anyhow::Error::from(BackendError::MaxTokensExceeded {
+                input_tokens: 100,
+                output_tokens: 200,
+            })),
+        ]
     }
 
     #[tokio::test]
@@ -5135,8 +5168,6 @@ mod tests {
     // ── Retry integration tests ──────────────────────────────────────────
 
     use crate::backend::RetryingBackend;
-    use crate::backend::error::BackendError;
-    use crate::config::RetryConfig;
 
     struct AlwaysBackendError {
         error: BackendError,
@@ -5208,6 +5239,7 @@ mod tests {
             max_retries: 3,
             initial_delay_ms: 1,
             max_delay_ms: 8,
+            max_token_retries: 3,
         }
     }
 
@@ -5281,6 +5313,7 @@ mod tests {
             max_retries: 10,
             initial_delay_ms: 10000,
             max_delay_ms: 30000,
+            max_token_retries: 3,
         };
         let backend = RetryingBackend::new(Box::new(inner), retry_config);
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
@@ -5304,6 +5337,220 @@ mod tests {
                 .iter()
                 .any(|e| { matches!(e, AgentEvent::Error(_) | AgentEvent::Interrupted { .. }) }),
             "should emit Error or Interrupted when cancelled during retry; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_error_retries_within_budget() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("partial"),
+            text_response("complete"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should emit Error for first attempt"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "complete")),
+            "should emit TokenReceived for retry"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "complete")),
+            "should emit ResponseComplete for retry"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "partial"))),
+            "partial text must be persisted in history"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "error message must be in history"
+        );
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "complete"))),
+            "successful retry response must be in history"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_error_exhausts_retries_then_breaks() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("partial1"),
+            max_tokens_error_stream("partial2"),
+            max_tokens_error_stream("partial3"),
+            max_tokens_error_stream("partial4"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(_)))
+            .count();
+        assert_eq!(
+            error_count, 3,
+            "should have 3 error events (1 initial + 2 retries); got {error_count}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "should not emit ResponseComplete when retries exhausted"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_max_tokens_error_breaks_immediately() {
+        let backend = SequencedBackend::new(vec![
+            vec![Err(anyhow::Error::from(BackendError::Other(
+                "something went wrong".to_string(),
+            )))],
+            text_response("should not reach"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::Error(msg) if msg.contains("something went wrong"))
+            ),
+            "should emit the original error"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "should not retry for non-MaxTokensExceeded errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_error_with_tool_calls_in_progress() {
+        let backend = SequencedBackend::new(vec![
+            vec![
+                Ok(StreamEvent::TextDelta("partial".to_string())),
+                Ok(StreamEvent::ToolUseStart {
+                    id: "t1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{"command":"ls"}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+                Err(anyhow::Error::from(BackendError::MaxTokensExceeded {
+                    input_tokens: 100,
+                    output_tokens: 200,
+                })),
+            ],
+            text_response("recovered"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "should recover after retry with in-progress tool calls"
+        );
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "partial"))),
+            "partial text must be persisted before the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_retry_counter_separate_from_iterations() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("p1"),
+            max_tokens_error_stream("p2"),
+            max_tokens_error_stream("p3"),
+            text_response("should not reach"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                max_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(_)))
+            .count();
+        assert_eq!(error_count, 3, "should have 3 errors then break");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "should not reach success when budget exhausted"
         );
     }
 }

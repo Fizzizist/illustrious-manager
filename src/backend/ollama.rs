@@ -80,13 +80,22 @@ impl OllamaParser {
         if json["done"].as_bool() == Some(true) {
             let input_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0) as u32;
             let output_tokens = json["eval_count"].as_u64().unwrap_or(0) as u32;
-            let stop_reason = json["done_reason"].as_str().unwrap_or("stop").to_string();
+            let done_reason = json["done_reason"].as_str().unwrap_or("stop");
 
+            if done_reason == "length" {
+                return Err(BackendError::MaxTokensExceeded {
+                    input_tokens,
+                    output_tokens,
+                }
+                .into());
+            }
+
+            let stop_reason = done_reason.to_string();
             if input_tokens > 0 || output_tokens > 0 {
                 events.push(StreamEvent::Usage {
                     input_tokens,
                     output_tokens,
-                    stop_reason: stop_reason.clone(),
+                    stop_reason,
                 });
             }
             events.push(StreamEvent::Done);
@@ -391,13 +400,37 @@ mod tests {
     }
 
     #[test]
-    fn parser_done_reason_propagated_as_stop_reason() {
+    fn parser_done_reason_length_emits_max_tokens_error() {
         let mut parser = OllamaParser::new();
         let chunk = r#"{"done":true,"prompt_eval_count":5,"eval_count":3,"done_reason":"length"}"#;
-        let events = parser.parse_chunk(chunk).unwrap();
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
         assert!(
-            matches!(&events[0], StreamEvent::Usage { stop_reason, .. } if stop_reason == "length")
+            matches!(
+                backend_err,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 5,
+                    output_tokens: 3
+                }
+            ),
+            "should be MaxTokensExceeded; got: {backend_err:?}"
         );
+    }
+
+    #[test]
+    fn parser_done_reason_stop_still_emits_usage_and_done() {
+        let mut parser = OllamaParser::new();
+        let chunk = r#"{"done":true,"prompt_eval_count":10,"eval_count":20,"done_reason":"stop"}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], StreamEvent::Usage { input_tokens: 10, output_tokens: 20, stop_reason } if stop_reason == "stop")
+        );
+        assert!(matches!(&events[1], StreamEvent::Done));
     }
 
     #[test]

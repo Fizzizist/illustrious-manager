@@ -259,7 +259,8 @@ pub async fn spawn_agent_with_selection(
         .await
         .with_tools(tools)
         .with_tool_config(tool_config)
-        .with_compaction_config(&crate::config::CompactionConfig::default()))
+        .with_compaction_config(&crate::config::CompactionConfig::default())
+        .with_retry_config(&crate::config::RetryConfig::default()))
 }
 
 #[cfg(test)]

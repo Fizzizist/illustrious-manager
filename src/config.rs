@@ -77,11 +77,16 @@ impl Default for CompactionConfig {
     }
 }
 
+fn default_max_token_retries() -> u32 {
+    3
+}
+
 fn default_retry_config() -> RetryConfig {
     RetryConfig {
         max_retries: 3,
         initial_delay_ms: 1000,
         max_delay_ms: 8000,
+        max_token_retries: 3,
     }
 }
 
@@ -91,6 +96,8 @@ pub struct RetryConfig {
     pub max_retries: u32,
     pub initial_delay_ms: u64,
     pub max_delay_ms: u64,
+    #[serde(default = "default_max_token_retries")]
+    pub max_token_retries: u32,
 }
 
 impl Default for RetryConfig {
@@ -204,6 +211,10 @@ model = "glm-5.1"
 # initial_delay_ms = 1000
 # Maximum delay in milliseconds for backoff (caps exponential growth).
 # max_delay_ms = 8000
+# Maximum number of times the agent retries when the model hits its max_tokens
+# output limit. Each retry re-sends the full conversation history (including the
+# truncated response and error message), so input token cost grows per retry.
+# max_token_retries = 3
 
 # [tools]
 # When to prompt for confirmation before executing a tool: Always, WriteOnly, or Never
@@ -2213,6 +2224,7 @@ mod tests {
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.initial_delay_ms, 1000);
         assert_eq!(config.max_delay_ms, 8000);
+        assert_eq!(config.max_token_retries, 3);
     }
 
     #[test]
@@ -2221,11 +2233,13 @@ mod tests {
             max_retries = 5
             initial_delay_ms = 500
             max_delay_ms = 20000
+            max_token_retries = 7
         "#;
         let config: RetryConfig = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.max_retries, 5);
         assert_eq!(config.initial_delay_ms, 500);
         assert_eq!(config.max_delay_ms, 20000);
+        assert_eq!(config.max_token_retries, 7);
     }
 
     #[test]
@@ -2239,5 +2253,19 @@ mod tests {
         assert_eq!(config.retry.max_retries, 3);
         assert_eq!(config.retry.initial_delay_ms, 1000);
         assert_eq!(config.retry.max_delay_ms, 8000);
+        assert_eq!(config.retry.max_token_retries, 3);
+    }
+
+    #[test]
+    fn retry_config_partial_overrides_keep_default_for_max_token_retries() {
+        let toml_str = r#"
+            max_retries = 10
+        "#;
+        let config: RetryConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.max_retries, 10);
+        assert_eq!(
+            config.max_token_retries, 3,
+            "should default when not specified"
+        );
     }
 }
