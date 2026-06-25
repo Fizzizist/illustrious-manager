@@ -2,9 +2,18 @@ use std::fmt;
 
 #[derive(Debug, Clone)]
 pub enum BackendError {
-    HttpStatus { code: u16, body: String },
-    Transport { message: String },
+    HttpStatus {
+        code: u16,
+        body: String,
+    },
+    Transport {
+        message: String,
+    },
     Other(String),
+    MaxTokensExceeded {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
 }
 
 impl BackendError {
@@ -13,7 +22,12 @@ impl BackendError {
             BackendError::HttpStatus { code, .. } => *code == 429 || (*code >= 500 && *code != 501),
             BackendError::Transport { .. } => true,
             BackendError::Other(_) => false,
+            BackendError::MaxTokensExceeded { .. } => false,
         }
+    }
+
+    pub fn is_max_tokens(&self) -> bool {
+        matches!(self, BackendError::MaxTokensExceeded { .. })
     }
 
     /// Build a `Transport` error from `target` (a human description of the
@@ -39,6 +53,13 @@ impl fmt::Display for BackendError {
             }
             BackendError::Transport { message } => write!(f, "{message}"),
             BackendError::Other(msg) => write!(f, "{msg}"),
+            BackendError::MaxTokensExceeded {
+                input_tokens,
+                output_tokens,
+            } => write!(
+                f,
+                "Response truncated: max_tokens limit reached (input_tokens={input_tokens}, output_tokens={output_tokens}). Increase max_tokens in your config."
+            ),
         }
     }
 }
@@ -233,5 +254,79 @@ mod tests {
             .downcast_ref::<BackendError>()
             .expect("should downcast to BackendError");
         assert!(recovered.is_retryable());
+    }
+
+    #[test]
+    fn max_tokens_exceeded_is_not_retryable() {
+        let err = BackendError::MaxTokensExceeded {
+            input_tokens: 100,
+            output_tokens: 200,
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn max_tokens_exceeded_display_format() {
+        let err = BackendError::MaxTokensExceeded {
+            input_tokens: 42,
+            output_tokens: 99,
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("Response truncated: max_tokens limit reached"),
+            "display should contain the truncation message; got: {text}"
+        );
+        assert!(text.contains("input_tokens=42"));
+        assert!(text.contains("output_tokens=99"));
+        assert!(text.contains("Increase max_tokens"));
+    }
+
+    #[test]
+    fn max_tokens_exceeded_downcasts_from_anyhow() {
+        let original = BackendError::MaxTokensExceeded {
+            input_tokens: 10,
+            output_tokens: 20,
+        };
+        let err: anyhow::Error = original.into();
+        let recovered = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(
+                recovered,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 10,
+                    output_tokens: 20
+                }
+            ),
+            "should recover the MaxTokensExceeded variant with token counts"
+        );
+    }
+
+    #[test]
+    fn is_max_tokens_true_for_max_tokens_variant() {
+        let err = BackendError::MaxTokensExceeded {
+            input_tokens: 5,
+            output_tokens: 10,
+        };
+        assert!(err.is_max_tokens());
+    }
+
+    #[test]
+    fn is_max_tokens_false_for_other_variants() {
+        assert!(
+            !BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }
+            .is_max_tokens()
+        );
+        assert!(
+            !BackendError::Transport {
+                message: "connection refused".to_string(),
+            }
+            .is_max_tokens()
+        );
+        assert!(!BackendError::Other("something".to_string()).is_max_tokens());
     }
 }

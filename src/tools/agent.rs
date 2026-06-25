@@ -469,6 +469,7 @@ mod tests {
                 let agent = match spawn_agent_with_selection(
                     selection,
                     &tool_config,
+                    &crate::config::RetryConfig::default(),
                     session,
                     ToolRegistry::new(),
                 )

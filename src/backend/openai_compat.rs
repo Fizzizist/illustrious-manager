@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 
 use super::LlmBackend;
+use super::error::BackendError;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent};
 
@@ -94,13 +95,11 @@ impl OpenAiCompatSseParser {
 
         // Hard limit: propagate immediately as an error.
         if finish_reason == Some("length") {
-            return Err(anyhow::anyhow!(
-                "Response truncated: max_tokens limit reached \
-                 (input_tokens={}, output_tokens={}). \
-                 Increase max_tokens in your config.",
+            return Err(BackendError::MaxTokensExceeded {
                 input_tokens,
                 output_tokens,
-            ));
+            }
+            .into());
         }
 
         // Emit content deltas before any usage event so the TUI always
@@ -722,7 +721,22 @@ mod tests {
     fn parser_finish_reason_length_returns_error() {
         let mut p = OpenAiCompatSseParser::new();
         let data = r#"{"choices":[{"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
-        assert!(p.parse(data).is_err());
+        let result = p.parse(data);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(
+                backend_err,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 10,
+                    output_tokens: 20
+                }
+            ),
+            "should be MaxTokensExceeded; got: {backend_err:?}"
+        );
     }
 
     // --- constructor validation ---

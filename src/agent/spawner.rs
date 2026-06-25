@@ -191,19 +191,26 @@ impl AgentSpawner {
             }
         };
 
-        let agent =
-            match spawn_agent_with_selection(selection, &tool_config, session, registry).await {
-                Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
-                Err(e) => {
-                    return HeadlessOutcome {
-                        text: String::new(),
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        is_error: true,
-                        error_message: Some(format!("Failed to spawn sub-agent: {e}")),
-                    };
-                }
-            };
+        let agent = match spawn_agent_with_selection(
+            selection,
+            &tool_config,
+            &self.app_config.retry,
+            session,
+            registry,
+        )
+        .await
+        {
+            Ok(a) => a.with_thinking(self.app_config.thinking.clone()),
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to spawn sub-agent: {e}")),
+                };
+            }
+        };
 
         let agent = match agent.with_context_files() {
             Ok(a) => a,
@@ -232,11 +239,12 @@ pub async fn spawn_agent(
     factory: &BackendFactory,
     role: &str,
     tool_config: &ToolsConfig,
+    retry_config: &crate::config::RetryConfig,
     session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
     let selection = factory.for_role(role).await?;
-    spawn_agent_with_selection(selection, tool_config, session, tools).await
+    spawn_agent_with_selection(selection, tool_config, retry_config, session, tools).await
 }
 
 /// Core of `spawn_agent` — constructs an `Agent` from an already-resolved
@@ -245,6 +253,7 @@ pub async fn spawn_agent(
 pub async fn spawn_agent_with_selection(
     selection: crate::backend::BackendSelection,
     tool_config: &ToolsConfig,
+    retry_config: &crate::config::RetryConfig,
     session: Arc<TokioMutex<Session>>,
     tools: ToolRegistry,
 ) -> anyhow::Result<Agent> {
@@ -259,7 +268,8 @@ pub async fn spawn_agent_with_selection(
         .await
         .with_tools(tools)
         .with_tool_config(tool_config)
-        .with_compaction_config(&crate::config::CompactionConfig::default()))
+        .with_compaction_config(&crate::config::CompactionConfig::default())
+        .with_retry_config(retry_config))
 }
 
 #[cfg(test)]

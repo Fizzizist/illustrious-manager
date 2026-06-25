@@ -483,6 +483,7 @@ mod tests {
             max_retries: 3,
             initial_delay_ms: 1,
             max_delay_ms: 8,
+            max_token_retries: 3,
         }
     }
 
@@ -663,6 +664,7 @@ mod tests {
             max_retries: 3,
             initial_delay_ms: 10000,
             max_delay_ms: 30000,
+            max_token_retries: 3,
         };
         let backend = RetryingBackend::new(Box::new(mock), retry_config);
         let mut config = request_config();
@@ -698,6 +700,7 @@ mod tests {
             max_retries: 3,
             initial_delay_ms: 10,
             max_delay_ms: 80,
+            max_token_retries: 3,
         };
         let backend = RetryingBackend::new(Box::new(mock), retry_config);
         let config = request_config();

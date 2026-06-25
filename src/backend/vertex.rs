@@ -7,6 +7,7 @@ use reqwest::Client;
 use tokio::sync::OnceCell;
 
 use super::LlmBackend;
+use super::error::BackendError;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
@@ -165,11 +166,11 @@ impl VertexSseParser {
                     .ok_or_else(|| anyhow::anyhow!("message_delta missing 'output_tokens'"))?
                     as u32;
                 if stop_reason == "max_tokens" {
-                    return Err(anyhow::anyhow!(
-                        "Response truncated: max_tokens limit reached (input_tokens={}, output_tokens={}). Increase max_tokens in your config.",
-                        self.input_tokens,
+                    return Err(BackendError::MaxTokensExceeded {
+                        input_tokens: self.input_tokens,
                         output_tokens,
-                    ));
+                    }
+                    .into());
                 } else {
                     self.event_buffer.push(StreamEvent::Usage {
                         input_tokens: self.input_tokens,
@@ -1287,5 +1288,52 @@ mod tests {
             warnings[0].contains("empty signature"),
             "warning should mention empty signature"
         );
+    }
+
+    #[test]
+    fn parser_max_tokens_emits_typed_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":100}}}"#)
+            .expect("message_start");
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":200}}"#;
+        let result = parser.parse(data);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(
+                backend_err,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 100,
+                    output_tokens: 200
+                }
+            ),
+            "should be MaxTokensExceeded with correct token counts; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_normal_stop_reason_still_emits_usage() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":50}}}"#)
+            .expect("message_start");
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        match result {
+            Some(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                stop_reason,
+            }) => {
+                assert_eq!(input_tokens, 50);
+                assert_eq!(output_tokens, 30);
+                assert_eq!(stop_reason, "end_turn");
+            }
+            other => panic!("expected Usage event, got {:?}", other),
+        }
     }
 }
