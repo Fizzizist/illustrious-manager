@@ -26,6 +26,10 @@ impl BackendError {
         }
     }
 
+    pub fn is_max_tokens(&self) -> bool {
+        matches!(self, BackendError::MaxTokensExceeded { .. })
+    }
+
     /// Build a `Transport` error from `target` (a human description of the
     /// endpoint) and an error, flattening the error's `source()` chain into one
     /// truthful string so no cause is discarded.
@@ -297,5 +301,32 @@ mod tests {
             ),
             "should recover the MaxTokensExceeded variant with token counts"
         );
+    }
+
+    #[test]
+    fn is_max_tokens_true_for_max_tokens_variant() {
+        let err = BackendError::MaxTokensExceeded {
+            input_tokens: 5,
+            output_tokens: 10,
+        };
+        assert!(err.is_max_tokens());
+    }
+
+    #[test]
+    fn is_max_tokens_false_for_other_variants() {
+        assert!(
+            !BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }
+            .is_max_tokens()
+        );
+        assert!(
+            !BackendError::Transport {
+                message: "connection refused".to_string(),
+            }
+            .is_max_tokens()
+        );
+        assert!(!BackendError::Other("something".to_string()).is_max_tokens());
     }
 }

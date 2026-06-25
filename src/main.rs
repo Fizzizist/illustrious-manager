@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
             &factory,
             "default",
             &app_config.tools,
+            &app_config.retry,
             session_arc,
             registry,
         )
