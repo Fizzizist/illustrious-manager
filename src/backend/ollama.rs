@@ -11,11 +11,13 @@ use crate::types::{BoxStream, ContentBlock, Message, RequestConfig, Role, Stream
 const DEFAULT_CLOUD_ENDPOINT: &str = "https://ollama.com/api/chat";
 
 #[derive(Default)]
-pub struct OllamaParser;
+pub struct OllamaParser {
+    max_tokens: u32,
+}
 
 impl OllamaParser {
-    pub fn new() -> Self {
-        Self
+    pub fn new(max_tokens: u32) -> Self {
+        Self { max_tokens }
     }
 
     pub fn parse_chunk(&mut self, data: &str) -> Result<Vec<StreamEvent>> {
@@ -83,6 +85,14 @@ impl OllamaParser {
             let done_reason = json["done_reason"].as_str().unwrap_or("stop");
 
             if done_reason == "length" {
+                return Err(BackendError::MaxTokensExceeded {
+                    input_tokens,
+                    output_tokens,
+                }
+                .into());
+            }
+
+            if self.max_tokens > 0 && output_tokens >= self.max_tokens {
                 return Err(BackendError::MaxTokensExceeded {
                     input_tokens,
                     output_tokens,
@@ -312,7 +322,7 @@ impl LlmBackend for OllamaBackend {
         }
 
         let byte_stream = response.bytes_stream();
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(config.max_tokens);
         let event_stream =
             create_ndjson_event_stream(byte_stream, move |line| parser.parse_chunk(line));
         Ok(event_stream)
@@ -325,7 +335,7 @@ mod tests {
 
     #[test]
     fn parser_text_delta() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let events = parser
             .parse_chunk(r#"{"message":{"content":"Hello"}}"#)
             .unwrap();
@@ -335,14 +345,14 @@ mod tests {
 
     #[test]
     fn parser_empty_content_produces_no_text_delta() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let events = parser.parse_chunk(r#"{"message":{"content":""}}"#).unwrap();
         assert!(events.is_empty());
     }
 
     #[test]
     fn parser_single_tool_call() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"tool_calls":[{"id":"call_1","function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 3);
@@ -355,7 +365,7 @@ mod tests {
 
     #[test]
     fn parser_multiple_tool_calls_in_one_chunk() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"tool_calls":[{"id":"c1","function":{"name":"bash","arguments":{"command":"ls"}}},{"id":"c2","function":{"name":"read_file","arguments":{"path":"foo.rs"}}}]}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 6);
@@ -371,7 +381,7 @@ mod tests {
 
     #[test]
     fn parser_done_chunk_with_usage() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"done":true,"prompt_eval_count":10,"eval_count":20,"done_reason":"stop"}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 2);
@@ -383,7 +393,7 @@ mod tests {
 
     #[test]
     fn parser_done_chunk_without_usage_still_emits_done() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"done":true}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 1);
@@ -392,7 +402,7 @@ mod tests {
 
     #[test]
     fn parser_error_chunk() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"error":"model not found"}"#;
         let result = parser.parse_chunk(chunk);
         assert!(result.is_err());
@@ -401,7 +411,7 @@ mod tests {
 
     #[test]
     fn parser_done_reason_length_emits_max_tokens_error() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"done":true,"prompt_eval_count":5,"eval_count":3,"done_reason":"length"}"#;
         let result = parser.parse_chunk(chunk);
         assert!(result.is_err());
@@ -423,7 +433,7 @@ mod tests {
 
     #[test]
     fn parser_done_reason_stop_still_emits_usage_and_done() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"done":true,"prompt_eval_count":10,"eval_count":20,"done_reason":"stop"}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 2);
@@ -435,7 +445,7 @@ mod tests {
 
     #[test]
     fn parser_invalid_json_returns_error() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let result = parser.parse_chunk("not json");
         assert!(result.is_err());
     }
@@ -727,7 +737,7 @@ mod tests {
 
     #[test]
     fn parser_missing_tool_name_bails() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"tool_calls":[{"id":"c1","function":{"arguments":{}}}]}}"#;
         let result = parser.parse_chunk(chunk);
         assert!(result.is_err());
@@ -741,7 +751,7 @@ mod tests {
 
     #[test]
     fn parser_empty_tool_name_bails() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk =
             r#"{"message":{"tool_calls":[{"id":"c1","function":{"name":"","arguments":{}}}]}}"#;
         let result = parser.parse_chunk(chunk);
@@ -756,7 +766,7 @@ mod tests {
 
     #[test]
     fn parser_missing_id_generates_fallback() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"tool_calls":[{"function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 3);
@@ -770,7 +780,7 @@ mod tests {
 
     #[test]
     fn parser_chunk_with_both_text_and_tool_calls() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"content":"Thinking...","tool_calls":[{"id":"c1","function":{"name":"bash","arguments":{"command":"ls"}}}]}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 4);
@@ -782,7 +792,7 @@ mod tests {
 
     #[test]
     fn parser_thinking_field_produces_thinking_delta() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"content":"","thinking":"Let me reason about this..."}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 1);
@@ -793,7 +803,7 @@ mod tests {
 
     #[test]
     fn parser_thinking_field_empty_produces_no_thinking_delta() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"content":"","thinking":""}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert!(events.is_empty());
@@ -854,7 +864,7 @@ mod tests {
 
     #[test]
     fn parser_chunk_with_both_thinking_and_content() {
-        let mut parser = OllamaParser::new();
+        let mut parser = OllamaParser::new(0);
         let chunk = r#"{"message":{"content":"Here is the answer","thinking":"Let me work through this step by step..."}}"#;
         let events = parser.parse_chunk(chunk).unwrap();
         assert_eq!(events.len(), 2);
@@ -862,5 +872,69 @@ mod tests {
         assert!(
             matches!(&events[1], StreamEvent::ThinkingDelta(t) if t == "Let me work through this step by step...")
         );
+    }
+
+    #[test]
+    fn parser_stealth_max_tokens_emits_error_when_output_exceeds_budget() {
+        let mut parser = OllamaParser::new(4096);
+        let chunk =
+            r#"{"done":true,"prompt_eval_count":10,"eval_count":4096,"done_reason":"stop"}"#;
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(
+                backend_err,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 10,
+                    output_tokens: 4096
+                }
+            ),
+            "stealth max-tokens should emit MaxTokensExceeded; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_stealth_max_tokens_no_false_positive_when_output_below_budget() {
+        let mut parser = OllamaParser::new(4096);
+        let chunk = r#"{"done":true,"prompt_eval_count":10,"eval_count":100,"done_reason":"stop"}"#;
+        let events = parser.parse_chunk(chunk).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], StreamEvent::Usage { input_tokens: 10, output_tokens: 100, stop_reason } if stop_reason == "stop")
+        );
+        assert!(matches!(&events[1], StreamEvent::Done));
+    }
+
+    #[test]
+    fn parser_stealth_max_tokens_emits_error_with_alternative_done_reason() {
+        for reason in ["error", "content_filter", "unload"] {
+            let mut parser = OllamaParser::new(4096);
+            let chunk = format!(
+                r#"{{"done":true,"prompt_eval_count":10,"eval_count":4096,"done_reason":"{reason}"}}"#
+            );
+            let result = parser.parse_chunk(&chunk);
+            assert!(
+                result.is_err(),
+                "should emit MaxTokensExceeded for done_reason={reason}"
+            );
+            let err = result.unwrap_err();
+            let backend_err = err
+                .downcast_ref::<BackendError>()
+                .expect("should downcast to BackendError");
+            assert!(
+                matches!(
+                    backend_err,
+                    BackendError::MaxTokensExceeded {
+                        input_tokens: 10,
+                        output_tokens: 4096
+                    }
+                ),
+                "stealth max-tokens should fire for done_reason={reason}; got: {backend_err:?}"
+            );
+        }
     }
 }
