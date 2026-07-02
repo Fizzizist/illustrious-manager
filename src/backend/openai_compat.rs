@@ -106,9 +106,7 @@ impl OpenAiCompatSseParser {
             .into());
         }
 
-        if let Some(reason) = finish_reason
-            && reason != "tool_calls"
-            && reason != "length"
+        if let Some(_reason) = finish_reason
             && self.max_tokens > 0
             && output_tokens >= self.max_tokens
         {

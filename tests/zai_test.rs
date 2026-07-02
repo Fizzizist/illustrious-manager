@@ -116,3 +116,28 @@ fn test_parse_sse_multiple_tool_calls_in_single_chunk() {
     let event3 = parser.parse("").unwrap();
     assert!(event3.is_none(), "Expected None when buffer is empty");
 }
+
+#[test]
+fn test_zai_stealth_max_tokens_emits_error() {
+    let mut parser = illustrious_manager::backend::zai::ZaiSseParser::new(4096);
+    let data = r#"{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4096}}"#;
+    let result = parser.parse(data);
+    assert!(
+        result.is_err(),
+        "should emit MaxTokensExceeded for stealth max-tokens via Zai"
+    );
+    let err = result.unwrap_err();
+    let backend_err = err
+        .downcast_ref::<illustrious_manager::backend::error::BackendError>()
+        .expect("should downcast to BackendError");
+    assert!(
+        matches!(
+            backend_err,
+            illustrious_manager::backend::error::BackendError::MaxTokensExceeded {
+                input_tokens: 10,
+                output_tokens: 4096
+            }
+        ),
+        "Zai should inherit stealth max-tokens detection; got: {backend_err:?}"
+    );
+}

@@ -908,4 +908,33 @@ mod tests {
         );
         assert!(matches!(&events[1], StreamEvent::Done));
     }
+
+    #[test]
+    fn parser_stealth_max_tokens_emits_error_with_alternative_done_reason() {
+        for reason in ["error", "content_filter", "unload"] {
+            let mut parser = OllamaParser::new(4096);
+            let chunk = format!(
+                r#"{{"done":true,"prompt_eval_count":10,"eval_count":4096,"done_reason":"{reason}"}}"#
+            );
+            let result = parser.parse_chunk(&chunk);
+            assert!(
+                result.is_err(),
+                "should emit MaxTokensExceeded for done_reason={reason}"
+            );
+            let err = result.unwrap_err();
+            let backend_err = err
+                .downcast_ref::<BackendError>()
+                .expect("should downcast to BackendError");
+            assert!(
+                matches!(
+                    backend_err,
+                    BackendError::MaxTokensExceeded {
+                        input_tokens: 10,
+                        output_tokens: 4096
+                    }
+                ),
+                "stealth max-tokens should fire for done_reason={reason}; got: {backend_err:?}"
+            );
+        }
+    }
 }

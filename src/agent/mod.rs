@@ -5548,6 +5548,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stealth_max_tokens_exhausts_retries_then_emits_empty_response() {
+        fn stealth_response() -> Vec<Result<StreamEvent>> {
+            vec![
+                Ok(StreamEvent::Usage {
+                    input_tokens: 50,
+                    output_tokens: 100,
+                    stop_reason: "stop".to_string(),
+                }),
+                Ok(StreamEvent::Done),
+            ]
+        }
+        let backend = SequencedBackend::new(vec![
+            stealth_response(),
+            stealth_response(),
+            stealth_response(),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(_)))
+            .count();
+        assert_eq!(
+            error_count, 2,
+            "should have 2 error events (1 initial + 1 retry); got {error_count}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
+            "should emit ResponseComplete(\"\") after exhausting retries; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn non_max_tokens_error_breaks_immediately() {
         let backend = SequencedBackend::new(vec![
             vec![Err(anyhow::Error::from(BackendError::Other(
