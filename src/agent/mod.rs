@@ -462,6 +462,7 @@ impl Agent {
                 let mut tool_calls: Vec<PendingToolCall> = vec![];
                 let mut current_tool: Option<PendingToolCall> = None;
                 let mut peak_input_tokens: u32 = 0;
+                let mut last_output_tokens: u32 = 0;
                 let mut stream = backend_stream;
 
                 loop {
@@ -541,6 +542,7 @@ impl Agent {
                             stop_reason,
                         })) => {
                             peak_input_tokens = peak_input_tokens.max(input_tokens);
+                            last_output_tokens = output_tokens;
                             let _ = event_tx.unbounded_send(AgentEvent::Usage {
                                 input_tokens,
                                 output_tokens,
@@ -586,6 +588,25 @@ impl Agent {
                 }
 
                 if tool_calls.is_empty() {
+                    if text_accumulated.is_empty()
+                        && thinking_accumulated.is_empty()
+                        && config.max_tokens > 0
+                        && last_output_tokens >= config.max_tokens
+                        && max_token_retries_used < max_token_retries
+                    {
+                        let error = anyhow::Error::from(
+                            crate::backend::error::BackendError::MaxTokensExceeded {
+                                input_tokens: peak_input_tokens,
+                                output_tokens: last_output_tokens,
+                            },
+                        );
+                        record_error(&format!("{error:#}"), &history_arc, &session, &event_tx)
+                            .await;
+                        max_token_retries_used += 1;
+                        iterations -= 1;
+                        continue 'outer;
+                    }
+
                     let mut content = vec![];
                     if !thinking_accumulated.is_empty() {
                         content.push(ContentBlock::Thinking {
@@ -5441,6 +5462,88 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "should not emit ResponseComplete when retries exhausted"
+        );
+    }
+
+    #[tokio::test]
+    async fn stealth_max_tokens_triggers_retry_not_empty_response() {
+        let stealth_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Usage {
+                input_tokens: 50,
+                output_tokens: 100,
+                stop_reason: "stop".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ];
+        let backend = SequencedBackend::new(vec![stealth_response, text_response("recovered")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should emit Error for stealth max-tokens; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "should emit ResponseComplete after retry; got {events:?}"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "error message must be injected into history"
+        );
+    }
+
+    #[tokio::test]
+    async fn legitimate_empty_response_does_not_trigger_retry() {
+        let empty_response: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Usage {
+                input_tokens: 50,
+                output_tokens: 5,
+                stop_reason: "stop".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ];
+        let backend =
+            SequencedBackend::new(vec![empty_response, text_response("should not reach")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
+            "should emit ResponseComplete with empty text; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error for legitimate empty response; got {events:?}"
         );
     }
 

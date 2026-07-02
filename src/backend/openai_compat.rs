@@ -46,11 +46,15 @@ pub struct OpenAiCompatConfig {
 #[derive(Default)]
 pub struct OpenAiCompatSseParser {
     event_buffer: Vec<StreamEvent>,
+    max_tokens: u32,
 }
 
 impl OpenAiCompatSseParser {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(max_tokens: u32) -> Self {
+        Self {
+            event_buffer: Vec::new(),
+            max_tokens,
+        }
     }
 
     /// Parse one SSE `data:` payload and return the first buffered event, if
@@ -95,6 +99,19 @@ impl OpenAiCompatSseParser {
 
         // Hard limit: propagate immediately as an error.
         if finish_reason == Some("length") {
+            return Err(BackendError::MaxTokensExceeded {
+                input_tokens,
+                output_tokens,
+            }
+            .into());
+        }
+
+        if let Some(reason) = finish_reason
+            && reason != "tool_calls"
+            && reason != "length"
+            && self.max_tokens > 0
+            && output_tokens >= self.max_tokens
+        {
             return Err(BackendError::MaxTokensExceeded {
                 input_tokens,
                 output_tokens,
@@ -417,7 +434,8 @@ impl LlmBackend for OpenAiCompatBackend {
         }
 
         let byte_stream = response.bytes_stream();
-        let mut parser = OpenAiCompatSseParser::new();
+        let resolved_max = self.max_tokens_override.unwrap_or(config.max_tokens);
+        let mut parser = OpenAiCompatSseParser::new(resolved_max);
         let event_stream = create_sse_event_stream(byte_stream, move |data| {
             parser.fill_buffer(data)?;
             let events = std::mem::take(&mut parser.event_buffer);
@@ -642,7 +660,7 @@ mod tests {
 
     #[test]
     fn parser_text_delta() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let event = p
             .parse(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#)
             .unwrap();
@@ -651,7 +669,7 @@ mod tests {
 
     #[test]
     fn parser_done_sentinel() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         assert!(matches!(
             p.parse("[DONE]").unwrap(),
             Some(StreamEvent::Done)
@@ -660,19 +678,19 @@ mod tests {
 
     #[test]
     fn parser_invalid_json_errors() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         assert!(p.parse("not json").is_err());
     }
 
     #[test]
     fn parser_empty_delta_returns_none() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         assert!(p.parse(r#"{"choices":[{"delta":{}}]}"#).unwrap().is_none());
     }
 
     #[test]
     fn parser_tool_use_start() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#;
         let event = p.parse(data).unwrap();
         assert!(matches!(event, Some(StreamEvent::ToolUseStart { name, .. }) if name == "bash"));
@@ -680,7 +698,7 @@ mod tests {
 
     #[test]
     fn parser_tool_use_delta() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd"}}]}}]}"#;
         let event = p.parse(data).unwrap();
         assert!(matches!(event, Some(StreamEvent::ToolUseDelta(d)) if d == "{\"cmd"));
@@ -688,7 +706,7 @@ mod tests {
 
     #[test]
     fn parser_finish_reason_tool_calls_emits_tool_use_done() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let event = p
             .parse(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#)
             .unwrap();
@@ -697,7 +715,7 @@ mod tests {
 
     #[test]
     fn parser_reasoning_content_emits_thinking_delta() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#;
         let event = p.parse(data).unwrap();
         assert!(matches!(event, Some(StreamEvent::ThinkingDelta(t)) if t == "step 1"));
@@ -705,7 +723,7 @@ mod tests {
 
     #[test]
     fn parser_multiple_tool_calls_in_single_chunk_buffered_correctly() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}},{"index":1,"function":{"name":"read_file","arguments":""}}]}}]}"#;
 
         let e1 = p.parse(data).unwrap();
@@ -719,7 +737,7 @@ mod tests {
 
     #[test]
     fn parser_finish_reason_length_returns_error() {
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
         let result = p.parse(data);
         assert!(result.is_err());
@@ -994,7 +1012,7 @@ mod tests {
     fn parser_tool_calls_finish_with_usage_emits_tool_use_done_then_usage() {
         // Finding 9b: tool_calls finish_reason + non-zero usage must drain
         // ToolUseDone before Usage.
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":20}}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1022,7 +1040,7 @@ mod tests {
     fn parser_stop_finish_reason_usage_comes_after_text_delta() {
         // Finding 4: when finish_reason="stop" co-located with content, Usage
         // must be buffered AFTER TextDelta.
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"finish_reason":"stop","delta":{"content":"last"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1043,7 +1061,7 @@ mod tests {
     fn parser_reasoning_and_content_in_same_chunk_both_emitted() {
         // Finding 3: removing the early return after ThinkingDelta must allow
         // a co-located content field to also be emitted.
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"reasoning_content":"think","content":"answer"}}]}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1063,7 +1081,7 @@ mod tests {
     #[test]
     fn parser_usage_only_frame_without_choices_emits_usage() {
         // Finding 5: standalone usage frame (no choices) must produce a Usage event.
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"usage":{"prompt_tokens":100,"completion_tokens":42}}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1085,7 +1103,7 @@ mod tests {
     #[test]
     fn parser_usage_frame_with_empty_choices_emits_usage() {
         // Variant: vLLM sends {"choices": [], "usage": {...}}.
-        let mut p = OpenAiCompatSseParser::new();
+        let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1172,5 +1190,49 @@ mod tests {
             "only the Text block should survive"
         );
         assert_eq!(assistant_content[0]["text"], "answer");
+    }
+
+    #[test]
+    fn parser_stealth_max_tokens_emits_error_when_completion_exceeds_budget() {
+        let mut p = OpenAiCompatSseParser::new(4096);
+        let data = r#"{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":4096}}"#;
+        let result = p.fill_buffer(data);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(
+                backend_err,
+                BackendError::MaxTokensExceeded {
+                    input_tokens: 10,
+                    output_tokens: 4096
+                }
+            ),
+            "stealth max-tokens should emit MaxTokensExceeded; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_stealth_max_tokens_no_false_positive_when_completion_below_budget() {
+        let mut p = OpenAiCompatSseParser::new(4096);
+        let data = r#"{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":100}}"#;
+        p.fill_buffer(data).expect("parse should succeed");
+
+        // Should emit Usage + no error, not MaxTokensExceeded
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(
+                e1,
+                StreamEvent::Usage {
+                    input_tokens: 10,
+                    output_tokens: 100,
+                    ..
+                }
+            ),
+            "should emit Usage event; got: {e1:?}"
+        );
+        assert!(p.event_buffer.is_empty(), "should have no more events");
     }
 }
