@@ -431,14 +431,13 @@ mod tests {
         assert!(result.is_err(), "Path traversal should be rejected");
     }
 
-    #[cfg(unix)]
     mod extra_root_tests {
         use super::*;
 
         #[test]
         fn existing_file_in_extra_root_passes_validate_path() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let file = extra.path().join("in_extra.txt");
@@ -456,7 +455,7 @@ mod tests {
         #[test]
         fn nonexistent_file_in_extra_root_passes_validate_write_path() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let file = extra.path().join("new_in_extra.txt");
@@ -477,10 +476,14 @@ mod tests {
             );
         }
 
+        // /tmp-specific: on macOS /tmp is a symlink to /private/tmp, so the
+        // returned path must be the fully-resolved canonical form, not the
+        // symlinked input. Requires a real /tmp, hence unix-gated.
+        #[cfg(unix)]
         #[test]
         fn returned_path_from_extra_root_is_canonical() {
-            let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(Path::new("/tmp"));
 
             let file = extra.path().join("canon.txt");
@@ -489,15 +492,13 @@ mod tests {
             let result = sandbox
                 .validate_path(&file)
                 .expect("validate_path should succeed");
-            // On macOS /tmp is a symlink to /private/tmp; the returned path must
-            // be the fully-resolved canonical form, not the symlinked input.
             assert_eq!(result, file.canonicalize().expect("canonicalize file"));
         }
 
         #[test]
         fn path_outside_all_roots_is_rejected() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let outside_dir = TempDir::new().expect("Failed to create outside dir");
@@ -512,10 +513,11 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         #[test]
         fn symlink_in_extra_root_escaping_all_roots_is_rejected() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let outside_dir = TempDir::new().expect("Failed to create outside dir");
@@ -537,7 +539,7 @@ mod tests {
         #[test]
         fn dotdot_traversal_via_extra_root_is_rejected() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let traversal = extra
@@ -553,10 +555,34 @@ mod tests {
             );
         }
 
+        #[cfg(unix)]
+        #[test]
+        fn validate_write_path_rejects_symlinked_ancestor_dir_in_extra_root_escaping_all_roots() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
+            let outside_dir = TempDir::new().expect("Failed to create outside dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let symlink_dir = extra.path().join("escape_dir");
+            std::os::unix::fs::symlink(outside_dir.path(), &symlink_dir)
+                .expect("Failed to create symlink");
+
+            let target = symlink_dir.join("file.txt");
+            let result = sandbox.validate_write_path(&target);
+            match result {
+                Err(SandboxError::OutsideSandbox { .. }) => {}
+                Ok(_) => panic!(
+                    "Write path through a symlinked ancestor dir inside an extra root, escaping \
+                     all roots, should be rejected"
+                ),
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
         #[test]
         fn relative_path_does_not_resolve_against_extra_root() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let extra = TempDir::new().expect("Failed to create extra root dir");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
 
             let file_name = "relative_only_in_extra.txt";
@@ -573,7 +599,8 @@ mod tests {
         #[test]
         fn absent_extra_root_is_skipped_not_fatal() {
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let missing = PathBuf::from("/tmp/im-sandbox-test-nonexistent-root-xyz");
+            let missing =
+                std::env::temp_dir().join("im-sandbox-test-nonexistent-root-xyz-doesnotexist");
             let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(&missing);
 
             let file = temp_dir.path().join("inside.txt");

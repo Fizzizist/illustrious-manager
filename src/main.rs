@@ -266,11 +266,6 @@ async fn main() -> Result<()> {
     frontend_result
 }
 
-/// Build a `ToolRegistry` with the standard tool set.
-///
-/// `agent_tool` is `Some` for sub-agent registries (enabling recursive spawning)
-/// and `None` for the parent registry, where `build_agent_spawner_and_register`
-/// adds `AgentTool` after constructing the spawner.
 /// Registers `/tmp` (on Unix) and the platform temp directory as extra
 /// sandbox roots so file tools (`edit_file`, `write_file`) can always
 /// read/write temp space regardless of `sandbox_root`. Both are needed on
@@ -285,6 +280,11 @@ fn extend_sandbox_with_tmp(policy: SandboxPolicy) -> SandboxPolicy {
     policy
 }
 
+/// Build a `ToolRegistry` with the standard tool set.
+///
+/// `agent_tool` is `Some` for sub-agent registries (enabling recursive spawning)
+/// and `None` for the parent registry, where `build_agent_spawner_and_register`
+/// adds `AgentTool` after constructing the spawner.
 fn build_tool_registry(
     session: Arc<tokio::sync::Mutex<Session>>,
     tools_config: &config::ToolsConfig,
