@@ -331,6 +331,30 @@ mod tests {
         assert!(md.contains("`test.txt`"), "should show file path");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_edits_existing_file_under_tmp_extra_root() {
+        let sandbox_dir = TempDir::new().expect("Failed to create sandbox dir");
+        let extra_dir = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+        let file_path = extra_dir.path().join("tmp_edit.txt");
+        fs::write(&file_path, "hello tmp\n").expect("Failed to write test file");
+
+        let sandbox = SandboxPolicy::new(sandbox_dir.path()).with_extra_root(extra_dir.path());
+        let tool = EditFile::new(sandbox);
+
+        let input = serde_json::json!({
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
+            "old_string": "hello tmp",
+            "new_string": "goodbye tmp"
+        });
+
+        let result = tool.execute(input).await.expect("Execution should succeed");
+        assert!(!result.is_error, "Result should not be an error");
+
+        let content = fs::read_to_string(&file_path).expect("Failed to read file");
+        assert_eq!(content, "goodbye tmp\n");
+    }
+
     #[tokio::test]
     async fn markdown_output_returns_result_text() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");

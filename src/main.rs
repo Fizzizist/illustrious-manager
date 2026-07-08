@@ -271,6 +271,20 @@ async fn main() -> Result<()> {
 /// `agent_tool` is `Some` for sub-agent registries (enabling recursive spawning)
 /// and `None` for the parent registry, where `build_agent_spawner_and_register`
 /// adds `AgentTool` after constructing the spawner.
+/// Registers `/tmp` (on Unix) and the platform temp directory as extra
+/// sandbox roots so file tools (`edit_file`, `write_file`) can always
+/// read/write temp space regardless of `sandbox_root`. Both are needed on
+/// macOS, where `std::env::temp_dir()` follows `$TMPDIR` to a per-user
+/// `/var/folders/...` directory rather than `/tmp`. `bash` already has
+/// unrestricted `/tmp` access, so this grants no new privilege beyond what
+/// the agent already has.
+fn extend_sandbox_with_tmp(policy: SandboxPolicy) -> SandboxPolicy {
+    let policy = policy.with_extra_root(&std::env::temp_dir());
+    #[cfg(unix)]
+    let policy = policy.with_extra_root(Path::new("/tmp"));
+    policy
+}
+
 fn build_tool_registry(
     session: Arc<tokio::sync::Mutex<Session>>,
     tools_config: &config::ToolsConfig,
@@ -279,6 +293,7 @@ fn build_tool_registry(
     chat_mode: crate::types::ChatMode,
 ) -> Result<ToolRegistry> {
     let sandbox_policy = SandboxPolicy::new(Path::new(&tools_config.sandbox_root));
+    let sandbox_policy = extend_sandbox_with_tmp(sandbox_policy);
     let mut reg = ToolRegistry::new();
     reg.register(Box::new(BashTool::new(
         tools_config.bash_allowlist.clone(),
@@ -376,6 +391,39 @@ fn create_log_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: on macOS, std::env::temp_dir() follows $TMPDIR to
+    // /var/folders/.../T/, so registering only temp_dir() left /tmp outside
+    // the sandbox and writes to /tmp/... were rejected.
+    #[cfg(unix)]
+    #[test]
+    fn extend_sandbox_with_tmp_allows_write_paths_under_slash_tmp() {
+        let sandbox_dir = tempfile::TempDir::new().expect("Failed to create sandbox dir");
+        let policy = extend_sandbox_with_tmp(SandboxPolicy::new(sandbox_dir.path()));
+
+        let target = Path::new("/tmp/illustrious-manager-tmp-root-regression-test.txt");
+        let result = policy.validate_write_path(target);
+        assert!(
+            result.is_ok(),
+            "Write path under /tmp must validate even when $TMPDIR points elsewhere: {:?}",
+            result
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extend_sandbox_with_tmp_allows_platform_temp_dir() {
+        let sandbox_dir = tempfile::TempDir::new().expect("Failed to create sandbox dir");
+        let policy = extend_sandbox_with_tmp(SandboxPolicy::new(sandbox_dir.path()));
+
+        let target = std::env::temp_dir().join("illustrious-manager-tempdir-regression-test.txt");
+        let result = policy.validate_write_path(&target);
+        assert!(
+            result.is_ok(),
+            "Write path under the platform temp dir must validate: {:?}",
+            result
+        );
+    }
 
     #[test]
     fn single_shot_without_prompt_errors() {

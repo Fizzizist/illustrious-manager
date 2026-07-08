@@ -298,6 +298,27 @@ mod tests {
         assert!(md.contains("fn main()"), "should include content");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_creates_file_under_tmp_extra_root() {
+        let sandbox_dir = TempDir::new().expect("Failed to create sandbox dir");
+        let extra_dir = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+        let sandbox = SandboxPolicy::new(sandbox_dir.path()).with_extra_root(extra_dir.path());
+        let tool = WriteFileTool::new(sandbox);
+
+        let file_path = extra_dir.path().join("tmp_write.txt");
+        let input = serde_json::json!({
+            "path": file_path.to_str().expect("temp path should be valid UTF-8"),
+            "content": "written to tmp"
+        });
+
+        let result = tool.execute(input).await.expect("Write should succeed");
+        assert!(!result.is_error);
+
+        let written = fs::read_to_string(&file_path).expect("File should exist");
+        assert_eq!(written, "written to tmp");
+    }
+
     #[tokio::test]
     async fn markdown_output_returns_result_text() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");

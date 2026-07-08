@@ -30,11 +30,13 @@ pub(super) fn path_is_within(path: &Path, sandbox: &Path) -> bool {
 
 /// Sandbox policy for validating file paths
 ///
-/// Ensures all file operations stay within the configured sandbox root directory.
+/// Ensures all file operations stay within the configured sandbox root directory,
+/// or within any registered extra root (see [`SandboxPolicy::with_extra_root`]).
 /// Prevents directory traversal attacks and symlink-based sandbox escapes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SandboxPolicy {
     root: PathBuf,
+    extra_roots: Vec<PathBuf>,
 }
 
 impl SandboxPolicy {
@@ -42,13 +44,40 @@ impl SandboxPolicy {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            extra_roots: Vec::new(),
         }
+    }
+
+    /// Register an additional root directory that paths may resolve within.
+    ///
+    /// Only affects validation of *absolute* paths: relative paths always
+    /// resolve against the primary root, never against extra roots.
+    pub fn with_extra_root(mut self, root: &Path) -> Self {
+        self.extra_roots.push(root.to_path_buf());
+        self
+    }
+
+    /// Canonicalize the primary root (fatal on failure) and every extra root
+    /// (skipped, not fatal, if canonicalization fails — e.g. a root that
+    /// doesn't exist on the current platform).
+    fn canonical_roots(&self) -> Result<(PathBuf, Vec<PathBuf>), SandboxError> {
+        let primary = self.root.canonicalize().map_err(|_| {
+            SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
+        })?;
+
+        let extras = self
+            .extra_roots
+            .iter()
+            .filter_map(|r| r.canonicalize().ok())
+            .collect();
+
+        Ok((primary, extras))
     }
 
     /// Validate that a path is within the sandbox
     ///
     /// Resolves symlinks and canonicalizes the path, then ensures it stays
-    /// within the sandbox root directory.
+    /// within the sandbox root directory or one of the registered extra roots.
     ///
     /// # Security
     /// Only validates existing paths. Non-existent paths are rejected to prevent
@@ -69,15 +98,17 @@ impl SandboxPolicy {
             )));
         }
 
-        let sandbox_canonical = self.root.canonicalize().map_err(|_| {
-            SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
-        })?;
+        let (sandbox_canonical, extra_canonicals) = self.canonical_roots()?;
 
         let canonical = absolute.canonicalize().map_err(|_| {
             SandboxError::InvalidPath(format!("Cannot canonicalize path: {:?}", path))
         })?;
 
-        if !path_is_within(&canonical, &sandbox_canonical) {
+        if !path_is_within(&canonical, &sandbox_canonical)
+            && !extra_canonicals
+                .iter()
+                .any(|extra| path_is_within(&canonical, extra))
+        {
             return Err(SandboxError::OutsideSandbox {
                 path: canonical,
                 sandbox: sandbox_canonical,
@@ -90,7 +121,8 @@ impl SandboxPolicy {
     /// Validate a path for writing (file may not yet exist).
     ///
     /// Walks up to the nearest existing ancestor, canonicalizes it, and verifies
-    /// the intended write location stays within the sandbox.
+    /// the intended write location stays within the sandbox root or one of the
+    /// registered extra roots.
     pub fn validate_write_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
@@ -98,9 +130,7 @@ impl SandboxPolicy {
             self.root.join(path)
         };
 
-        let sandbox_canonical = self.root.canonicalize().map_err(|_| {
-            SandboxError::InvalidPath(format!("Cannot canonicalize sandbox root: {:?}", self.root))
-        })?;
+        let (sandbox_canonical, extra_canonicals) = self.canonical_roots()?;
 
         let mut existing_ancestor = absolute.clone();
         let mut pending: Vec<std::ffi::OsString> = vec![];
@@ -147,7 +177,11 @@ impl SandboxPolicy {
             ))
         })?;
 
-        if !path_is_within(&canonical_ancestor, &sandbox_canonical) {
+        if !path_is_within(&canonical_ancestor, &sandbox_canonical)
+            && !extra_canonicals
+                .iter()
+                .any(|extra| path_is_within(&canonical_ancestor, extra))
+        {
             return Err(SandboxError::OutsideSandbox {
                 path: canonical_ancestor,
                 sandbox: sandbox_canonical,
@@ -395,5 +429,161 @@ mod tests {
             .join("escape.txt");
         let result = sandbox.validate_write_path(&traversal);
         assert!(result.is_err(), "Path traversal should be rejected");
+    }
+
+    #[cfg(unix)]
+    mod extra_root_tests {
+        use super::*;
+
+        #[test]
+        fn existing_file_in_extra_root_passes_validate_path() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let file = extra.path().join("in_extra.txt");
+            fs::write(&file, "hi").expect("Failed to write file");
+
+            let result = sandbox.validate_path(&file);
+            assert!(
+                result.is_ok(),
+                "Existing file inside extra root should be allowed"
+            );
+            let expected = file.canonicalize().expect("canonicalize file");
+            assert_eq!(result.expect("validate_path should succeed"), expected);
+        }
+
+        #[test]
+        fn nonexistent_file_in_extra_root_passes_validate_write_path() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let file = extra.path().join("new_in_extra.txt");
+            let result = sandbox.validate_write_path(&file);
+            assert!(
+                result.is_ok(),
+                "Non-existent file inside extra root should be allowed for writing"
+            );
+
+            let canonical_extra = extra
+                .path()
+                .canonicalize()
+                .expect("canonicalize extra root");
+            let expected = canonical_extra.join("new_in_extra.txt");
+            assert_eq!(
+                result.expect("validate_write_path should succeed"),
+                expected
+            );
+        }
+
+        #[test]
+        fn returned_path_from_extra_root_is_canonical() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(Path::new("/tmp"));
+
+            let file = extra.path().join("canon.txt");
+            fs::write(&file, "hi").expect("Failed to write file");
+
+            let result = sandbox
+                .validate_path(&file)
+                .expect("validate_path should succeed");
+            // On macOS /tmp is a symlink to /private/tmp; the returned path must
+            // be the fully-resolved canonical form, not the symlinked input.
+            assert_eq!(result, file.canonicalize().expect("canonicalize file"));
+        }
+
+        #[test]
+        fn path_outside_all_roots_is_rejected() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let outside_dir = TempDir::new().expect("Failed to create outside dir");
+            let outside_file = outside_dir.path().join("outside.txt");
+            fs::write(&outside_file, "content").expect("Failed to write outside file");
+
+            let result = sandbox.validate_path(&outside_file);
+            match result {
+                Err(SandboxError::OutsideSandbox { .. }) => {}
+                Ok(_) => panic!("Path outside all roots should be rejected"),
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        #[test]
+        fn symlink_in_extra_root_escaping_all_roots_is_rejected() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let outside_dir = TempDir::new().expect("Failed to create outside dir");
+            let outside_file = outside_dir.path().join("target.txt");
+            fs::write(&outside_file, "content").expect("Failed to write file");
+
+            let symlink_path = extra.path().join("escape_link");
+            std::os::unix::fs::symlink(&outside_file, &symlink_path)
+                .expect("Failed to create symlink");
+
+            let result = sandbox.validate_path(&symlink_path);
+            match result {
+                Err(SandboxError::OutsideSandbox { .. }) => {}
+                Ok(_) => panic!("Symlink escaping all roots should be rejected"),
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        #[test]
+        fn dotdot_traversal_via_extra_root_is_rejected() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let traversal = extra
+                .path()
+                .join("subdir")
+                .join("..")
+                .join("..")
+                .join("escape.txt");
+            let result = sandbox.validate_write_path(&traversal);
+            assert!(
+                result.is_err(),
+                "Path traversal via extra root should be rejected"
+            );
+        }
+
+        #[test]
+        fn relative_path_does_not_resolve_against_extra_root() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let extra = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(extra.path());
+
+            let file_name = "relative_only_in_extra.txt";
+            fs::write(extra.path().join(file_name), "hi")
+                .expect("Failed to write file in extra root");
+
+            let result = sandbox.validate_path(Path::new(file_name));
+            assert!(
+                result.is_err(),
+                "Relative path must not resolve against extra roots"
+            );
+        }
+
+        #[test]
+        fn absent_extra_root_is_skipped_not_fatal() {
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let missing = PathBuf::from("/tmp/im-sandbox-test-nonexistent-root-xyz");
+            let sandbox = SandboxPolicy::new(temp_dir.path()).with_extra_root(&missing);
+
+            let file = temp_dir.path().join("inside.txt");
+            fs::write(&file, "hi").expect("Failed to write file");
+
+            let result = sandbox.validate_path(&file);
+            assert!(
+                result.is_ok(),
+                "A missing extra root should be skipped, not cause a fatal error"
+            );
+        }
     }
 }
