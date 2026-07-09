@@ -221,6 +221,9 @@ model = "glm-5.1"
 # confirmation = "WriteOnly"
 # Directory tools are allowed to read/write (resolved to absolute path at startup)
 # sandbox_root = "."
+# Note: /tmp (on Unix) and the platform temp directory are always accessible
+# to edit_file/write_file as additional roots, regardless of sandbox_root.
+# This is not configurable; bash already has unrestricted /tmp access.
 # Maximum number of tool-use iterations per agent turn
 # max_tool_iterations = 25
 # Maximum byte cap for tool results. Results exceeding this cap are truncated
