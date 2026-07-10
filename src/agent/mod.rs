@@ -788,11 +788,12 @@ async fn persist_partial_and_interrupt(
     });
 }
 
-async fn record_error(
+async fn inject_error_and_emit(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    make_event: impl FnOnce(String) -> AgentEvent,
 ) {
     let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
     lock(history).push(error_user_msg.clone());
@@ -802,7 +803,16 @@ async fn record_error(
         .conversation()
         .insert_message(&error_user_msg)
         .await;
-    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
+    let _ = event_tx.unbounded_send(make_event(error_msg.to_string()));
+}
+
+async fn record_error(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Error).await;
 }
 
 async fn record_retry(
@@ -811,15 +821,7 @@ async fn record_retry(
     session: &Arc<TokioMutex<Session>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) {
-    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
-    lock(history).push(error_user_msg.clone());
-    let _ = session
-        .lock()
-        .await
-        .conversation()
-        .insert_message(&error_user_msg)
-        .await;
-    let _ = event_tx.unbounded_send(AgentEvent::Retrying(error_msg.to_string()));
+    inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Retrying).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5778,7 +5780,7 @@ mod tests {
             .count();
         assert_eq!(
             retrying_count, 5,
-            "should have 5 Retrying events (initial + 4 retries within budget); got {retrying_count}"
+            "should have 5 Retrying events (attempts 1-5, all within budget); got {retrying_count}"
         );
         assert_eq!(
             error_count, 1,

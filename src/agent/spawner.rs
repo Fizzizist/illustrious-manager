@@ -367,4 +367,48 @@ mod tests {
             "bash should be present when chat mode is off"
         );
     }
+
+    #[tokio::test]
+    async fn run_headless_absorbs_retrying_without_error() {
+        use futures::channel::mpsc;
+
+        // Simulate the run_headless event loop with a Retrying event in the stream.
+        // Verifies that Retrying does not set is_error, does not break the loop,
+        // and text accumulates across the retry boundary.
+        let (tx, rx) = mpsc::unbounded::<AgentEvent>();
+        let _ = tx.unbounded_send(AgentEvent::TokenReceived("partial".to_string()));
+        let _ = tx.unbounded_send(AgentEvent::Retrying("max tokens exceeded".to_string()));
+        let _ = tx.unbounded_send(AgentEvent::TokenReceived("recovered".to_string()));
+        let _ = tx.unbounded_send(AgentEvent::ResponseComplete("recovered".to_string()));
+        drop(tx);
+
+        let mut stream = Box::pin(rx) as futures::stream::BoxStream<AgentEvent>;
+        let mut text = String::new();
+        let mut is_error = false;
+        let mut error_message: Option<String> = None;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                AgentEvent::TokenReceived(t) => text.push_str(&t),
+                AgentEvent::ResponseComplete(_) => {}
+                AgentEvent::Retrying(_) => {}
+                AgentEvent::Error(msg) => {
+                    is_error = true;
+                    error_message = Some(msg);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(!is_error, "Retrying must not set is_error");
+        assert!(
+            error_message.is_none(),
+            "Retrying must not set error_message"
+        );
+        assert_eq!(
+            text, "partialrecovered",
+            "text should accumulate across retry boundary"
+        );
+    }
 }
