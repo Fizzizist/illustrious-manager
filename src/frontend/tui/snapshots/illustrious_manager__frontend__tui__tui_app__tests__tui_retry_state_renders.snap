@@ -1,0 +1,25 @@
+---
+source: src/frontend/tui/tui_app.rs
+assertion_line: 3159
+expression: terminal.backend()
+---
+"Error:                                                      "
+"  max tokens exceeded — retrying                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"┌ Streaming... (Esc to interrupt) ─────────────────────────┐"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
+" ↑0 ↓0   no git                                             "

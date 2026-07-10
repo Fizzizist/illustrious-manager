@@ -128,6 +128,9 @@ pub fn log_event(event: &AgentEvent) {
         AgentEvent::Error(msg) => {
             log_error(msg);
         }
+        AgentEvent::Retrying(msg) => {
+            log_warn(&format!("Retrying: {msg}"));
+        }
         AgentEvent::Usage {
             input_tokens,
             output_tokens,
@@ -337,6 +340,7 @@ impl Logger {
                 writeln!(w, "[ASSISTANT RESPONSE]\n{}\n", text).map_err(Into::into)
             }
             AgentEvent::Error(msg) => writeln!(w, "[ERROR]\n{}\n", msg).map_err(Into::into),
+            AgentEvent::Retrying(msg) => writeln!(w, "[RETRYING]\n{}\n", msg).map_err(Into::into),
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,

@@ -571,17 +571,19 @@ impl Agent {
                                     .insert_message(&thinking_msg)
                                     .await;
                             }
-                            record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
-                                .await;
 
                             if max_token_retries_used < max_token_retries
                                 && e.downcast_ref::<crate::backend::error::BackendError>()
                                     .is_some_and(|be| be.is_max_tokens())
                             {
+                                record_retry(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                                    .await;
                                 max_token_retries_used += 1;
                                 iterations -= 1;
                                 continue 'outer;
                             }
+                            record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                                .await;
                             break 'outer;
                         }
                     }
@@ -600,7 +602,7 @@ impl Agent {
                                 output_tokens: last_output_tokens,
                             },
                         );
-                        record_error(&format!("{error:#}"), &history_arc, &session, &event_tx)
+                        record_retry(&format!("{error:#}"), &history_arc, &session, &event_tx)
                             .await;
                         max_token_retries_used += 1;
                         iterations -= 1;
@@ -801,6 +803,23 @@ async fn record_error(
         .insert_message(&error_user_msg)
         .await;
     let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
+}
+
+async fn record_retry(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    let error_user_msg = Message::text(Role::User, format!("[ERROR] {error_msg}"));
+    lock(history).push(error_user_msg.clone());
+    let _ = session
+        .lock()
+        .await
+        .conversation()
+        .insert_message(&error_user_msg)
+        .await;
+    let _ = event_tx.unbounded_send(AgentEvent::Retrying(error_msg.to_string()));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5388,8 +5407,12 @@ mod tests {
         let events = collect_events(stream).await;
 
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
-            "should emit Error for first attempt"
+            events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should emit Retrying for first attempt"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error when retry succeeds; got {events:?}"
         );
         assert!(
             events
@@ -5453,9 +5476,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AgentEvent::Error(_)))
             .count();
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
         assert_eq!(
-            error_count, 3,
-            "should have 3 error events (1 initial + 2 retries); got {error_count}"
+            retrying_count, 2,
+            "should have 2 Retrying events (2 retries within budget); got {retrying_count}"
+        );
+        assert_eq!(
+            error_count, 1,
+            "should have 1 Error event (final exhausted attempt); got {error_count}"
         );
         assert!(
             !events
@@ -5490,8 +5521,12 @@ mod tests {
         let events = collect_events(stream).await;
 
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
-            "should emit Error for stealth max-tokens; got {events:?}"
+            events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should emit Retrying for stealth max-tokens; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error when retry succeeds; got {events:?}"
         );
         assert!(
             events
@@ -5581,9 +5616,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AgentEvent::Error(_)))
             .count();
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
         assert_eq!(
-            error_count, 2,
-            "should have 2 error events (1 initial + 1 retry); got {error_count}"
+            retrying_count, 2,
+            "should have 2 Retrying events (1 initial + 1 retry within budget); got {retrying_count}"
+        );
+        assert_eq!(
+            error_count, 0,
+            "should have 0 Error events (stealth exhaustion falls through to empty response); got {error_count}"
         );
         assert!(
             events
@@ -5716,22 +5759,30 @@ mod tests {
         let events = collect_events(stream).await;
 
         // max_token_retries=5 allows 5 retries (attempts 2-6).
-        // Attempt 1 (initial) → error → retry 1 (retries_used=1)
-        // Attempt 2 (retry 1) → error → retry 2 (retries_used=2)
-        // Attempt 3 (retry 2) → error → retry 3 (retries_used=3)
-        // Attempt 4 (retry 3) → error → retry 4 (retries_used=4)
-        // Attempt 5 (retry 4) → error → retry 5 (retries_used=5)
-        // Attempt 6 (retry 5) → error → 5 < 5 is false → break
-        // Total: 6 errors, no success
+        // Attempt 1 (initial) → Retrying → retry 1 (retries_used=1)
+        // Attempt 2 (retry 1) → Retrying → retry 2 (retries_used=2)
+        // Attempt 3 (retry 2) → Retrying → retry 3 (retries_used=3)
+        // Attempt 4 (retry 3) → Retrying → retry 4 (retries_used=4)
+        // Attempt 5 (retry 4) → Retrying → retry 5 (retries_used=5)
+        // Attempt 6 (retry 5) → Error → 5 < 5 is false → break
+        // Total: 5 Retrying + 1 Error, no success
         // Crucially: max_tool_iterations=3, but all 6 attempts succeed because
         // max_tokens retries don't consume the iterations budget.
         let error_count = events
             .iter()
             .filter(|e| matches!(e, AgentEvent::Error(_)))
             .count();
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
         assert_eq!(
-            error_count, 6,
-            "should have 6 errors (1 initial + 5 retries) then break; got {error_count}"
+            retrying_count, 5,
+            "should have 5 Retrying events (initial + 4 retries within budget); got {retrying_count}"
+        );
+        assert_eq!(
+            error_count, 1,
+            "should have 1 Error event (final exhausted attempt); got {error_count}"
         );
         assert!(
             !events
@@ -5823,14 +5874,14 @@ mod tests {
             .position(|e| matches!(e, AgentEvent::Usage { .. }));
         let error_idx = events
             .iter()
-            .position(|e| matches!(e, AgentEvent::Error(_)));
+            .position(|e| matches!(e, AgentEvent::Retrying(_)));
 
         assert!(usage_idx.is_some(), "should emit Usage event before error");
-        assert!(error_idx.is_some(), "should emit Error event");
+        assert!(error_idx.is_some(), "should emit Retrying event");
         if let (Some(ui), Some(ei)) = (usage_idx, error_idx) {
             assert!(
                 ui < ei,
-                "Usage event must come before Error event; got usage at {ui}, error at {ei}"
+                "Usage event must come before Retrying event; got usage at {ui}, retrying at {ei}"
             );
         }
 
@@ -5931,5 +5982,58 @@ mod tests {
                     .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
             "error message must be injected into history"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_emits_retrying_not_error() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("partial"),
+            text_response("recovered"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let retrying_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Retrying(_)));
+        let token_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "recovered"));
+        let complete_idx = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered"));
+
+        assert!(
+            retrying_idx.is_some(),
+            "should emit Retrying as the first retry signal; got {events:?}"
+        );
+        assert!(
+            token_idx.is_some(),
+            "should emit TokenReceived for retry response"
+        );
+        assert!(
+            complete_idx.is_some(),
+            "should emit ResponseComplete for retry response"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error when retry succeeds; got {events:?}"
+        );
+        if let (Some(ri), Some(ti)) = (retrying_idx, token_idx) {
+            assert!(
+                ri < ti,
+                "Retrying must come before retry TokenReceived; got retrying at {ri}, token at {ti}"
+            );
+        }
     }
 }

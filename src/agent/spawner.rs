@@ -64,6 +64,7 @@ pub async fn run_headless(agent: &Agent, prompt: String) -> HeadlessOutcome {
                 error_message = Some(msg);
                 break;
             }
+            AgentEvent::Retrying(_) => {}
             AgentEvent::Usage {
                 input_tokens: it,
                 output_tokens: ot,

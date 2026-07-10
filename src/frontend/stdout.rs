@@ -117,6 +117,9 @@ async fn run_text<W: Write, R: BufRead>(
                 crate::logging::log_error(&format!("\nError: {}", msg));
                 anyhow::bail!("LLM error: {}", msg);
             }
+            AgentEvent::Retrying(msg) => {
+                crate::logging::log_warn(&format!("Retrying: {}", msg));
+            }
             AgentEvent::ToolUseReceived {
                 name, input, index, ..
             } => {
@@ -221,6 +224,7 @@ async fn collect_response<R: BufRead>(
                 result_text = msg;
                 break;
             }
+            AgentEvent::Retrying(_) => {}
             AgentEvent::Usage { .. } => {}
             AgentEvent::SubAgentUsage { .. } => {}
             AgentEvent::Warn(_) => {}
@@ -564,6 +568,34 @@ mod tests {
             String::from_utf8(buf).expect("valid UTF-8"),
             "hello world\n"
         );
+    }
+
+    #[tokio::test]
+    async fn run_text_retrying_does_not_bail() {
+        let events = vec![
+            AgentEvent::TokenReceived("partial".to_string()),
+            AgentEvent::Retrying("max tokens exceeded".to_string()),
+            AgentEvent::TokenReceived("recovered".to_string()),
+            AgentEvent::ResponseComplete("recovered".to_string()),
+        ];
+        let (result, buf) = run_text_events(events, false).await;
+        result.expect("run_text should not bail on Retrying");
+        assert_eq!(
+            String::from_utf8(buf).expect("valid UTF-8"),
+            "partialrecovered\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn collect_response_retrying_does_not_bail() {
+        let events = vec![
+            AgentEvent::Retrying("max tokens exceeded".to_string()),
+            AgentEvent::TokenReceived("recovered".to_string()),
+            AgentEvent::ResponseComplete("recovered".to_string()),
+        ];
+        let (text, is_error) = run_json_collect(events, false).await;
+        assert!(!is_error);
+        assert_eq!(text, "recovered");
     }
 
     #[tokio::test]

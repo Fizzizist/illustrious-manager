@@ -361,6 +361,7 @@ pub enum AgentEvent {
     },
     ResponseComplete(String),
     Error(String),
+    Retrying(String),
     Usage {
         input_tokens: u32,
         output_tokens: u32,
@@ -948,6 +949,15 @@ mod tests {
         assert!(matches!(event, AgentEvent::ThinkingReceived(_)));
         if let AgentEvent::ThinkingReceived(text) = event {
             assert_eq!(text, "Let me reason about this.");
+        }
+    }
+
+    #[test]
+    fn agent_event_retrying_contains_message() {
+        let event = AgentEvent::Retrying("max tokens exceeded".to_string());
+        assert!(matches!(event, AgentEvent::Retrying(_)));
+        if let AgentEvent::Retrying(msg) = event {
+            assert_eq!(msg, "max tokens exceeded");
         }
     }
 
