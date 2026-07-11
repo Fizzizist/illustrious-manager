@@ -2210,7 +2210,9 @@ mod tests {
             })
             .expect("draw");
 
-        insta::assert_snapshot!("render_splash", terminal.backend());
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(r"v\d+\.\d+\.\d+", "vVERSION");
+        settings.bind(|| insta::assert_snapshot!("render_splash", terminal.backend()));
     }
 
     #[test]

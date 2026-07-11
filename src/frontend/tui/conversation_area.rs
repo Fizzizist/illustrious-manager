@@ -772,7 +772,9 @@ mod tests {
             })
             .expect("draw");
 
-        insta::assert_snapshot!("render_empty_conversation", terminal.backend());
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(r"v\d+\.\d+\.\d+", "vVERSION");
+        settings.bind(|| insta::assert_snapshot!("render_empty_conversation", terminal.backend()));
     }
 
     #[test]

@@ -50,6 +50,6 @@ unicode-width = "0.2.2"
 uuid = { version = "1.23.0", features = ["v7"] }
 
 [dev-dependencies]
-insta = "1.47.0"
+insta = { version = "1.47.0", features = ["filters"] }
 tempfile = "3.27.0"
 
