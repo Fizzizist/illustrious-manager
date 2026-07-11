@@ -108,7 +108,10 @@ fn test_tui_initial_state() {
     terminal
         .draw(|frame| render_app(&mut app, frame))
         .expect("draw must succeed");
-    assert_snapshot!(terminal.backend());
+
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"v\d+\.\d+\.\d+", "vVERSION");
+    settings.bind(|| assert_snapshot!(terminal.backend()));
 }
 
 #[test]

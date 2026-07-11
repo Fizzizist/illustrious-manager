@@ -548,6 +548,13 @@ pub fn handle_agent_event(
             ));
             finish_turn_reset(app);
         }
+        AgentEvent::Retrying(msg) => {
+            app.conversation.push(ConversationEntry::new(
+                ConversationRole::Error,
+                msg,
+                crate::timestamp::format_now_timestamp(),
+            ));
+        }
         AgentEvent::ToolUseReceived {
             name, input, index, ..
         } => {
@@ -2203,7 +2210,9 @@ mod tests {
             })
             .expect("draw");
 
-        insta::assert_snapshot!("render_splash", terminal.backend());
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(r"v\d+\.\d+\.\d+", "vVERSION");
+        settings.bind(|| insta::assert_snapshot!("render_splash", terminal.backend()));
     }
 
     #[test]
@@ -3001,6 +3010,58 @@ mod tests {
     }
 
     #[test]
+    fn tui_retry_stays_in_streaming() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::Streaming);
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Retrying("max tokens exceeded".to_string()),
+            None,
+        )
+        .expect("handle retrying");
+
+        assert_eq!(
+            app.state,
+            AppState::Streaming,
+            "state must remain Streaming after Retrying"
+        );
+        assert!(
+            app.cancel_token.is_some(),
+            "cancel_token must be preserved after Retrying"
+        );
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("max tokens exceeded")),
+            "conversation should contain the retry error message"
+        );
+    }
+
+    #[test]
+    fn tui_error_exits_streaming() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token);
+        app.set_state(AppState::Streaming);
+
+        handle_agent_event(&mut app, AgentEvent::Error("fatal error".to_string()), None)
+            .expect("handle error");
+
+        assert_eq!(
+            app.state,
+            AppState::Input,
+            "state must be Input after Error"
+        );
+        assert!(
+            app.cancel_token.is_none(),
+            "cancel_token must be cleared after Error"
+        );
+    }
+
+    #[test]
     fn thinking_cleared_on_interrupted_event() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
 
@@ -3077,5 +3138,26 @@ mod tests {
     #[test]
     fn extract_last_thinking_line_single_line() {
         assert_eq!(extract_last_thinking_line("only line"), Some("only line"));
+    }
+
+    #[test]
+    fn tui_retry_state_renders() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.conversation.push(ConversationEntry::new(
+            ConversationRole::Error,
+            "max tokens exceeded — retrying".to_string(),
+            String::new(),
+        ));
+
+        let backend = ratatui::backend::TestBackend::new(60, 20);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                render_app(&mut app, frame);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("tui_retry_state_renders", terminal.backend());
     }
 }

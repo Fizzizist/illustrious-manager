@@ -128,6 +128,9 @@ pub fn log_event(event: &AgentEvent) {
         AgentEvent::Error(msg) => {
             log_error(msg);
         }
+        AgentEvent::Retrying(msg) => {
+            log_warn(&format!("Retrying: {msg}"));
+        }
         AgentEvent::Usage {
             input_tokens,
             output_tokens,
@@ -337,6 +340,7 @@ impl Logger {
                 writeln!(w, "[ASSISTANT RESPONSE]\n{}\n", text).map_err(Into::into)
             }
             AgentEvent::Error(msg) => writeln!(w, "[ERROR]\n{}\n", msg).map_err(Into::into),
+            AgentEvent::Retrying(msg) => writeln!(w, "[RETRYING]\n{}\n", msg).map_err(Into::into),
             AgentEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -642,6 +646,20 @@ mod tests {
     }
 
     #[test]
+    fn logger_event_retrying_writes() {
+        let path = temp_log_path("event_retrying");
+        let mut logger = Logger::new(Some(path.clone())).expect("Failed to create logger");
+        logger
+            .log_event(&AgentEvent::Retrying("max tokens exceeded".into()))
+            .expect("Failed to log event");
+        logger.flush().expect("Failed to flush");
+
+        let contents = read_file(&path);
+        assert!(contents.contains("[RETRYING]"));
+        assert!(contents.contains("max tokens exceeded"));
+    }
+
+    #[test]
     fn logger_event_usage_writes() {
         let path = temp_log_path("event_usage");
         let mut logger = Logger::new(Some(path.clone())).expect("Failed to create logger");
@@ -846,6 +864,7 @@ mod tests {
         log_error("global error");
         log_event(&AgentEvent::ResponseComplete("assistant text".to_string()));
         log_event(&AgentEvent::Error("some error".to_string()));
+        log_event(&AgentEvent::Retrying("max tokens exceeded".to_string()));
         flush();
 
         // Only assert file contents when this process's init_global call won the OnceLock.
@@ -855,6 +874,10 @@ mod tests {
             assert!(content.contains("global warn"), "expected warn message");
             assert!(content.contains("[ERROR]"), "expected [ERROR] tag");
             assert!(content.contains("global error"), "expected error message");
+            assert!(
+                content.contains("Retrying: max tokens exceeded"),
+                "expected retrying message in warn format"
+            );
             assert!(
                 content.contains("[ASSISTANT RESPONSE]"),
                 "expected [ASSISTANT RESPONSE] tag"
