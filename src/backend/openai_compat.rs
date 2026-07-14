@@ -106,6 +106,10 @@ impl OpenAiCompatSseParser {
             .into());
         }
 
+        if finish_reason == Some("content_filter") || finish_reason == Some("refusal") {
+            return Err(BackendError::Refusal.into());
+        }
+
         if let Some(_reason) = finish_reason
             && self.max_tokens > 0
             && output_tokens >= self.max_tokens
@@ -1232,5 +1236,37 @@ mod tests {
             "should emit Usage event; got: {e1:?}"
         );
         assert!(p.event_buffer.is_empty(), "should have no more events");
+    }
+
+    #[test]
+    fn parser_content_filter_finish_reason_returns_refusal_error() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
+        let result = p.parse(data);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_refusal_finish_reason_returns_refusal_error() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"finish_reason":"refusal"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
+        let result = p.parse(data);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
+        );
     }
 }

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to AI agents when working with code in this repository.
 
 ## Engineering Policies
 
@@ -24,8 +24,7 @@ These are _strict_ policies that must be followed by all engineers and developer
 ### Testing
 
 - Frontend REPL ratatui testing should be done with insta snapshots.
-- It is expected that Test Driven Development will be the main way that code is implemented in this repo, so most code should have tests that test _behavior_.
-- Any bug fix should include regression at least one regression test.
+- Don't write tests for the sake of tests. Be intentional about only testing _behavior_.
 
 ## Project Overview
 
