@@ -161,8 +161,8 @@ impl InputArea {
             .clamp(MIN_HEIGHT, max_height)
     }
 
-    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect) {
-        let block = self.build_block(area);
+    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect, disabled: bool) {
+        let block = self.build_block(area, disabled);
         let inner = block.inner(area);
 
         if inner.width == 0 || inner.height == 0 {
@@ -233,7 +233,7 @@ impl InputArea {
         }
     }
 
-    fn build_block(&self, _area: Rect) -> Block<'static> {
+    fn build_block(&self, _area: Rect, disabled: bool) -> Block<'static> {
         let title = match &self.mode {
             AppMode::Editing => match self.editor.vim_mode() {
                 VimMode::Normal => NORMAL_TITLE,
@@ -253,7 +253,15 @@ impl InputArea {
             }
         };
 
-        Block::default().borders(Borders::ALL).title(title)
+        let border_style = if disabled {
+            Style::default().fg(ratatui::style::Color::DarkGray)
+        } else {
+            Style::default()
+        };
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(title)
     }
 }
 
@@ -528,7 +536,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -550,7 +558,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 20, height);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -568,7 +576,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -608,7 +616,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -626,7 +634,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -644,7 +652,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -662,7 +670,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -683,7 +691,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, height);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -702,7 +710,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -759,7 +767,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -845,7 +853,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -862,7 +870,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -1028,7 +1036,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -1047,7 +1055,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -1064,7 +1072,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
@@ -1187,7 +1195,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area);
+                input.render(frame, area, true);
             })
             .expect("draw");
 
