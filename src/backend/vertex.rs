@@ -171,6 +171,8 @@ impl VertexSseParser {
                         output_tokens,
                     }
                     .into());
+                } else if stop_reason == "refusal" || stop_reason == "content_filter" {
+                    return Err(BackendError::Refusal.into());
                 } else {
                     self.event_buffer.push(StreamEvent::Usage {
                         input_tokens: self.input_tokens,
@@ -1335,5 +1337,43 @@ mod tests {
             }
             other => panic!("expected Usage event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parser_refusal_stop_reason_returns_refusal_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":100}}}"#)
+            .expect("message_start");
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"refusal"},"usage":{"output_tokens":50}}"#;
+        let result = parser.parse(data);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_content_filter_stop_reason_returns_refusal_error() {
+        let mut parser = VertexSseParser::new();
+        parser
+            .parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":100}}}"#)
+            .expect("message_start");
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"content_filter"},"usage":{"output_tokens":50}}"#;
+        let result = parser.parse(data);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
+        );
     }
 }

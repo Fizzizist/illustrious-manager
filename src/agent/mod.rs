@@ -582,6 +582,15 @@ impl Agent {
                                 iterations -= 1;
                                 continue 'outer;
                             }
+
+                            if e.downcast_ref::<crate::backend::error::BackendError>()
+                                .is_some_and(|be| be.is_refusal())
+                            {
+                                let _ =
+                                    event_tx.unbounded_send(AgentEvent::Error(format!("{e:#}")));
+                                break 'outer;
+                            }
+
                             record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
                                 .await;
                             break 'outer;
@@ -6037,5 +6046,132 @@ mod tests {
                 "Retrying must come before retry TokenReceived; got retrying at {ri}, token at {ti}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn refusal_emits_error_without_history_injection() {
+        let backend =
+            SequencedBackend::new(vec![vec![Err(anyhow::Error::from(BackendError::Refusal))]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("refused"))),
+            "should emit Error with informative message; got {events:?}"
+        );
+
+        let history = agent.history();
+        assert!(
+            !history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "history must NOT contain [ERROR] user message for refusal; got {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_with_partial_text_persists_text() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("partial".to_string())),
+            Err(anyhow::Error::from(BackendError::Refusal)),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "partial")),
+            "should emit TokenReceived for partial text; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("refused"))),
+            "should emit Error with informative message; got {events:?}"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "partial"))),
+            "partial text must be persisted in history; got {history:?}"
+        );
+        assert!(
+            !history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "history must NOT contain [ERROR] user message for refusal; got {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_terminates_loop_no_extra_iterations() {
+        let backend = SequencedBackend::new(vec![
+            vec![Err(anyhow::Error::from(BackendError::Refusal))],
+            text_response("should not be reached"),
+        ]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("refused"))),
+            "should emit Error with informative message; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "should not be reached")),
+            "should not consume second response vector; got {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "should not emit ResponseComplete; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should not emit Retrying for refusal; got {events:?}"
+        );
+
+        let history = agent.history();
+        assert!(
+            !history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "history must NOT contain [ERROR] user message for refusal; got {history:?}"
+        );
+        assert!(
+            !history.iter().any(|m| m.role == Role::Assistant
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "should not be reached"))),
+            "history must NOT contain text from second response vector; got {history:?}"
+        );
     }
 }

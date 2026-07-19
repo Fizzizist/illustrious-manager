@@ -14,6 +14,7 @@ pub enum BackendError {
         input_tokens: u32,
         output_tokens: u32,
     },
+    Refusal,
 }
 
 impl BackendError {
@@ -23,11 +24,16 @@ impl BackendError {
             BackendError::Transport { .. } => true,
             BackendError::Other(_) => false,
             BackendError::MaxTokensExceeded { .. } => false,
+            BackendError::Refusal => false,
         }
     }
 
     pub fn is_max_tokens(&self) -> bool {
         matches!(self, BackendError::MaxTokensExceeded { .. })
+    }
+
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, BackendError::Refusal)
     }
 
     /// Build a `Transport` error from `target` (a human description of the
@@ -59,6 +65,10 @@ impl fmt::Display for BackendError {
             } => write!(
                 f,
                 "Response truncated: max_tokens limit reached (input_tokens={input_tokens}, output_tokens={output_tokens}). Increase max_tokens in your config."
+            ),
+            BackendError::Refusal => write!(
+                f,
+                "The model refused to generate a response due to content policy. The conversation context may be unsafe to continue with."
             ),
         }
     }
@@ -328,5 +338,69 @@ mod tests {
             .is_max_tokens()
         );
         assert!(!BackendError::Other("something".to_string()).is_max_tokens());
+    }
+
+    #[test]
+    fn refusal_is_not_retryable() {
+        let err = BackendError::Refusal;
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn is_refusal_returns_true_for_refusal() {
+        let err = BackendError::Refusal;
+        assert!(err.is_refusal());
+    }
+
+    #[test]
+    fn is_refusal_returns_false_for_other_variants() {
+        assert!(
+            !BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }
+            .is_refusal()
+        );
+        assert!(
+            !BackendError::MaxTokensExceeded {
+                input_tokens: 100,
+                output_tokens: 200,
+            }
+            .is_refusal()
+        );
+        assert!(
+            !BackendError::Transport {
+                message: "connection refused".to_string(),
+            }
+            .is_refusal()
+        );
+        assert!(!BackendError::Other("something".to_string()).is_refusal());
+    }
+
+    #[test]
+    fn refusal_display_is_informative() {
+        let err = BackendError::Refusal;
+        let text = err.to_string();
+        assert!(
+            text.contains("refused"),
+            "display should contain 'refused'; got: {text}"
+        );
+        assert!(
+            text.contains("content policy"),
+            "display should contain 'content policy'; got: {text}"
+        );
+    }
+
+    #[test]
+    fn refusal_downcasts_from_anyhow() {
+        let original = BackendError::Refusal;
+        let err: anyhow::Error = original.into();
+        let recovered = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(recovered, BackendError::Refusal),
+            "should recover the Refusal variant"
+        );
     }
 }

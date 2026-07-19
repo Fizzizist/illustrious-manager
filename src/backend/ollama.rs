@@ -92,6 +92,10 @@ impl OllamaParser {
                 .into());
             }
 
+            if done_reason == "content_filter" || done_reason == "refusal" {
+                return Err(BackendError::Refusal.into());
+            }
+
             if self.max_tokens > 0 && output_tokens >= self.max_tokens {
                 return Err(BackendError::MaxTokensExceeded {
                     input_tokens,
@@ -428,6 +432,39 @@ mod tests {
                 }
             ),
             "should be MaxTokensExceeded; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_content_filter_done_reason_returns_refusal_error() {
+        let mut parser = OllamaParser::new(0);
+        let chunk = r#"{"done":true,"prompt_eval_count":10,"eval_count":20,"done_reason":"content_filter"}"#;
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn parser_refusal_done_reason_returns_refusal_error() {
+        let mut parser = OllamaParser::new(0);
+        let chunk =
+            r#"{"done":true,"prompt_eval_count":10,"eval_count":20,"done_reason":"refusal"}"#;
+        let result = parser.parse_chunk(chunk);
+        assert!(result.is_err());
+        let err = result.expect_err("should be error");
+        let backend_err = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(backend_err, BackendError::Refusal),
+            "should be Refusal; got: {backend_err:?}"
         );
     }
 
@@ -911,7 +948,7 @@ mod tests {
 
     #[test]
     fn parser_stealth_max_tokens_emits_error_with_alternative_done_reason() {
-        for reason in ["error", "content_filter", "unload"] {
+        for reason in ["error", "unload"] {
             let mut parser = OllamaParser::new(4096);
             let chunk = format!(
                 r#"{{"done":true,"prompt_eval_count":10,"eval_count":4096,"done_reason":"{reason}"}}"#
