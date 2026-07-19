@@ -9,9 +9,18 @@ use super::error::BackendError;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthStyle {
+    #[default]
+    Bearer,
+    XApiKey,
+}
+
+#[derive(Debug)]
 pub struct AnthropicCompatConfig {
     pub endpoint: String,
     pub auth_token: Option<String>,
+    pub auth_style: AuthStyle,
     pub anthropic_version: String,
     pub include_model_in_body: bool,
     pub anthropic_beta: Option<String>,
@@ -193,6 +202,7 @@ impl AnthropicCompatSseParser {
 /// Anthropic-protocol compatible backend. Handles HTTP request sending and
 /// SSE stream parsing for any endpoint that speaks the Anthropic Messages API
 /// protocol (Vertex AI, direct Anthropic API, etc.).
+#[derive(Debug)]
 pub struct AnthropicCompatBackend {
     client: Client,
     config: AnthropicCompatConfig,
@@ -300,7 +310,14 @@ impl LlmBackend for AnthropicCompatBackend {
             .header("Content-Type", "application/json");
 
         if let Some(ref token) = self.config.auth_token {
-            request = request.bearer_auth(token);
+            match self.config.auth_style {
+                AuthStyle::Bearer => {
+                    request = request.bearer_auth(token);
+                }
+                AuthStyle::XApiKey => {
+                    request = request.header("x-api-key", token);
+                }
+            }
         }
 
         if let Some(ref beta) = self.config.anthropic_beta {
@@ -375,6 +392,7 @@ mod tests {
             AnthropicCompatConfig {
                 endpoint: "https://test.example.com".to_string(),
                 auth_token: None,
+                auth_style: AuthStyle::Bearer,
                 anthropic_version: "vertex-2023-10-16".to_string(),
                 include_model_in_body: false,
                 anthropic_beta: None,
@@ -389,6 +407,7 @@ mod tests {
             AnthropicCompatConfig {
                 endpoint: "https://test.example.com".to_string(),
                 auth_token: None,
+                auth_style: AuthStyle::Bearer,
                 anthropic_version: version.to_string(),
                 include_model_in_body: false,
                 anthropic_beta: None,
@@ -1343,5 +1362,15 @@ mod tests {
             matches!(backend_err, BackendError::Refusal),
             "should be Refusal; got: {backend_err:?}"
         );
+    }
+
+    #[test]
+    fn auth_style_bearer_is_default() {
+        assert_eq!(AuthStyle::default(), AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn auth_style_variants_eq() {
+        assert_ne!(AuthStyle::Bearer, AuthStyle::XApiKey);
     }
 }

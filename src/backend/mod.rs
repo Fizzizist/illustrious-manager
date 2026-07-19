@@ -11,6 +11,7 @@ pub mod error;
 pub mod ndjson;
 pub mod ollama;
 pub mod openai_compat;
+pub mod opencode_go;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
@@ -228,6 +229,21 @@ impl BackendFactory {
                     model: resolved.model,
                 })
             }
+            "opencode_go" => {
+                let oc_go = self.config.opencode_go.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses opencode_go backend but no [opencode_go] section is configured."
+                    )
+                })?;
+                let backend = opencode_go::OpenCodeGoBackend::new(oc_go, resolved.model.clone())?;
+                Ok(BackendSelection {
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
+                    model: resolved.model,
+                })
+            }
             other => anyhow::bail!("Unknown backend '{other}' for role '{role}'"),
         }
     }
@@ -339,6 +355,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -389,6 +406,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,

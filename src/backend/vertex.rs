@@ -162,6 +162,7 @@ impl LlmBackend for VertexBackend {
         let compat_config = AnthropicCompatConfig {
             endpoint,
             auth_token: Some(token_str),
+            auth_style: super::anthropic_compat::AuthStyle::Bearer,
             anthropic_version: "vertex-2023-10-16".to_string(),
             include_model_in_body: false,
             anthropic_beta,
