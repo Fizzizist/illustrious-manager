@@ -119,7 +119,7 @@ impl Session {
             None => generate_uuidv7(),
         };
 
-        let db_path = session_dir.join(format!("{}.db", &sess_id));
+        let db_path = session_dir.join(format!("{}.db", sess_id));
         let db = Builder::new_local(db_path.to_string_lossy().as_ref())
             .build()
             .await

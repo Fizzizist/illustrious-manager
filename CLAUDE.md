@@ -24,7 +24,8 @@ These are _strict_ policies that must be followed by all engineers and developer
 ### Testing
 
 - Frontend REPL ratatui testing should be done with insta snapshots.
-- Don't write tests for the sake of tests. Be intentional about only testing _behavior_.
+- It is not necessary to unit test every line of code. More important is testing _behavior_. Do not clutter up the test suite with a bunch of test theater.
+- Any bug fix should include regression at least one regression test.
 
 ## Project Overview
 
