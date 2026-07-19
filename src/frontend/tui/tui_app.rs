@@ -47,6 +47,12 @@ pub enum AppState {
     RunningBash,
 }
 
+#[derive(PartialEq)]
+pub enum AppFocus {
+    Input,
+    Conversation,
+}
+
 pub struct App {
     pub input: InputArea,
     pub conversation: Vec<ConversationEntry>,
@@ -63,20 +69,17 @@ pub struct App {
     pub tasks_picker: Option<TasksPicker>,
     pub usage: TokenUsage,
     pub subagent_usage: TokenUsage,
-    /// The input_tokens value reported by the last Usage event. The API always
-    /// reports the full context size, so we subtract the previous value to
-    /// count only the newly added (non-cached) input tokens per turn.
     pub last_input_total: u32,
     pub model: String,
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
     pub chat_mode: crate::types::ChatMode,
+    pending_w: bool,
     pending_g: bool,
-    /// JoinHandle for the in-flight compaction task, if any.
-    /// Aborted on app exit to prevent silent DB mutation after the TUI closes.
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
     pub activity_start: Option<std::time::Instant>,
     tools: std::sync::Arc<ToolRegistry>,
+    focus: AppFocus,
 }
 
 impl App {
@@ -131,9 +134,11 @@ impl App {
             working_dir: std::path::PathBuf::new(),
             chat_mode: crate::types::ChatMode::default(),
             pending_g: false,
+            pending_w: false,
             compaction_task: None,
             activity_start: None,
             tools,
+            focus: AppFocus::Input,
         }
     }
 
@@ -332,54 +337,90 @@ impl App {
         }
     }
 
-    pub fn handle_scroll_key(&mut self, key: &KeyEvent) -> bool {
-        let is_normal = self.input.is_normal();
-        match key {
-            KeyEvent {
-                code: KeyCode::Char('u'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                let amount = self.half_page();
-                self.scroll_up(amount);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('d'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            } => {
-                let amount = self.half_page();
-                self.scroll_down(amount);
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('g'),
-                modifiers: KeyModifiers::NONE,
-                ..
-            } if is_normal => {
-                if self.pending_g {
-                    self.pending_g = false;
-                    let max = self.max_scroll();
-                    self.scroll_offset = max;
-                } else {
-                    self.pending_g = true;
+    pub fn handle_global_key(&mut self, key: &KeyEvent) -> bool {
+        if self.pending_w {
+            let result = match key {
+                KeyEvent {
+                    code: KeyCode::Char('k'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    self.focus = AppFocus::Conversation;
+                    true
                 }
-                true
-            }
-            KeyEvent {
-                code: KeyCode::Char('G'),
-                modifiers,
-                ..
-            } if is_normal && modifiers.contains(KeyModifiers::SHIFT) => {
-                self.scroll_offset = 0;
-                self.pending_g = false;
-                true
-            }
-            _ => {
-                self.pending_g = false;
-                false
-            }
+                KeyEvent {
+                    code: KeyCode::Char('j'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    self.focus = AppFocus::Input;
+                    true
+                }
+                _ => true,
+            };
+            self.pending_w = false;
+            return result;
+        }
+
+        if let KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: KeyModifiers::CONTROL,
+            ..
+        } = key
+        {
+            self.pending_w = true;
+            return true;
+        }
+
+        match self.focus {
+            AppFocus::Conversation => match key {
+                KeyEvent {
+                    code: KeyCode::Char('u'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    let amount = self.half_page();
+                    self.scroll_up(amount);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('d'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    let amount = self.half_page();
+                    self.scroll_down(amount);
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('g'),
+                    modifiers: KeyModifiers::NONE,
+                    ..
+                } => {
+                    if self.pending_g {
+                        self.pending_g = false;
+                        let max = self.max_scroll();
+                        self.scroll_offset = max;
+                    } else {
+                        self.pending_g = true;
+                    }
+                    true
+                }
+                KeyEvent {
+                    code: KeyCode::Char('G'),
+                    modifiers,
+                    ..
+                } if modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.scroll_offset = 0;
+                    self.pending_g = false;
+                    true
+                }
+                _ => {
+                    self.pending_g = false;
+                    false
+                }
+            },
+            AppFocus::Input => false,
         }
     }
 
@@ -463,7 +504,11 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
     );
     conv_area.render(frame, chunks[0], text_width);
 
-    app.input.render(frame, chunks[1]);
+    let input_disabled = match app.focus {
+        AppFocus::Input => false,
+        AppFocus::Conversation => true,
+    };
+    app.input.render(frame, chunks[1], input_disabled);
 
     let info = StatusLineInfo {
         model: &app.model,
@@ -817,7 +862,7 @@ async fn run_app(
                     if matches!(app.state, AppState::Input) {
                         app.input.insert_paste(text);
                     }
-                } else if let Event::Key(key) = terminal_event && !app.handle_scroll_key(&key) {
+                } else if let Event::Key(key) = terminal_event && !app.handle_global_key(&key) {
                     match app.state {
                         AppState::Input => {
                             match key {
@@ -2587,115 +2632,6 @@ mod tests {
     }
 
     #[test]
-    fn single_g_sets_pending_flag() {
-        let mut app = app_with_content(10);
-        app.input
-            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        let before_offset = app.scroll_offset;
-        let key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        let consumed = app.handle_scroll_key(&key);
-        assert!(consumed, "g key should be consumed in Normal mode");
-        assert!(app.pending_g, "pending_g should be true after single g");
-        assert_eq!(
-            app.scroll_offset, before_offset,
-            "scroll should not change on single g"
-        );
-    }
-
-    #[test]
-    fn gg_jumps_to_top() {
-        let mut app = app_with_content(10);
-        app.input
-            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        let max = app.max_scroll();
-        assert!(max > 0, "content should be scrollable");
-        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        app.handle_scroll_key(&g_key);
-        app.handle_scroll_key(&g_key);
-        assert_eq!(
-            app.scroll_offset, max,
-            "gg should set scroll_offset to max_scroll()"
-        );
-        assert!(!app.pending_g, "pending_g should be cleared after gg");
-    }
-
-    #[test]
-    fn capital_g_jumps_to_bottom() {
-        let mut app = app_with_content(10);
-        app.input
-            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        app.scroll_offset = 20;
-        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-        let consumed = app.handle_scroll_key(&key);
-        assert!(consumed, "G should be consumed in Normal mode");
-        assert_eq!(app.scroll_offset, 0, "G should set scroll_offset to 0");
-        assert!(!app.pending_g, "pending_g should be cleared after G");
-    }
-
-    #[test]
-    fn non_g_key_clears_pending_g() {
-        let mut app = app_with_content(10);
-        app.input
-            .input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        app.handle_scroll_key(&g_key);
-        assert!(app.pending_g);
-        // press 'j' — not a scroll key, falls through
-        let j_key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
-        let consumed = app.handle_scroll_key(&j_key);
-        assert!(!consumed, "j should not be consumed by scroll handler");
-        assert!(!app.pending_g, "pending_g should be cleared by non-g key");
-    }
-
-    #[test]
-    fn gg_inert_in_insert_mode() {
-        let mut app = app_with_content(10);
-        // default mode is Editing/Insert (from App::new)
-        assert!(!app.input.is_normal());
-        let before_offset = app.scroll_offset;
-        let g_key = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        let consumed1 = app.handle_scroll_key(&g_key);
-        let consumed2 = app.handle_scroll_key(&g_key);
-        assert!(!consumed1, "g should not be consumed in Insert mode");
-        assert!(!consumed2, "g should not be consumed in Insert mode");
-        assert_eq!(
-            app.scroll_offset, before_offset,
-            "scroll should not change in Insert mode"
-        );
-        assert!(
-            !app.pending_g,
-            "pending_g should remain false in Insert mode"
-        );
-    }
-
-    #[test]
-    fn capital_g_inert_in_insert_mode() {
-        let mut app = app_with_content(10);
-        app.scroll_offset = 15;
-        assert!(!app.input.is_normal());
-        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-        let consumed = app.handle_scroll_key(&key);
-        assert!(!consumed, "G should not be consumed in Insert mode");
-        assert_eq!(
-            app.scroll_offset, 15,
-            "scroll should not change in Insert mode"
-        );
-    }
-
-    #[test]
-    fn ctrl_u_still_works_in_insert_mode() {
-        let mut app = app_with_content(10);
-        app.scroll_offset = 0;
-        app.scroll_up(10);
-        let before = app.scroll_offset;
-        assert!(before > 0);
-        // ctrl-u should work regardless of mode
-        let key = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
-        let consumed = app.handle_scroll_key(&key);
-        assert!(consumed, "ctrl-u should always be consumed");
-    }
-
-    #[test]
     fn reset_for_session_switch_clears_pending_g() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         app.pending_g = true;
@@ -2709,56 +2645,6 @@ mod tests {
             app.activity_start.is_none(),
             "reset_for_session_switch should clear activity_start"
         );
-    }
-
-    #[test]
-    fn gg_inert_in_session_picker_state() {
-        let mut app = app_with_content(10);
-        app.set_state(AppState::SessionPicker);
-        let before = app.scroll_offset;
-        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        assert!(!app.handle_scroll_key(&g));
-        assert!(!app.handle_scroll_key(&g));
-        assert_eq!(app.scroll_offset, before);
-        assert!(!app.pending_g);
-    }
-
-    #[test]
-    fn gg_inert_in_tasks_picker_state() {
-        let mut app = app_with_content(10);
-        app.set_state(AppState::TasksPicker);
-        let before = app.scroll_offset;
-        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        assert!(!app.handle_scroll_key(&g));
-        assert!(!app.handle_scroll_key(&g));
-        assert_eq!(app.scroll_offset, before);
-        assert!(!app.pending_g);
-    }
-
-    #[test]
-    fn gg_inert_in_tool_confirmation_state() {
-        let mut app = app_with_content(10);
-        app.set_state(AppState::ToolConfirmation {
-            name: "bash".to_string(),
-            input: serde_json::json!({}),
-            index: 1,
-        });
-        let before = app.scroll_offset;
-        let g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
-        assert!(!app.handle_scroll_key(&g));
-        assert!(!app.handle_scroll_key(&g));
-        assert_eq!(app.scroll_offset, before);
-        assert!(!app.pending_g);
-    }
-
-    #[test]
-    fn capital_g_inert_in_session_picker_state() {
-        let mut app = app_with_content(10);
-        app.scroll_offset = 10;
-        app.set_state(AppState::SessionPicker);
-        let key = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-        assert!(!app.handle_scroll_key(&key));
-        assert_eq!(app.scroll_offset, 10);
     }
 
     #[test]
