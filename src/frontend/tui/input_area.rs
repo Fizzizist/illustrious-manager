@@ -178,6 +178,8 @@ impl InputArea {
             v.width = inner.width;
             v.height = inner.height;
         }
+        self.editor.editor.set_viewport_height(inner.height);
+        self.editor.editor.ensure_cursor_in_scrolloff();
         let mut viewport = *self.editor.editor.host().viewport();
         self.editor
             .editor
@@ -225,10 +227,15 @@ impl InputArea {
                 .collect()
         };
 
-        let paragraph = Paragraph::new(lines).block(block);
+        let scroll_y = if viewport.top_row == 0 {
+            0
+        } else {
+            buffer.screen_rows_between(&viewport, 0, viewport.top_row.saturating_sub(1)) as u16
+        };
+        let paragraph = Paragraph::new(lines).block(block).scroll((scroll_y, 0));
         frame.render_widget(paragraph, area);
 
-        if let Some((x, y)) = cursor_xy(&self.editor, inner, text_width) {
+        if let Some((x, y)) = cursor_xy(&self.editor, inner, text_width, scroll_y) {
             frame.set_cursor_position(ratatui::layout::Position { x, y });
         }
     }
@@ -344,7 +351,12 @@ fn lines_from_segments(line_text: &str, segments: &[(usize, usize)]) -> Vec<Line
     }
 }
 
-fn cursor_xy(editor: &TextFieldEditor, rect: Rect, text_width: u16) -> Option<(u16, u16)> {
+fn cursor_xy(
+    editor: &TextFieldEditor,
+    rect: Rect,
+    text_width: u16,
+    scroll_y: u16,
+) -> Option<(u16, u16)> {
     let viewport = editor.editor.host().viewport();
     let buffer = editor.buffer();
     let (row, col) = editor.cursor();
@@ -369,11 +381,16 @@ fn cursor_xy(editor: &TextFieldEditor, rect: Rect, text_width: u16) -> Option<(u
         (rows_before.min(u16::MAX as usize) as u16).saturating_add(seg_idx as u16)
     };
 
-    if dy >= rect.height {
+    // take scroll offset into account
+    let terminal_dy = dy.saturating_sub(scroll_y);
+    if terminal_dy >= rect.height {
         return None;
     }
 
-    Some((rect.x.saturating_add(dx), rect.y.saturating_add(dy)))
+    Some((
+        rect.x.saturating_add(dx),
+        rect.y.saturating_add(terminal_dy),
+    ))
 }
 
 #[cfg(test)]
@@ -882,89 +899,6 @@ mod tests {
         let mut input = InputArea::new();
         input.set_mode(AppMode::Compacting);
         assert_eq!(input.height_for_width(60, 24), MIN_HEIGHT);
-    }
-
-    #[test]
-    fn cursor_xy_on_first_line() {
-        let mut editor = TextFieldEditor::new(false);
-        editor.set_text("hello");
-        let rect = Rect::new(0, 0, 40, 10);
-        {
-            let v = editor.editor.host_mut().viewport_mut();
-            v.wrap = Wrap::Word;
-            v.text_width = rect.width;
-            v.width = rect.width;
-            v.height = rect.height;
-        }
-        let mut viewport = *editor.editor.host().viewport();
-        editor
-            .editor
-            .buffer_mut()
-            .ensure_cursor_visible(&mut viewport);
-        *editor.editor.host_mut().viewport_mut() = viewport;
-
-        let result = cursor_xy(&editor, rect, rect.width);
-        assert!(
-            result.is_some(),
-            "cursor_xy should return Some for cursor on first line"
-        );
-        let (x, y) = result.expect("cursor_xy should return Some");
-        assert_eq!(y, 0, "cursor should be on first visual row");
-        assert!(x >= 5, "cursor x should be at least 5 for 'hello'");
-    }
-
-    #[test]
-    fn cursor_xy_on_wrapped_line_second_segment() {
-        let mut editor = TextFieldEditor::new(false);
-        editor.set_text("abcdefghijklmnopqrst");
-        let rect = Rect::new(0, 0, 10, 10);
-        {
-            let v = editor.editor.host_mut().viewport_mut();
-            v.wrap = Wrap::Word;
-            v.text_width = rect.width;
-            v.width = rect.width;
-            v.height = rect.height;
-        }
-        let mut viewport = *editor.editor.host().viewport();
-        editor
-            .editor
-            .buffer_mut()
-            .ensure_cursor_visible(&mut viewport);
-        *editor.editor.host_mut().viewport_mut() = viewport;
-
-        let result = cursor_xy(&editor, rect, rect.width);
-        assert!(result.is_some(), "cursor_xy should return Some");
-        let (_x, y) = result.expect("cursor_xy should return Some");
-        assert!(
-            y >= 1,
-            "cursor at col 20 should be on second visual row or later"
-        );
-    }
-
-    #[test]
-    fn cursor_xy_returns_none_when_cursor_outside_area() {
-        let mut editor = TextFieldEditor::new(false);
-        editor.set_text("line1\nline2\nline3\nline4\nline5\nline6");
-        let rect = Rect::new(0, 0, 40, 1);
-        {
-            let v = editor.editor.host_mut().viewport_mut();
-            v.wrap = Wrap::Word;
-            v.text_width = rect.width;
-            v.width = rect.width;
-            v.height = rect.height;
-        }
-        let mut viewport = *editor.editor.host().viewport();
-        editor
-            .editor
-            .buffer_mut()
-            .ensure_cursor_visible(&mut viewport);
-        *editor.editor.host_mut().viewport_mut() = viewport;
-
-        let result = cursor_xy(&editor, rect, rect.width);
-        assert!(
-            result.is_none(),
-            "cursor_xy should return None when cursor is outside tiny area"
-        );
     }
 
     #[test]

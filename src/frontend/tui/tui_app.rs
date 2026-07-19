@@ -338,11 +338,10 @@ impl App {
     }
 
     pub fn handle_global_key(&mut self, key: &KeyEvent) -> bool {
-        let is_normal = self.input.is_normal();
         if self.pending_w {
             let result = match key {
                 KeyEvent {
-                    code: KeyCode::Char('j'),
+                    code: KeyCode::Char('k'),
                     modifiers: KeyModifiers::NONE,
                     ..
                 } => {
@@ -350,7 +349,7 @@ impl App {
                     true
                 }
                 KeyEvent {
-                    code: KeyCode::Char('k'),
+                    code: KeyCode::Char('j'),
                     modifiers: KeyModifiers::NONE,
                     ..
                 } => {
@@ -397,7 +396,7 @@ impl App {
                     code: KeyCode::Char('g'),
                     modifiers: KeyModifiers::NONE,
                     ..
-                } if is_normal => {
+                } => {
                     if self.pending_g {
                         self.pending_g = false;
                         let max = self.max_scroll();
@@ -411,7 +410,7 @@ impl App {
                     code: KeyCode::Char('G'),
                     modifiers,
                     ..
-                } if is_normal && modifiers.contains(KeyModifiers::SHIFT) => {
+                } if modifiers.contains(KeyModifiers::SHIFT) => {
                     self.scroll_offset = 0;
                     self.pending_g = false;
                     true
