@@ -6,6 +6,7 @@ use crate::config::{AppConfig, RetryConfig};
 use crate::logging::log_warn;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod anthropic_compat;
 pub mod error;
 pub mod ndjson;
 pub mod ollama;
