@@ -386,8 +386,10 @@ fn default_openai_compat_model() -> String {
     String::new()
 }
 
+pub const OPENCODE_GO_DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
 fn default_opencode_go_base_url() -> String {
-    "https://opencode.ai/zen/go/v1".to_string()
+    OPENCODE_GO_DEFAULT_BASE_URL.to_string()
 }
 
 fn default_opencode_go_model() -> String {

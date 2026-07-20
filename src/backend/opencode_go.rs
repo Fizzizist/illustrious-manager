@@ -5,10 +5,9 @@ use reqwest::Client;
 use super::LlmBackend;
 use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig, AuthStyle};
 use super::openai_compat::{OpenAiCompatBackend, OpenAiCompatConfig, ReasoningStyle};
-use crate::config::{OpenCodeGoConfig, Protocol};
+use crate::config::{OPENCODE_GO_DEFAULT_BASE_URL, OpenCodeGoConfig, Protocol};
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
-const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
 
@@ -38,7 +37,7 @@ impl OpenCodeGoBackend {
         if base_url.ends_with("/chat/completions") {
             anyhow::bail!(
                 "base_url must not include '/chat/completions' — provide the base URL only \
-                 (e.g. '{DEFAULT_BASE_URL}') and the backend will append the path automatically."
+                 (e.g. '{OPENCODE_GO_DEFAULT_BASE_URL}') and the backend will append the path automatically."
             );
         }
 
@@ -100,7 +99,7 @@ mod tests {
     fn test_config() -> OpenCodeGoConfig {
         OpenCodeGoConfig {
             api_key: "test-key".to_string(),
-            base_url: DEFAULT_BASE_URL.to_string(),
+            base_url: OPENCODE_GO_DEFAULT_BASE_URL.to_string(),
             model: "grok-code".to_string(),
             openai_models: vec!["grok-code".to_string(), "glm-code".to_string()],
             anthropic_models: vec!["minimax-m1".to_string()],
