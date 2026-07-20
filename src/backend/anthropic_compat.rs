@@ -268,11 +268,14 @@ impl AnthropicCompatBackend {
         });
 
         let mut body = serde_json::json!({
-            "anthropic_version": self.config.anthropic_version,
             "max_tokens": max_tokens,
             "stream": true,
             "messages": messages_json,
         });
+
+        if !self.config.include_model_in_body {
+            body["anthropic_version"] = serde_json::json!(self.config.anthropic_version);
+        }
 
         if self.config.include_model_in_body {
             body["model"] = serde_json::json!(config.model);
@@ -318,6 +321,10 @@ impl LlmBackend for AnthropicCompatBackend {
                     request = request.header("x-api-key", token);
                 }
             }
+        }
+
+        if self.config.include_model_in_body {
+            request = request.header("anthropic-version", &self.config.anthropic_version);
         }
 
         if let Some(ref beta) = self.config.anthropic_beta {
@@ -449,6 +456,37 @@ mod tests {
         assert!(
             body.get("model").is_none() || body["model"].is_null(),
             "model must not be in the request body; Vertex AI embeds it in the URL"
+        );
+    }
+
+    #[test]
+    fn build_request_body_direct_api_omits_anthropic_version_and_includes_model() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com/v1/messages".to_string(),
+                auth_token: Some("test-key".to_string()),
+                auth_style: AuthStyle::XApiKey,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let config = RequestConfig {
+            model: "qwen3-coder-plus".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        };
+        let body = backend
+            .build_request_body(&[], &config)
+            .expect("should build successfully");
+        assert_eq!(body["model"], "qwen3-coder-plus");
+        assert!(
+            body.get("anthropic_version").is_none() || body["anthropic_version"].is_null(),
+            "anthropic_version must not be in the body for direct Anthropic API; it is sent as an HTTP header"
         );
     }
 
