@@ -204,7 +204,7 @@ model = "glm-5.1"
 # Base URL (defaults to the OpenCode Go endpoint)
 # base_url = "https://opencode.ai/zen/go/v1"
 # Default model (used when synthesizing the "default" role)
-# model = "grok-code-fast"
+# model = "kimi-k3"
 # Models that use the OpenAI Chat Completions protocol
 # Constraints: No model may appear in both lists; every model must be in exactly one list.
 # openai_models = ["grok-code-fast", "grok-code", "glm-4.6-code", "kimi-k2-code", "deepseek-v3.2-code", "mimo-7b-code"]
@@ -393,7 +393,7 @@ fn default_opencode_go_base_url() -> String {
 }
 
 fn default_opencode_go_model() -> String {
-    "grok-code-fast".to_string()
+    "kimi-k3".to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -561,7 +561,7 @@ impl AppConfig {
                 .opencode_go
                 .as_ref()
                 .map(|o| o.model.clone())
-                .unwrap_or_else(|| "grok-code-fast".to_string()),
+                .unwrap_or_else(|| "kimi-k3".to_string()),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
