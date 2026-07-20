@@ -1,5 +1,6 @@
 ---
 source: tests/tui_test.rs
+assertion_line: 114
 expression: terminal.backend()
 ---
 "                                                                                "
@@ -16,7 +17,7 @@ expression: terminal.backend()
 "                       █ █ █ █  █ █  █ █  █    █ █   █                          "
 "                       █ █ █  ███ █  █  ███ ███   ██ █                          "
 "                                                                                "
-"                      vVERSION — by Peter Vlasveld                                "
+"                      vVERSION — by Peter Vlasveld                               "
 "                                                                                "
 "                                                                                "
 "                                                                                "
