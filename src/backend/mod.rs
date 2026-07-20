@@ -202,17 +202,7 @@ impl BackendFactory {
                         "Role '{role}' uses openai_compat backend but no [openai_compat] section is configured."
                     )
                 })?;
-                use crate::config::ReasoningStyleConfig;
-                let reasoning = match oc_toml.reasoning {
-                    ReasoningStyleConfig::ZaiEnableThinking => {
-                        openai_compat::ReasoningStyle::ZaiEnableThinking
-                    }
-                    ReasoningStyleConfig::QwenChatTemplate => {
-                        openai_compat::ReasoningStyle::QwenChatTemplate
-                    }
-                    ReasoningStyleConfig::Default => openai_compat::ReasoningStyle::Default,
-                    ReasoningStyleConfig::None => openai_compat::ReasoningStyle::None,
-                };
+                let reasoning = openai_compat::ReasoningStyle::from(&oc_toml.reasoning);
                 let oc_config = openai_compat::OpenAiCompatConfig {
                     base_url: oc_toml.base_url.clone(),
                     api_key: oc_toml.api_key.clone(),

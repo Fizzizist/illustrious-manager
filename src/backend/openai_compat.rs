@@ -22,6 +22,17 @@ pub enum ReasoningStyle {
     None,
 }
 
+impl From<&crate::config::ReasoningStyleConfig> for ReasoningStyle {
+    fn from(config: &crate::config::ReasoningStyleConfig) -> Self {
+        match config {
+            crate::config::ReasoningStyleConfig::ZaiEnableThinking => Self::ZaiEnableThinking,
+            crate::config::ReasoningStyleConfig::QwenChatTemplate => Self::QwenChatTemplate,
+            crate::config::ReasoningStyleConfig::Default => Self::Default,
+            crate::config::ReasoningStyleConfig::None => Self::None,
+        }
+    }
+}
+
 /// Configuration for constructing an [`OpenAiCompatBackend`].
 pub struct OpenAiCompatConfig {
     /// Base URL **without** a trailing slash and **without** `/chat/completions`.

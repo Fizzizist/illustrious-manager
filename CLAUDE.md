@@ -100,7 +100,7 @@ model = "gpt-oss:120b"
 # api_key = ""                        # omit or leave empty for unauthenticated endpoints
 # model = "Qwen/Qwen3-32B-FP8"
 # max_tokens = 16384                  # optional override
-# reasoning = "qwen_chat_template"
+# reasoning = "qwen_chat_template"    # none | zai_enable_thinking | qwen_chat_template | default
 
 # [opencode_go]
 # OpenCode Go — dual-protocol backend. Triages model name against config-driven
@@ -111,7 +111,7 @@ model = "gpt-oss:120b"
 # openai_models = ["grok-code-fast", "grok-code", "glm-4.6-code", "kimi-k2-code", "deepseek-v3.2-code", "mimo-7b-code"]
 # anthropic_models = ["minimax-m1", "qwen3-coder-plus"]
 # max_tokens = 16384                  # optional override
-# reasoning = "default"               # none | zai_enable_thinking | qwen_chat_template | default    # none | zai_enable_thinking | qwen_chat_template | default
+# reasoning = "default"               # none | zai_enable_thinking | qwen_chat_template | default
 
 # [retry]
 # max_retries = 3                     # retry attempts for transient HTTP (5xx, 429) and transport errors

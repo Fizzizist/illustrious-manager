@@ -5,7 +5,7 @@ use reqwest::Client;
 use super::LlmBackend;
 use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig, AuthStyle};
 use super::openai_compat::{OpenAiCompatBackend, OpenAiCompatConfig, ReasoningStyle};
-use crate::config::{OpenCodeGoConfig, ReasoningStyleConfig};
+use crate::config::{OpenCodeGoConfig, Protocol};
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 const DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
@@ -42,55 +42,36 @@ impl OpenCodeGoBackend {
             );
         }
 
-        let reasoning = match config.reasoning {
-            ReasoningStyleConfig::ZaiEnableThinking => ReasoningStyle::ZaiEnableThinking,
-            ReasoningStyleConfig::QwenChatTemplate => ReasoningStyle::QwenChatTemplate,
-            ReasoningStyleConfig::Default => ReasoningStyle::Default,
-            ReasoningStyleConfig::None => ReasoningStyle::None,
-        };
+        let reasoning = ReasoningStyle::from(&config.reasoning);
+        let protocol = config.protocol_for(&resolved_model)?;
 
-        let in_openai = config.openai_models.iter().any(|m| m == &resolved_model);
-        let in_anthropic = config.anthropic_models.iter().any(|m| m == &resolved_model);
-
-        if in_openai && in_anthropic {
-            anyhow::bail!(
-                "Model '{resolved_model}' appears in both openai_models and anthropic_models \
-                 — each model must belong to exactly one protocol list."
-            );
-        }
-
-        let backend = if in_anthropic {
-            let endpoint = format!("{base_url}/messages");
-            let compat_config = AnthropicCompatConfig {
-                endpoint,
-                auth_token: Some(config.api_key.clone()),
-                auth_style: AuthStyle::XApiKey,
-                anthropic_version: ANTHROPIC_VERSION.to_string(),
-                include_model_in_body: true,
-                anthropic_beta: Some(ANTHROPIC_BETA.to_string()),
-                max_tokens_override: config.max_tokens,
-            };
-            ProtocolBackend::Anthropic(AnthropicCompatBackend::new(Client::new(), compat_config))
-        } else {
-            if !in_openai {
-                anyhow::bail!(
-                    "Model '{resolved_model}' is not in either openai_models or \
-                     anthropic_models. Add it to the appropriate list in your [opencode_go] \
-                     config section.\n\
-                     OpenAI-protocol models: {:?}\n\
-                     Anthropic-protocol models: {:?}",
-                    config.openai_models,
-                    config.anthropic_models,
-                );
+        let backend = match protocol {
+            Protocol::Anthropic => {
+                let endpoint = format!("{base_url}/messages");
+                let compat_config = AnthropicCompatConfig {
+                    endpoint,
+                    auth_token: Some(config.api_key.clone()),
+                    auth_style: AuthStyle::XApiKey,
+                    anthropic_version: ANTHROPIC_VERSION.to_string(),
+                    include_model_in_body: true,
+                    anthropic_beta: Some(ANTHROPIC_BETA.to_string()),
+                    max_tokens_override: config.max_tokens,
+                };
+                ProtocolBackend::Anthropic(AnthropicCompatBackend::new(
+                    Client::new(),
+                    compat_config,
+                ))
             }
-            let oc_config = OpenAiCompatConfig {
-                base_url,
-                api_key: Some(config.api_key.clone()),
-                model: String::new(),
-                max_tokens: config.max_tokens,
-                reasoning,
-            };
-            ProtocolBackend::OpenAi(OpenAiCompatBackend::new(oc_config)?)
+            Protocol::OpenAi => {
+                let oc_config = OpenAiCompatConfig {
+                    base_url,
+                    api_key: Some(config.api_key.clone()),
+                    model: String::new(),
+                    max_tokens: config.max_tokens,
+                    reasoning,
+                };
+                ProtocolBackend::OpenAi(OpenAiCompatBackend::new(oc_config)?)
+            }
         };
 
         Ok(Self { backend })
@@ -114,6 +95,7 @@ impl LlmBackend for OpenCodeGoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ReasoningStyleConfig;
 
     fn test_config() -> OpenCodeGoConfig {
         OpenCodeGoConfig {

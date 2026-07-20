@@ -206,6 +206,7 @@ model = "glm-5.1"
 # Default model (used when synthesizing the "default" role)
 # model = "grok-code-fast"
 # Models that use the OpenAI Chat Completions protocol
+# Constraints: No model may appear in both lists; every model must be in exactly one list.
 # openai_models = ["grok-code-fast", "grok-code", "glm-4.6-code", "kimi-k2-code", "deepseek-v3.2-code", "mimo-7b-code"]
 # Models that use the Anthropic Messages protocol
 # anthropic_models = ["minimax-m1", "qwen3-coder-plus"]
@@ -409,6 +410,48 @@ pub struct OpenCodeGoConfig {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub reasoning: ReasoningStyleConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    OpenAi,
+    Anthropic,
+}
+
+impl OpenCodeGoConfig {
+    pub fn protocol_for(&self, model: &str) -> anyhow::Result<Protocol> {
+        let in_openai = self.openai_models.iter().any(|m| m == model);
+        let in_anthropic = self.anthropic_models.iter().any(|m| m == model);
+        match (in_openai, in_anthropic) {
+            (true, false) => Ok(Protocol::OpenAi),
+            (false, true) => Ok(Protocol::Anthropic),
+            (true, true) => anyhow::bail!(
+                "Model '{model}' appears in both openai_models and anthropic_models \
+                 — each model must belong to exactly one protocol list."
+            ),
+            (false, false) => anyhow::bail!(
+                "Model '{model}' is not in either openai_models or anthropic_models. \
+                 Add it to the appropriate list in your [opencode_go] config section.\n\
+                 OpenAI-protocol models: {:?}\n\
+                 Anthropic-protocol models: {:?}",
+                self.openai_models,
+                self.anthropic_models,
+            ),
+        }
+    }
+
+    pub fn find_duplicate_model(&self) -> Option<String> {
+        let openai_set: std::collections::HashSet<&str> =
+            self.openai_models.iter().map(String::as_str).collect();
+        self.anthropic_models
+            .iter()
+            .find(|m| openai_set.contains(m.as_str()))
+            .cloned()
+    }
+
+    pub fn has_duplicate_models(&self) -> bool {
+        self.find_duplicate_model().is_some()
+    }
 }
 
 fn default_backend() -> String {
@@ -749,14 +792,11 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 bail!("base_url must not include '/chat/completions' — provide the base URL only.");
             }
             Some(oc) => {
-                let openai_set: std::collections::HashSet<&str> =
-                    oc.openai_models.iter().map(String::as_str).collect();
-                let anthropic_set: std::collections::HashSet<&str> =
-                    oc.anthropic_models.iter().map(String::as_str).collect();
-                if let Some(m) = openai_set.intersection(&anthropic_set).next() {
+                if let Some(duplicate) = oc.find_duplicate_model() {
                     bail!(
-                        "Model '{m}' appears in both openai_models and anthropic_models — \
-                         each model must belong to exactly one protocol list."
+                        "Model '{}' appears in both openai_models and anthropic_models — \
+                         each model must belong to exactly one protocol list.",
+                        duplicate
                     );
                 }
             }
@@ -833,21 +873,8 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     );
                 }
                 Some(oc) => {
-                    let in_openai = oc.openai_models.iter().any(|m| m == &role.model);
-                    let in_anthropic = oc.anthropic_models.iter().any(|m| m == &role.model);
-                    if in_openai && in_anthropic {
-                        bail!(
-                            "Model role '{name}' model '{}' appears in both openai_models and \
-                             anthropic_models — each model must belong to exactly one protocol list.",
-                            role.model
-                        );
-                    }
-                    if !in_openai && !in_anthropic {
-                        bail!(
-                            "Model role '{name}' model '{}' is not in either openai_models or \
-                             anthropic_models. Add it to the appropriate list in [opencode_go].",
-                            role.model
-                        );
+                    if let Err(e) = oc.protocol_for(&role.model) {
+                        bail!("Model role '{name}' {e}");
                     }
                 }
             },
