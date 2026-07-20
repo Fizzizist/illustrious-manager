@@ -22,6 +22,17 @@ pub enum ReasoningStyle {
     None,
 }
 
+impl From<&crate::config::ReasoningStyleConfig> for ReasoningStyle {
+    fn from(config: &crate::config::ReasoningStyleConfig) -> Self {
+        match config {
+            crate::config::ReasoningStyleConfig::ZaiEnableThinking => Self::ZaiEnableThinking,
+            crate::config::ReasoningStyleConfig::QwenChatTemplate => Self::QwenChatTemplate,
+            crate::config::ReasoningStyleConfig::Default => Self::Default,
+            crate::config::ReasoningStyleConfig::None => Self::None,
+        }
+    }
+}
+
 /// Configuration for constructing an [`OpenAiCompatBackend`].
 pub struct OpenAiCompatConfig {
     /// Base URL **without** a trailing slash and **without** `/chat/completions`.
@@ -43,10 +54,16 @@ pub struct OpenAiCompatConfig {
 ///
 /// Buffers extra events that arise when a single SSE chunk contains multiple
 /// tool calls so they can be drained one at a time.
+///
+/// Tracks the active tool-call index across chunks so that a `ToolUseDone` is
+/// emitted when the index transitions — not only at the terminal `finish_reason
+/// == "tool_calls"` chunk.  Without this, multiple parallel tool calls would
+/// collapse into one because the agent loop holds a single `current_tool`.
 #[derive(Default)]
 pub struct OpenAiCompatSseParser {
     event_buffer: Vec<StreamEvent>,
     max_tokens: u32,
+    current_index: Option<u64>,
 }
 
 impl OpenAiCompatSseParser {
@@ -54,6 +71,7 @@ impl OpenAiCompatSseParser {
         Self {
             event_buffer: Vec::new(),
             max_tokens,
+            current_index: None,
         }
     }
 
@@ -84,9 +102,12 @@ impl OpenAiCompatSseParser {
         let input_tokens = json["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32;
 
-        // Terminal chunk for tool calls: ToolUseDone first, then usage.
+        // Terminal chunk for tool calls: flush the last in-flight tool, then usage.
         if finish_reason == Some("tool_calls") {
-            self.event_buffer.push(StreamEvent::ToolUseDone);
+            if self.current_index.is_some() {
+                self.event_buffer.push(StreamEvent::ToolUseDone);
+                self.current_index = None;
+            }
             if input_tokens > 0 || output_tokens > 0 {
                 self.event_buffer.push(StreamEvent::Usage {
                     input_tokens,
@@ -146,11 +167,17 @@ impl OpenAiCompatSseParser {
                     && let Some(function) = tool_call["function"].as_object()
                 {
                     if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
+                        if let Some(prev) = self.current_index
+                            && prev != index
+                        {
+                            self.event_buffer.push(StreamEvent::ToolUseDone);
+                        }
                         let id = format!("tool_{}", index);
                         self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),
                         });
+                        self.current_index = Some(index);
                     }
 
                     if let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
@@ -707,8 +734,10 @@ mod tests {
     }
 
     #[test]
-    fn parser_finish_reason_tool_calls_emits_tool_use_done() {
+    fn parser_finish_reason_tool_calls_emits_tool_use_done_after_tool_start() {
         let mut p = OpenAiCompatSseParser::new(0);
+        p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#)
+            .unwrap();
         let event = p
             .parse(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#)
             .unwrap();
@@ -732,7 +761,10 @@ mod tests {
         assert!(matches!(e1, Some(StreamEvent::ToolUseStart { name, .. }) if name == "bash"));
 
         let e2 = p.parse("").unwrap();
-        assert!(matches!(e2, Some(StreamEvent::ToolUseStart { name, .. }) if name == "read_file"));
+        assert!(matches!(e2, Some(StreamEvent::ToolUseDone)));
+
+        let e3 = p.parse("").unwrap();
+        assert!(matches!(e3, Some(StreamEvent::ToolUseStart { name, .. }) if name == "read_file"));
 
         assert!(p.parse("").unwrap().is_none());
     }
@@ -1012,9 +1044,9 @@ mod tests {
 
     #[test]
     fn parser_tool_calls_finish_with_usage_emits_tool_use_done_then_usage() {
-        // Finding 9b: tool_calls finish_reason + non-zero usage must drain
-        // ToolUseDone before Usage.
         let mut p = OpenAiCompatSseParser::new(0);
+        p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#)
+            .unwrap();
         let data = r#"{"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":50,"completion_tokens":20}}"#;
         p.fill_buffer(data).expect("parse ok");
 
@@ -1236,6 +1268,77 @@ mod tests {
             "should emit Usage event; got: {e1:?}"
         );
         assert!(p.event_buffer.is_empty(), "should have no more events");
+    }
+
+    #[test]
+    fn parser_parallel_tool_calls_streamed_across_chunks_all_preserved() {
+        // Regression: two parallel tool calls streamed incrementally across
+        // multiple SSE chunks must each produce a complete
+        // ToolUseStart → ToolUseDelta(s) → ToolUseDone sequence.
+        // Previously the parser only emitted one ToolUseDone at the terminal
+        // finish_reason chunk, so the agent loop's single current_tool
+        // variable was overwritten and all but the last tool call was lost.
+        let mut p = OpenAiCompatSseParser::new(0);
+
+        // Chunk 1: first tool starts, name + partial arguments
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":"{\"comm"}}]}}]}"#).unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseStart { name, .. }) if name == "bash"));
+        let e = p.parse("").unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDelta(d)) if d == "{\"comm"));
+
+        // Chunk 2: first tool continues arguments
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"and\":\"ls\"}"}}]}}]}"#).unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDelta(d)) if d == "and\":\"ls\"}"));
+
+        // Chunk 3: second tool starts — must flush ToolUseDone for tool 0 first
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"name":"read_file","arguments":"{\"path\":"}}]}}]}"#).unwrap();
+        assert!(
+            matches!(e, Some(StreamEvent::ToolUseDone)),
+            "tool 0 must be done before tool 1 starts"
+        );
+        let e = p.parse("").unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseStart { name, .. }) if name == "read_file"));
+        let e = p.parse("").unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDelta(d)) if d == "{\"path\":"));
+
+        // Chunk 4: second tool continues arguments
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"foo.rs\"}"}}]}}]}"#).unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDelta(d)) if d == "\"foo.rs\"}"));
+
+        // Chunk 5: terminal — must flush ToolUseDone for tool 1
+        let e = p
+            .parse(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#)
+            .unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDone)));
+        assert!(p.parse("").unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_parallel_tool_calls_in_separate_chunks_same_index_no_spurious_done() {
+        // When the same index appears across consecutive chunks (argument
+        // fragments), no spurious ToolUseDone should be emitted.
+        let mut p = OpenAiCompatSseParser::new(0);
+
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#).unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseStart { name, .. }) if name == "bash"));
+
+        let e = p.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"command\":\"ls\"}"}}]}}]}"#).unwrap();
+        assert!(matches!(e, Some(StreamEvent::ToolUseDelta(_))));
+        assert!(
+            p.parse("").unwrap().is_none(),
+            "no spurious ToolUseDone for same index"
+        );
+    }
+
+    #[test]
+    fn parser_finish_reason_tool_calls_without_prior_tool_start_emits_no_done() {
+        // A bare finish_reason == "tool_calls" with no preceding ToolUseStart
+        // should not emit a spurious ToolUseDone.
+        let mut p = OpenAiCompatSseParser::new(0);
+        let e = p
+            .parse(r#"{"choices":[{"finish_reason":"tool_calls"}]}"#)
+            .unwrap();
+        assert!(e.is_none(), "no ToolUseDone without an active tool");
     }
 
     #[test]

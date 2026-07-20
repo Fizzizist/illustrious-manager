@@ -80,6 +80,7 @@ fn test_parse_sse_tool_use_delta() {
 #[test]
 fn test_parse_sse_tool_use_done() {
     let mut parser = illustrious_manager::backend::zai::ZaiSseParser::new(0);
+    parser.parse(r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#).unwrap();
     let data = r#"{"choices":[{"finish_reason":"tool_calls"}]}"#;
     let event = parser.parse(data).unwrap();
     match event {
@@ -91,6 +92,7 @@ fn test_parse_sse_tool_use_done() {
 #[test]
 fn test_parse_sse_multiple_tool_calls_in_single_chunk() {
     // Test the critical fix: multiple tool calls in a single chunk are buffered
+    // with a ToolUseDone between them when the index transitions.
     let mut parser = illustrious_manager::backend::zai::ZaiSseParser::new(0);
     let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}},{"index":1,"function":{"name":"read_file","arguments":""}}]}}]}"#;
 
@@ -103,18 +105,25 @@ fn test_parse_sse_multiple_tool_calls_in_single_chunk() {
         other => panic!("Expected ToolUseStart for bash, got {:?}", other),
     }
 
-    // Second call returns second tool call (from buffer)
+    // ToolUseDone for tool 0 flushed by index transition
     let event2 = parser.parse("").unwrap();
     match event2 {
+        Some(illustrious_manager::types::StreamEvent::ToolUseDone) => {}
+        other => panic!("Expected ToolUseDone for bash, got {:?}", other),
+    }
+
+    // Third call returns second tool call (from buffer)
+    let event3 = parser.parse("").unwrap();
+    match event3 {
         Some(illustrious_manager::types::StreamEvent::ToolUseStart { name, .. }) => {
             assert_eq!(name, "read_file");
         }
         other => panic!("Expected ToolUseStart for read_file, got {:?}", other),
     }
 
-    // Third call returns None (buffer empty)
-    let event3 = parser.parse("").unwrap();
-    assert!(event3.is_none(), "Expected None when buffer is empty");
+    // Fourth call returns None (buffer empty)
+    let event4 = parser.parse("").unwrap();
+    assert!(event4.is_none(), "Expected None when buffer is empty");
 }
 
 #[test]

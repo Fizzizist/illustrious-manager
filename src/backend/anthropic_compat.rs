@@ -9,9 +9,18 @@ use super::error::BackendError;
 use super::sse::create_sse_event_stream;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthStyle {
+    #[default]
+    Bearer,
+    XApiKey,
+}
+
+#[derive(Debug)]
 pub struct AnthropicCompatConfig {
     pub endpoint: String,
     pub auth_token: Option<String>,
+    pub auth_style: AuthStyle,
     pub anthropic_version: String,
     pub include_model_in_body: bool,
     pub anthropic_beta: Option<String>,
@@ -193,6 +202,7 @@ impl AnthropicCompatSseParser {
 /// Anthropic-protocol compatible backend. Handles HTTP request sending and
 /// SSE stream parsing for any endpoint that speaks the Anthropic Messages API
 /// protocol (Vertex AI, direct Anthropic API, etc.).
+#[derive(Debug)]
 pub struct AnthropicCompatBackend {
     client: Client,
     config: AnthropicCompatConfig,
@@ -258,11 +268,14 @@ impl AnthropicCompatBackend {
         });
 
         let mut body = serde_json::json!({
-            "anthropic_version": self.config.anthropic_version,
             "max_tokens": max_tokens,
             "stream": true,
             "messages": messages_json,
         });
+
+        if !self.config.include_model_in_body {
+            body["anthropic_version"] = serde_json::json!(self.config.anthropic_version);
+        }
 
         if self.config.include_model_in_body {
             body["model"] = serde_json::json!(config.model);
@@ -283,6 +296,49 @@ impl AnthropicCompatBackend {
 
         Ok(body)
     }
+
+    fn build_request_headers(&self) -> Result<reqwest::header::HeaderMap> {
+        let mut headers = reqwest::header::HeaderMap::new();
+
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+
+        if let Some(ref token) = self.config.auth_token {
+            match self.config.auth_style {
+                AuthStyle::Bearer => {
+                    let auth_value = format!("Bearer {}", token).parse().unwrap();
+                    headers.insert(reqwest::header::AUTHORIZATION, auth_value);
+                }
+                AuthStyle::XApiKey => {
+                    let key_value = token.parse().unwrap();
+                    headers.insert(
+                        reqwest::header::HeaderName::from_static("x-api-key"),
+                        key_value,
+                    );
+                }
+            }
+        }
+
+        if self.config.include_model_in_body {
+            let version_value = self.config.anthropic_version.parse().unwrap();
+            headers.insert(
+                reqwest::header::HeaderName::from_static("anthropic-version"),
+                version_value,
+            );
+        }
+
+        if let Some(ref beta) = self.config.anthropic_beta {
+            let beta_value = beta.parse().unwrap();
+            headers.insert(
+                reqwest::header::HeaderName::from_static("anthropic-beta"),
+                beta_value,
+            );
+        }
+
+        Ok(headers)
+    }
 }
 
 #[async_trait]
@@ -293,21 +349,12 @@ impl LlmBackend for AnthropicCompatBackend {
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config)?;
+        let headers = self.build_request_headers()?;
 
-        let mut request = self
+        let response = self
             .client
             .post(&self.config.endpoint)
-            .header("Content-Type", "application/json");
-
-        if let Some(ref token) = self.config.auth_token {
-            request = request.bearer_auth(token);
-        }
-
-        if let Some(ref beta) = self.config.anthropic_beta {
-            request = request.header("anthropic-beta", beta);
-        }
-
-        let response = request
+            .headers(headers)
             .json(&body)
             .send()
             .await
@@ -375,6 +422,7 @@ mod tests {
             AnthropicCompatConfig {
                 endpoint: "https://test.example.com".to_string(),
                 auth_token: None,
+                auth_style: AuthStyle::Bearer,
                 anthropic_version: "vertex-2023-10-16".to_string(),
                 include_model_in_body: false,
                 anthropic_beta: None,
@@ -389,6 +437,7 @@ mod tests {
             AnthropicCompatConfig {
                 endpoint: "https://test.example.com".to_string(),
                 auth_token: None,
+                auth_style: AuthStyle::Bearer,
                 anthropic_version: version.to_string(),
                 include_model_in_body: false,
                 anthropic_beta: None,
@@ -430,6 +479,37 @@ mod tests {
         assert!(
             body.get("model").is_none() || body["model"].is_null(),
             "model must not be in the request body; Vertex AI embeds it in the URL"
+        );
+    }
+
+    #[test]
+    fn build_request_body_direct_api_omits_anthropic_version_and_includes_model() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com/v1/messages".to_string(),
+                auth_token: Some("test-key".to_string()),
+                auth_style: AuthStyle::XApiKey,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let config = RequestConfig {
+            model: "qwen3-coder-plus".to_string(),
+            max_tokens: 8192,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        };
+        let body = backend
+            .build_request_body(&[], &config)
+            .expect("should build successfully");
+        assert_eq!(body["model"], "qwen3-coder-plus");
+        assert!(
+            body.get("anthropic_version").is_none() || body["anthropic_version"].is_null(),
+            "anthropic_version must not be in the body for direct Anthropic API; it is sent as an HTTP header"
         );
     }
 
@@ -1342,6 +1422,65 @@ mod tests {
         assert!(
             matches!(backend_err, BackendError::Refusal),
             "should be Refusal; got: {backend_err:?}"
+        );
+    }
+
+    #[test]
+    fn auth_style_bearer_is_default() {
+        assert_eq!(AuthStyle::default(), AuthStyle::Bearer);
+    }
+
+    #[test]
+    fn build_request_headers_with_bearer_auth() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com".to_string(),
+                auth_token: Some("test-token".to_string()),
+                auth_style: AuthStyle::Bearer,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let headers = backend
+            .build_request_headers()
+            .expect("should build headers");
+        let auth_header = headers
+            .get(reqwest::header::AUTHORIZATION)
+            .expect("should have Authorization header");
+        assert_eq!(auth_header.to_str().unwrap(), "Bearer test-token");
+        assert!(
+            headers.get("x-api-key").is_none(),
+            "should not have x-api-key"
+        );
+    }
+
+    #[test]
+    fn build_request_headers_with_x_api_key_auth() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com".to_string(),
+                auth_token: Some("test-key".to_string()),
+                auth_style: AuthStyle::XApiKey,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let headers = backend
+            .build_request_headers()
+            .expect("should build headers");
+        let key_header = headers
+            .get("x-api-key")
+            .expect("should have x-api-key header");
+        assert_eq!(key_header.to_str().unwrap(), "test-key");
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_none(),
+            "should not have Authorization header"
         );
     }
 }

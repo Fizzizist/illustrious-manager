@@ -11,6 +11,7 @@ pub mod error;
 pub mod ndjson;
 pub mod ollama;
 pub mod openai_compat;
+pub mod opencode_go;
 pub mod sse;
 pub mod vertex;
 pub mod zai;
@@ -201,17 +202,7 @@ impl BackendFactory {
                         "Role '{role}' uses openai_compat backend but no [openai_compat] section is configured."
                     )
                 })?;
-                use crate::config::ReasoningStyleConfig;
-                let reasoning = match oc_toml.reasoning {
-                    ReasoningStyleConfig::ZaiEnableThinking => {
-                        openai_compat::ReasoningStyle::ZaiEnableThinking
-                    }
-                    ReasoningStyleConfig::QwenChatTemplate => {
-                        openai_compat::ReasoningStyle::QwenChatTemplate
-                    }
-                    ReasoningStyleConfig::Default => openai_compat::ReasoningStyle::Default,
-                    ReasoningStyleConfig::None => openai_compat::ReasoningStyle::None,
-                };
+                let reasoning = openai_compat::ReasoningStyle::from(&oc_toml.reasoning);
                 let oc_config = openai_compat::OpenAiCompatConfig {
                     base_url: oc_toml.base_url.clone(),
                     api_key: oc_toml.api_key.clone(),
@@ -220,6 +211,21 @@ impl BackendFactory {
                     reasoning,
                 };
                 let backend = openai_compat::OpenAiCompatBackend::new(oc_config)?;
+                Ok(BackendSelection {
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
+                    model: resolved.model,
+                })
+            }
+            "opencode_go" => {
+                let oc_go = self.config.opencode_go.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses opencode_go backend but no [opencode_go] section is configured."
+                    )
+                })?;
+                let backend = opencode_go::OpenCodeGoBackend::new(oc_go, resolved.model.clone())?;
                 Ok(BackendSelection {
                     backend: Box::new(RetryingBackend::new(
                         Box::new(backend),
@@ -339,6 +345,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -389,6 +396,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,

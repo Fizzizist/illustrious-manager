@@ -156,7 +156,7 @@ const DEFAULT_REGION: &str = "us-east5";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_BACKEND: &str = "vertex";
 
-const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", "ollama", or "openai_compat"
+const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", "ollama", "opencode_go", or "openai_compat"
 backend = "vertex"
 # where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
 # or a local `illustrious-manager-sessions` directory if $HOME is not found.
@@ -195,6 +195,25 @@ model = "glm-5.1"
 # max_tokens = 16384
 # Reasoning style: "none", "zai_enable_thinking", "qwen_chat_template", "default"
 # reasoning = "qwen_chat_template"
+
+# [opencode_go]
+# OpenCode Go — dual-protocol backend. Triages model name against config-driven
+# lists to route to either OpenAI Chat Completions or Anthropic Messages.
+# Required: your OpenCode Go API key
+# api_key = ""
+# Base URL (defaults to the OpenCode Go endpoint)
+# base_url = "https://opencode.ai/zen/go/v1"
+# Default model (used when synthesizing the "default" role)
+# model = "kimi-k3"
+# Models that use the OpenAI Chat Completions protocol
+# Constraints: No model may appear in both lists; every model must be in exactly one list.
+# openai_models = ["grok-code-fast", "grok-code", "glm-4.6-code", "kimi-k2-code", "deepseek-v3.2-code", "mimo-7b-code"]
+# Models that use the Anthropic Messages protocol
+# anthropic_models = ["minimax-m1", "qwen3-coder-plus"]
+# Optional: override max_tokens for this backend
+# max_tokens = 16384
+# Reasoning style for OpenAI-protocol models: "none", "zai_enable_thinking", "qwen_chat_template", "default"
+# reasoning = "default"
 
 # [compaction]
 # Role name used for compaction sub-agents. Defaults to "compaction".
@@ -290,6 +309,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub openai_compat: Option<OpenAiCompatConfigToml>,
     #[serde(default)]
+    pub opencode_go: Option<OpenCodeGoConfig>,
+    #[serde(default)]
     pub tools: ToolsConfig,
     /// Named model roles. When empty, a `default` role is synthesized from
     /// the top-level `backend` + `[vertex]`/`[zai]` blocks for back-compat.
@@ -363,6 +384,70 @@ pub struct OpenAiCompatConfigToml {
 
 fn default_openai_compat_model() -> String {
     String::new()
+}
+
+pub const OPENCODE_GO_DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
+fn default_opencode_go_base_url() -> String {
+    OPENCODE_GO_DEFAULT_BASE_URL.to_string()
+}
+
+fn default_opencode_go_model() -> String {
+    "kimi-k3".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct OpenCodeGoConfig {
+    #[serde(skip_serializing)]
+    pub api_key: String,
+    #[serde(default = "default_opencode_go_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_opencode_go_model")]
+    pub model: String,
+    #[serde(default)]
+    pub openai_models: Vec<String>,
+    #[serde(default)]
+    pub anthropic_models: Vec<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub reasoning: ReasoningStyleConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    OpenAi,
+    Anthropic,
+}
+
+impl OpenCodeGoConfig {
+    pub fn protocol_for(&self, model: &str) -> anyhow::Result<Protocol> {
+        let in_openai = self.openai_models.iter().any(|m| m == model);
+        let in_anthropic = self.anthropic_models.iter().any(|m| m == model);
+        if in_openai {
+            Ok(Protocol::OpenAi)
+        } else if in_anthropic {
+            Ok(Protocol::Anthropic)
+        } else {
+            anyhow::bail!(
+                "Model '{model}' is not in either openai_models or anthropic_models. \
+                 Add it to the appropriate list in your [opencode_go] config section.\n\
+                 OpenAI-protocol models: {:?}\n\
+                 Anthropic-protocol models: {:?}",
+                self.openai_models,
+                self.anthropic_models,
+            )
+        }
+    }
+
+    pub fn find_duplicate_model(&self) -> Option<String> {
+        let openai_set: std::collections::HashSet<&str> =
+            self.openai_models.iter().map(String::as_str).collect();
+        self.anthropic_models
+            .iter()
+            .find(|m| openai_set.contains(m.as_str()))
+            .cloned()
+    }
 }
 
 fn default_backend() -> String {
@@ -466,6 +551,11 @@ impl AppConfig {
                 .as_ref()
                 .map(|o| o.model.clone())
                 .unwrap_or_default(),
+            "opencode_go" => self
+                .opencode_go
+                .as_ref()
+                .map(|o| o.model.clone())
+                .unwrap_or_else(default_opencode_go_model),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
@@ -514,6 +604,13 @@ pub fn apply_overrides(
         "openai_compat" => {
             if let Some(m) = model
                 && let Some(ref mut oc) = config.openai_compat
+            {
+                oc.model = m.to_string();
+            }
+        }
+        "opencode_go" => {
+            if let Some(m) = model
+                && let Some(ref mut oc) = config.opencode_go
             {
                 oc.model = m.to_string();
             }
@@ -671,9 +768,38 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
             }
             _ => {}
         },
+        "opencode_go" => match &config.opencode_go {
+            None => {
+                bail!(
+                    "opencode_go backend configuration is missing. Add a [opencode_go] section to your config file."
+                );
+            }
+            Some(oc) if oc.api_key.is_empty() => {
+                bail!(
+                    "API key is required for opencode_go backend. Set it in your [opencode_go] config section."
+                );
+            }
+            Some(oc)
+                if oc
+                    .base_url
+                    .trim_end_matches('/')
+                    .ends_with("/chat/completions") =>
+            {
+                bail!("base_url must not include '/chat/completions' — provide the base URL only.");
+            }
+            Some(oc) => {
+                if let Some(duplicate) = oc.find_duplicate_model() {
+                    bail!(
+                        "Model '{}' appears in both openai_models and anthropic_models — \
+                         each model must belong to exactly one protocol list.",
+                        duplicate
+                    );
+                }
+            }
+        },
         _ => {
             bail!(
-                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama, openai_compat",
+                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama, openai_compat, opencode_go",
                 config.backend
             );
         }
@@ -731,9 +857,32 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 }
                 _ => {}
             },
+            "opencode_go" => match &config.opencode_go {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'opencode_go' but no [opencode_go] section is present."
+                    );
+                }
+                Some(oc) if oc.api_key.is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'opencode_go' but [opencode_go].api_key is not configured."
+                    );
+                }
+                Some(oc) => {
+                    if let Some(dup) = oc.find_duplicate_model() {
+                        bail!(
+                            "Model '{dup}' appears in both openai_models and anthropic_models — \
+                             each model must belong to exactly one protocol list."
+                        );
+                    }
+                    if let Err(e) = oc.protocol_for(&role.model) {
+                        bail!("Model role '{name}' {e}");
+                    }
+                }
+            },
             other => {
                 bail!(
-                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama, openai_compat"
+                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama, openai_compat, opencode_go"
                 );
             }
         }
@@ -869,6 +1018,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -893,6 +1043,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -916,6 +1067,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -943,6 +1095,7 @@ mod tests {
             }),
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -970,6 +1123,7 @@ mod tests {
             }),
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -993,6 +1147,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1017,6 +1172,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1049,6 +1205,7 @@ mod tests {
             }),
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1074,6 +1231,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Always,
                 sandbox_root: "/tmp/sandbox".to_string(),
@@ -1105,6 +1263,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
@@ -1131,6 +1290,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1188,6 +1348,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1238,6 +1399,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1293,6 +1455,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1317,6 +1480,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1349,6 +1513,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1388,6 +1553,7 @@ mod tests {
             }),
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1416,6 +1582,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1444,6 +1611,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1472,6 +1640,7 @@ mod tests {
                 base_url: "http://localhost:11434/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1499,6 +1668,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1526,6 +1696,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1561,6 +1732,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1596,6 +1768,7 @@ mod tests {
             }),
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1629,6 +1802,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1666,6 +1840,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1706,6 +1881,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1766,6 +1942,7 @@ mod tests {
                 base_url: "https://ollama.com/api/chat".to_string(),
             }),
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1947,6 +2124,7 @@ mod tests {
             zai: None,
             ollama: None,
             openai_compat: None,
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1980,6 +2158,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2013,6 +2192,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2046,6 +2226,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2124,6 +2305,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2169,6 +2351,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2203,6 +2386,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
             }),
+            opencode_go: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2269,6 +2453,316 @@ mod tests {
         assert_eq!(
             config.max_token_retries, 3,
             "should default when not specified"
+        );
+    }
+
+    // ── opencode_go config tests ──────────────────────────────────────────
+
+    #[test]
+    fn validate_opencode_go_backend_with_missing_config_errors() {
+        let config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("[opencode_go]"),
+            "error should mention [opencode_go]"
+        );
+    }
+
+    #[test]
+    fn validate_opencode_go_backend_with_empty_api_key_errors() {
+        let config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code".to_string(),
+                openai_models: vec!["grok-code".to_string()],
+                anthropic_models: vec![],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("API key"));
+    }
+
+    #[test]
+    fn validate_opencode_go_backend_with_valid_config_succeeds() {
+        let config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code".to_string(),
+                openai_models: vec!["grok-code".to_string()],
+                anthropic_models: vec!["minimax-m1".to_string()],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(
+            result.is_ok(),
+            "valid opencode_go config should pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_opencode_go_rejects_duplicate_models_across_lists() {
+        let config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code".to_string(),
+                openai_models: vec!["grok-code".to_string()],
+                anthropic_models: vec!["grok-code".to_string()],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("grok-code") && msg.contains("both"),
+            "error should mention the duplicate model and 'both'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn normalize_back_compat_synthesizes_default_role_from_opencode_go() {
+        let mut config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code-fast".to_string(),
+                openai_models: vec!["grok-code-fast".to_string()],
+                anthropic_models: vec![],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized for opencode_go backend"
+        );
+        assert_eq!(config.models["default"].backend, "opencode_go");
+        assert_eq!(config.models["default"].model, "grok-code-fast");
+    }
+
+    #[test]
+    fn apply_overrides_opencode_go_model() {
+        let mut config = AppConfig {
+            backend: "opencode_go".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code-fast".to_string(),
+                openai_models: vec!["grok-code-fast".to_string(), "grok-code".to_string()],
+                anthropic_models: vec![],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+        apply_overrides(&mut config, None, None, Some("grok-code"));
+        assert_eq!(
+            config
+                .opencode_go
+                .as_ref()
+                .expect("opencode_go present")
+                .model,
+            "grok-code",
+            "model override should be applied to opencode_go config"
+        );
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(
+            resolved.model, "grok-code",
+            "--model flag must propagate into models[\"default\"]"
+        );
+    }
+
+    #[test]
+    fn validate_opencode_go_role_rejects_model_not_in_either_list() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "opencode_go".to_string(),
+                model: "unknown-model".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code".to_string(),
+                openai_models: vec!["grok-code".to_string()],
+                anthropic_models: vec!["minimax-m1".to_string()],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("unknown-model"),
+            "error should mention the unknown model; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_opencode_go_role_rejects_duplicate_model_in_both_lists() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "opencode_go".to_string(),
+                model: "grok-code".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: Some(OpenCodeGoConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                model: "grok-code".to_string(),
+                openai_models: vec!["grok-code".to_string()],
+                anthropic_models: vec!["grok-code".to_string()],
+                max_tokens: None,
+                reasoning: ReasoningStyleConfig::Default,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("grok-code") && msg.contains("both"),
+            "error should mention duplicate model and 'both'; got: {msg}"
         );
     }
 }
