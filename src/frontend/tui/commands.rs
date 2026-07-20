@@ -4,10 +4,12 @@ use crate::config::{AppConfig, generate_config_message};
 use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
 use crate::frontend::tui::{ConversationEntry, ConversationRole, SessionPicker};
-use crate::session::list_sessions;
+use crate::session::{enumerate_sessions, hydrate_sessions};
 use crate::types::AgentEvent;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+pub const SESSION_PAGE_SIZE: usize = 100;
 
 /// Result of dispatching a slash command.
 #[derive(Debug, PartialEq, Eq)]
@@ -109,9 +111,13 @@ impl SlashCommand for SessionsCommand {
     {
         Box::pin(async move {
             ctx.app.input.clear();
-            match list_sessions(&ctx.config.sessions_dir).await {
-                Ok(sessions) => {
-                    ctx.app.session_picker = Some(SessionPicker::new(sessions));
+            match enumerate_sessions(&ctx.config.sessions_dir).await {
+                Ok(refs) => {
+                    let page_len = refs.len().min(SESSION_PAGE_SIZE);
+                    let page = hydrate_sessions(&refs[..page_len]).await;
+                    let has_more = refs.len() > SESSION_PAGE_SIZE;
+                    ctx.app.pending_session_refs = refs.into_iter().skip(page_len).collect();
+                    ctx.app.session_picker = Some(SessionPicker::new(page, has_more));
                     ctx.app.set_state(AppState::SessionPicker);
                 }
                 Err(e) => {
