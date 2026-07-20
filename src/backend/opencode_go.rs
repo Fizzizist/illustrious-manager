@@ -41,6 +41,13 @@ impl OpenCodeGoBackend {
             );
         }
 
+        if let Some(duplicate) = config.find_duplicate_model() {
+            anyhow::bail!(
+                "Model '{}' appears in both openai_models and anthropic_models",
+                duplicate
+            );
+        }
+
         let reasoning = ReasoningStyle::from(&config.reasoning);
         let protocol = config.protocol_for(&resolved_model)?;
 

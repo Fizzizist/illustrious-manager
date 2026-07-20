@@ -424,21 +424,19 @@ impl OpenCodeGoConfig {
     pub fn protocol_for(&self, model: &str) -> anyhow::Result<Protocol> {
         let in_openai = self.openai_models.iter().any(|m| m == model);
         let in_anthropic = self.anthropic_models.iter().any(|m| m == model);
-        match (in_openai, in_anthropic) {
-            (true, false) => Ok(Protocol::OpenAi),
-            (false, true) => Ok(Protocol::Anthropic),
-            (true, true) => anyhow::bail!(
-                "Model '{model}' appears in both openai_models and anthropic_models \
-                 — each model must belong to exactly one protocol list."
-            ),
-            (false, false) => anyhow::bail!(
+        if in_openai {
+            Ok(Protocol::OpenAi)
+        } else if in_anthropic {
+            Ok(Protocol::Anthropic)
+        } else {
+            anyhow::bail!(
                 "Model '{model}' is not in either openai_models or anthropic_models. \
                  Add it to the appropriate list in your [opencode_go] config section.\n\
                  OpenAI-protocol models: {:?}\n\
                  Anthropic-protocol models: {:?}",
                 self.openai_models,
                 self.anthropic_models,
-            ),
+            )
         }
     }
 
@@ -449,10 +447,6 @@ impl OpenCodeGoConfig {
             .iter()
             .find(|m| openai_set.contains(m.as_str()))
             .cloned()
-    }
-
-    pub fn has_duplicate_models(&self) -> bool {
-        self.find_duplicate_model().is_some()
     }
 }
 
@@ -561,7 +555,7 @@ impl AppConfig {
                 .opencode_go
                 .as_ref()
                 .map(|o| o.model.clone())
-                .unwrap_or_else(|| "kimi-k3".to_string()),
+                .unwrap_or_else(default_opencode_go_model),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
@@ -875,6 +869,12 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     );
                 }
                 Some(oc) => {
+                    if let Some(dup) = oc.find_duplicate_model() {
+                        bail!(
+                            "Model '{dup}' appears in both openai_models and anthropic_models — \
+                             each model must belong to exactly one protocol list."
+                        );
+                    }
                     if let Err(e) = oc.protocol_for(&role.model) {
                         bail!("Model role '{name}' {e}");
                     }
