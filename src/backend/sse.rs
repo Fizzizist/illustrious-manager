@@ -8,8 +8,8 @@ use crate::types::{BoxStream, StreamEvent};
 
 pub fn extract_sse_data(event_text: &str) -> Option<&str> {
     for line in event_text.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            return Some(data);
+        if let Some(rest) = line.strip_prefix("data:") {
+            return Some(rest.strip_prefix(' ').unwrap_or(rest));
         }
     }
     None
@@ -99,6 +99,15 @@ mod tests {
     #[test]
     fn extract_sse_data_returns_json_after_data_prefix() {
         let event = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}";
+        assert_eq!(
+            extract_sse_data(event),
+            Some("{\"type\":\"content_block_delta\"}")
+        );
+    }
+
+    #[test]
+    fn extract_sse_data_returns_json_after_data_prefix_without_space() {
+        let event = "event: content_block_delta\ndata:{\"type\":\"content_block_delta\"}";
         assert_eq!(
             extract_sse_data(event),
             Some("{\"type\":\"content_block_delta\"}")
