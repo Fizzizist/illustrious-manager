@@ -7,14 +7,41 @@ use crate::session::SessionSummary;
 
 use super::list_picker::{ListPicker, PickerAction};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionPickerRow {
+    Session(SessionSummary),
+    LoadMore,
+}
+
 pub struct SessionPicker {
-    inner: ListPicker<SessionSummary>,
+    inner: ListPicker<SessionPickerRow>,
 }
 
 impl SessionPicker {
-    pub fn new(sessions: Vec<SessionSummary>) -> Self {
+    pub fn new(sessions: Vec<SessionSummary>, has_more: bool) -> Self {
+        let mut rows: Vec<SessionPickerRow> = sessions
+            .into_iter()
+            .map(SessionPickerRow::Session)
+            .collect();
+        if has_more {
+            rows.push(SessionPickerRow::LoadMore);
+        }
         Self {
-            inner: ListPicker::new(sessions),
+            inner: ListPicker::new(rows),
+        }
+    }
+
+    pub fn extend(&mut self, sessions: Vec<SessionSummary>, has_more: bool) {
+        if matches!(self.inner.items().last(), Some(SessionPickerRow::LoadMore)) {
+            self.inner.pop_last();
+        }
+        let rows: Vec<SessionPickerRow> = sessions
+            .into_iter()
+            .map(SessionPickerRow::Session)
+            .collect();
+        self.inner.extend(rows);
+        if has_more {
+            self.inner.extend(vec![SessionPickerRow::LoadMore]);
         }
     }
 
@@ -27,13 +54,17 @@ impl SessionPicker {
     }
 
     pub fn selected_id(&self) -> Option<&str> {
-        self.inner.selected_item().map(|s| s.id.as_str())
+        match self.inner.selected_item() {
+            Some(SessionPickerRow::Session(s)) => Some(s.id.as_str()),
+            _ => None,
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SessionPickerAction {
         match self.inner.handle_key(key, true) {
             PickerAction::Select(idx) => match self.inner.items().get(idx) {
-                Some(s) => SessionPickerAction::Select(s.id.clone()),
+                Some(SessionPickerRow::Session(s)) => SessionPickerAction::Select(s.id.clone()),
+                Some(SessionPickerRow::LoadMore) => SessionPickerAction::LoadMore,
                 None => SessionPickerAction::None,
             },
             PickerAction::Close => SessionPickerAction::Close,
@@ -46,19 +77,22 @@ impl SessionPicker {
             frame,
             area,
             " Sessions (j/k to navigate, Enter to open, q to close) ",
-            |s| {
-                let preview = if s.first_user_message.is_empty() {
-                    "(no messages)".to_string()
-                } else {
-                    let mut chars = s.first_user_message.chars();
-                    let truncated: String = chars.by_ref().take(60).collect();
-                    if chars.next().is_some() {
-                        format!("{}…", truncated)
+            |row| match row {
+                SessionPickerRow::Session(s) => {
+                    let preview = if s.first_user_message.is_empty() {
+                        "(no messages)".to_string()
                     } else {
-                        truncated
-                    }
-                };
-                ListItem::new(format!("{}  {}", s.id.get(..8).unwrap_or(&s.id), preview))
+                        let mut chars = s.first_user_message.chars();
+                        let truncated: String = chars.by_ref().take(60).collect();
+                        if chars.next().is_some() {
+                            format!("{}…", truncated)
+                        } else {
+                            truncated
+                        }
+                    };
+                    ListItem::new(format!("{}  {}", s.id.get(..8).unwrap_or(&s.id), preview))
+                }
+                SessionPickerRow::LoadMore => ListItem::new("... (load more sessions)"),
             },
             None,
         );
@@ -69,6 +103,7 @@ impl SessionPicker {
 pub enum SessionPickerAction {
     None,
     Select(String),
+    LoadMore,
     Close,
 }
 
@@ -96,7 +131,7 @@ mod tests {
             make_session("01900000-0000-7000-0000-000000000001", "hello"),
             make_session("01900000-0000-7000-0000-000000000002", "world"),
         ];
-        let picker = SessionPicker::new(sessions);
+        let picker = SessionPicker::new(sessions, false);
         assert_eq!(
             picker.selected_id(),
             Some("01900000-0000-7000-0000-000000000001")
@@ -105,7 +140,7 @@ mod tests {
 
     #[test]
     fn new_picker_with_empty_list_has_no_selection() {
-        let picker = SessionPicker::new(vec![]);
+        let picker = SessionPicker::new(vec![], false);
         assert_eq!(picker.selected_id(), None);
     }
 
@@ -116,7 +151,7 @@ mod tests {
             make_session("01900000-0000-7000-0000-000000000002", "b"),
             make_session("01900000-0000-7000-0000-000000000003", "c"),
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         picker.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             picker.selected_id(),
@@ -135,7 +170,7 @@ mod tests {
             make_session("01900000-0000-7000-0000-000000000001", "a"),
             make_session("01900000-0000-7000-0000-000000000002", "b"),
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('j')));
@@ -151,7 +186,7 @@ mod tests {
             make_session("01900000-0000-7000-0000-000000000001", "a"),
             make_session("01900000-0000-7000-0000-000000000002", "b"),
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         picker.handle_key(key(KeyCode::Char('j')));
         picker.handle_key(key(KeyCode::Char('k')));
         assert_eq!(
@@ -166,7 +201,7 @@ mod tests {
             make_session("01900000-0000-7000-0000-000000000001", "a"),
             make_session("01900000-0000-7000-0000-000000000002", "b"),
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         picker.handle_key(key(KeyCode::Char('k')));
         picker.handle_key(key(KeyCode::Char('k')));
         assert_eq!(
@@ -181,7 +216,7 @@ mod tests {
             "01900000-0000-7000-0000-000000000001",
             "hello",
         )];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let action = picker.handle_key(key(KeyCode::Enter));
         assert_eq!(
             action,
@@ -191,7 +226,7 @@ mod tests {
 
     #[test]
     fn enter_on_empty_list_returns_none() {
-        let mut picker = SessionPicker::new(vec![]);
+        let mut picker = SessionPicker::new(vec![], false);
         let action = picker.handle_key(key(KeyCode::Enter));
         assert_eq!(action, SessionPickerAction::None);
     }
@@ -202,7 +237,7 @@ mod tests {
             "01900000-0000-7000-0000-000000000001",
             "hello",
         )];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let action = picker.handle_key(key(KeyCode::Char('q')));
         assert_eq!(action, SessionPickerAction::Close);
     }
@@ -213,7 +248,7 @@ mod tests {
             "01900000-0000-7000-0000-000000000001",
             "hello",
         )];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let action = picker.handle_key(key(KeyCode::Esc));
         assert_eq!(action, SessionPickerAction::Close);
     }
@@ -224,14 +259,77 @@ mod tests {
             "01900000-0000-7000-0000-000000000001",
             "hello",
         )];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let action = picker.handle_key(key(KeyCode::Char('x')));
         assert_eq!(action, SessionPickerAction::None);
     }
 
     #[test]
+    fn load_more_sentinel_appears_when_has_more_true() {
+        let sessions = vec![
+            make_session("01900000-0000-7000-0000-000000000001", "a"),
+            make_session("01900000-0000-7000-0000-000000000002", "b"),
+        ];
+        let picker = SessionPicker::new(sessions, true);
+        assert!(matches!(
+            picker.inner.items().last(),
+            Some(SessionPickerRow::LoadMore)
+        ));
+    }
+
+    #[test]
+    fn enter_on_sentinel_returns_load_more_action() {
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", "a")];
+        let mut picker = SessionPicker::new(sessions, true);
+        picker.move_down();
+        let action = picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(action, SessionPickerAction::LoadMore);
+    }
+
+    #[test]
+    fn extend_replaces_sentinel_and_appends() {
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", "a")];
+        let mut picker = SessionPicker::new(sessions, true);
+        assert!(matches!(
+            picker.inner.items().last(),
+            Some(SessionPickerRow::LoadMore)
+        ));
+
+        let more = vec![
+            make_session("01900000-0000-7000-0000-000000000002", "b"),
+            make_session("01900000-0000-7000-0000-000000000003", "c"),
+        ];
+        picker.extend(more, false);
+
+        assert_eq!(picker.inner.items().len(), 3);
+        assert!(!matches!(
+            picker.inner.items().last(),
+            Some(SessionPickerRow::LoadMore)
+        ));
+        assert!(matches!(
+            picker.inner.items().last(),
+            Some(SessionPickerRow::Session(_))
+        ));
+    }
+
+    #[test]
+    fn extend_preserves_sentinel_when_still_has_more() {
+        let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", "a")];
+        let mut picker = SessionPicker::new(sessions, true);
+
+        let more = vec![make_session("01900000-0000-7000-0000-000000000002", "b")];
+        picker.extend(more, true);
+
+        assert_eq!(picker.inner.items().len(), 3);
+        assert!(matches!(
+            picker.inner.items().last(),
+            Some(SessionPickerRow::LoadMore)
+        ));
+    }
+
+    #[test]
     fn render_session_picker_empty() {
-        let mut picker = SessionPicker::new(vec![]);
+        let mut picker = SessionPicker::new(vec![], false);
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -262,7 +360,7 @@ mod tests {
                 modified: SystemTime::UNIX_EPOCH,
             },
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -288,7 +386,7 @@ mod tests {
                 modified: SystemTime::UNIX_EPOCH,
             },
         ];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         picker.move_down();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
@@ -302,10 +400,36 @@ mod tests {
     }
 
     #[test]
+    fn render_session_picker_load_more_sentinel() {
+        let sessions = vec![
+            SessionSummary {
+                id: "01900000-0000-7000-0000-000000000001".to_string(),
+                first_user_message: "Hello world".to_string(),
+                modified: SystemTime::UNIX_EPOCH,
+            },
+            SessionSummary {
+                id: "01900000-0000-7000-0000-000000000002".to_string(),
+                first_user_message: "Testing pagination".to_string(),
+                modified: SystemTime::UNIX_EPOCH,
+            },
+        ];
+        let mut picker = SessionPicker::new(sessions, true);
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                picker.render(frame, area);
+            })
+            .expect("draw");
+        insta::assert_snapshot!("session_picker_load_more_sentinel", terminal.backend());
+    }
+
+    #[test]
     fn preview_exactly_60_chars_renders_without_ellipsis() {
         let msg = "a".repeat(60);
         let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let backend = ratatui::backend::TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -322,7 +446,7 @@ mod tests {
     fn preview_61_chars_renders_with_ellipsis() {
         let msg = "b".repeat(61);
         let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let backend = ratatui::backend::TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal
@@ -337,10 +461,9 @@ mod tests {
 
     #[test]
     fn preview_multibyte_chars_truncate_on_char_boundary() {
-        // Each '→' is 3 bytes but 1 char; 61 of them → truncated at 60 chars
         let msg = "→".repeat(61);
         let sessions = vec![make_session("01900000-0000-7000-0000-000000000001", &msg)];
-        let mut picker = SessionPicker::new(sessions);
+        let mut picker = SessionPicker::new(sessions, false);
         let backend = ratatui::backend::TestBackend::new(160, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal

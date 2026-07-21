@@ -9,17 +9,24 @@ use turso::{Builder, Connection};
 pub use conversation::ConversationRepo;
 pub use task::{TaskRecord, TaskRepo, TaskStatus};
 
-/// Summary of a session, used for the session picker.
+/// Filesystem reference to a session DB, without any DB content loaded.
 #[derive(Debug, Clone)]
+pub struct SessionRef {
+    pub id: String,
+    pub path: PathBuf,
+    pub modified: SystemTime,
+}
+
+/// Summary of a session, used for the session picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
     pub id: String,
     pub first_user_message: String,
     pub modified: SystemTime,
 }
 
-/// List all sessions in the given directory, ordered by most recently modified first.
-pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionSummary>> {
-    let mut summaries = Vec::new();
+pub async fn enumerate_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionRef>> {
+    let mut refs = Vec::new();
 
     let read_dir = match std::fs::read_dir(session_dir) {
         Ok(rd) => rd,
@@ -56,20 +63,47 @@ pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionS
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH);
 
-        let first_user_message = read_first_user_message_from_path(&path)
-            .await
-            .unwrap_or_default();
-
-        summaries.push(SessionSummary {
+        refs.push(SessionRef {
             id: file_stem,
-            first_user_message,
+            path,
             modified,
         });
     }
 
-    summaries.sort_by_key(|b| std::cmp::Reverse(b.modified));
+    refs.sort_by_key(|b| std::cmp::Reverse(b.modified));
 
-    Ok(summaries)
+    Ok(refs)
+}
+
+pub async fn hydrate_sessions(refs: &[SessionRef]) -> Vec<SessionSummary> {
+    let mut summaries = Vec::with_capacity(refs.len());
+    for r in refs {
+        let first_user_message = read_first_user_message_from_path(&r.path)
+            .await
+            .unwrap_or_default();
+        summaries.push(SessionSummary {
+            id: r.id.clone(),
+            first_user_message,
+            modified: r.modified,
+        });
+    }
+    summaries
+}
+
+pub async fn hydrate_next_page(
+    pending: &mut Vec<SessionRef>,
+    page_size: usize,
+) -> (Vec<SessionSummary>, bool) {
+    let page_len = pending.len().min(page_size);
+    let page = hydrate_sessions(&pending[..page_len]).await;
+    let has_more = pending.len() > page_size;
+    pending.drain(..page_len);
+    (page, has_more)
+}
+
+pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionSummary>> {
+    let refs = enumerate_sessions(session_dir).await?;
+    Ok(hydrate_sessions(&refs).await)
 }
 
 async fn read_first_user_message_from_path(db_path: &std::path::Path) -> Result<String> {
@@ -854,6 +888,90 @@ mod tests {
         assert_eq!(
             history[0].created_at, 0.0,
             "migrated rows should default to 0.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn enumerate_sessions_returns_sorted_refs_without_hydration() {
+        let dir = TempDir::new().expect("temp dir");
+
+        let session_a = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create a");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let session_b = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create b");
+
+        let refs = enumerate_sessions(dir.path()).await.expect("enumerate");
+        assert_eq!(refs.len(), 2);
+        // Most recently modified should be first
+        assert_eq!(refs[0].id, session_b.id);
+        assert_eq!(refs[1].id, session_a.id);
+        // Paths should point to the DB files
+        assert!(refs[0].path.ends_with(format!("{}.db", session_b.id)));
+        assert!(refs[1].path.ends_with(format!("{}.db", session_a.id)));
+    }
+
+    #[tokio::test]
+    async fn hydrate_sessions_hydrates_only_given_refs() {
+        let dir = TempDir::new().expect("temp dir");
+
+        let mut sessions = Vec::new();
+        for i in 0..5 {
+            let s = Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("create");
+            s.conversation()
+                .insert_message(&Message::text(Role::User, format!("msg {i}")))
+                .await
+                .expect("insert");
+            sessions.push(s);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let refs = enumerate_sessions(dir.path()).await.expect("enumerate");
+        // Hydrate only first 2 refs
+        let summaries = hydrate_sessions(&refs[..2]).await;
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].id, refs[0].id);
+        assert_eq!(summaries[1].id, refs[1].id);
+        // first_user_message should be hydrated
+        assert_eq!(summaries[0].first_user_message, "msg 4");
+        assert_eq!(summaries[1].first_user_message, "msg 3");
+    }
+
+    #[tokio::test]
+    async fn paginate_enumerate_two_pages_ordered_disjoint_complete() {
+        let page_size = 2;
+        let dir = TempDir::new().expect("temp dir");
+
+        for i in 0..5 {
+            let s = Session::new(None, dir.path().to_path_buf())
+                .await
+                .expect("create");
+            s.conversation()
+                .insert_message(&Message::text(Role::User, format!("msg {i}")))
+                .await
+                .expect("insert");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let refs = enumerate_sessions(dir.path()).await.expect("enumerate");
+        assert_eq!(refs.len(), 5);
+
+        let page1 = hydrate_sessions(&refs[..page_size]).await;
+        let page2 = hydrate_sessions(&refs[page_size..page_size * 2]).await;
+
+        let page1_ids: std::collections::HashSet<&str> =
+            page1.iter().map(|s| s.id.as_str()).collect();
+        let page2_ids: std::collections::HashSet<&str> =
+            page2.iter().map(|s| s.id.as_str()).collect();
+        assert!(page1_ids.is_disjoint(&page2_ids), "pages must be disjoint");
+        assert_eq!(
+            page1.len() + page2.len(),
+            4,
+            "two pages of size 2 should cover 4 of 5 refs"
         );
     }
 }

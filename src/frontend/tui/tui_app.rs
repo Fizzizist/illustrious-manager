@@ -29,6 +29,7 @@ use crate::agent::Agent;
 use crate::backend::BackendFactory;
 use crate::config::AppConfig;
 use crate::logging::Logger;
+use crate::session::SessionRef;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -66,6 +67,7 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
+    pub pending_session_refs: Vec<SessionRef>,
     pub tasks_picker: Option<TasksPicker>,
     pub usage: TokenUsage,
     pub subagent_usage: TokenUsage,
@@ -125,6 +127,7 @@ impl App {
             viewport_height: 0,
             text_width: 0,
             session_picker: None,
+            pending_session_refs: Vec::new(),
             tasks_picker: None,
             usage: TokenUsage::default(),
             subagent_usage: TokenUsage::default(),
@@ -430,6 +433,7 @@ impl App {
         self.last_input_total = 0;
         self.tasks_picker = None;
         self.session_picker = None;
+        self.pending_session_refs.clear();
         self.pending_g = false;
         self.activity_start = None;
     }
@@ -980,6 +984,13 @@ async fn run_app(
                                                     crate::timestamp::format_now_timestamp(),
                                                 ));
                                             }
+                                        }
+                                    }
+                                    SessionPickerAction::LoadMore => {
+                                        let page_size = crate::frontend::tui::commands::SESSION_PAGE_SIZE;
+                                        let (page, has_more) = crate::session::hydrate_next_page(&mut app.pending_session_refs, page_size).await;
+                                        if let Some(ref mut picker) = app.session_picker {
+                                            picker.extend(page, has_more);
                                         }
                                     }
                                     SessionPickerAction::None => {}
@@ -1536,7 +1547,7 @@ mod tests {
             updated_at: 0,
         };
         app.tasks_picker = Some(TasksPicker::new(vec![task]));
-        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![]));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![], false));
 
         app.reset_for_session_switch();
 
@@ -2074,7 +2085,7 @@ mod tests {
     #[test]
     fn sessions_command_transitions_app_to_session_picker_state() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
-        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![]));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(vec![], false));
         app.set_state(AppState::SessionPicker);
         assert_eq!(app.state, AppState::SessionPicker);
         assert!(app.session_picker.is_some());
@@ -2092,7 +2103,7 @@ mod tests {
             first_user_message: "hello".to_string(),
             modified: SystemTime::UNIX_EPOCH,
         }];
-        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(summaries));
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(summaries, false));
         app.set_state(AppState::SessionPicker);
 
         // simulate Close action
@@ -2124,7 +2135,7 @@ mod tests {
             first_user_message: "hello".to_string(),
             modified: SystemTime::UNIX_EPOCH,
         }];
-        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries, false);
         let action = picker.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Esc,
             crossterm::event::KeyModifiers::NONE,
@@ -2212,6 +2223,114 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
+    #[tokio::test]
+    async fn session_picker_load_more_appends_next_page() {
+        use crate::agent::Agent;
+        use crate::backend::LlmBackend;
+        use crate::frontend::tui::SessionPickerAction;
+        use crate::session::{enumerate_sessions, hydrate_sessions};
+        use crate::types::*;
+        use async_trait::async_trait;
+        use std::sync::Arc;
+
+        struct StubBackend;
+
+        #[async_trait]
+        impl LlmBackend for StubBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> anyhow::Result<BoxStream<anyhow::Result<StreamEvent>>> {
+                Ok(Box::pin(futures::stream::empty()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+
+        // Create 3 sessions
+        for i in 0..3 {
+            let s = crate::session::Session::new(None, dir_path.clone())
+                .await
+                .expect("create");
+            s.conversation()
+                .insert_message(&Message::text(Role::User, format!("msg {i}")))
+                .await
+                .expect("insert");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let refs = enumerate_sessions(&dir_path).await.expect("enumerate");
+        assert_eq!(refs.len(), 3);
+
+        // First page: 2 sessions, has_more=true (1 remaining)
+        let page = hydrate_sessions(&refs[..2]).await;
+        let pending: Vec<crate::session::SessionRef> = refs[2..].to_vec();
+
+        let initial_session = Arc::new(tokio::sync::Mutex::new(
+            crate::session::Session::new(None, dir_path.clone())
+                .await
+                .expect("initial session"),
+        ));
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(StubBackend),
+                RequestConfig {
+                    model: "test".to_string(),
+                    max_tokens: 1024,
+                    tools: vec![],
+                    thinking: None,
+                    cancel_token: None,
+                },
+                initial_session,
+            )
+            .await,
+        );
+        let mut app = App::new(agent.tools());
+        app.session_picker = Some(crate::frontend::tui::SessionPicker::new(page, true));
+        app.pending_session_refs = pending;
+        app.set_state(AppState::SessionPicker);
+
+        // Verify LoadMore sentinel exists — navigate to last item and press Enter
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let picker = app.session_picker.as_mut().expect("picker");
+        // Navigate to last row (2 sessions + 1 sentinel = 3 total, index 2)
+        for _ in 0..2 {
+            picker.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, SessionPickerAction::LoadMore);
+
+        // Simulate LoadMore action: hydrate remaining ref and extend
+        let next_page = hydrate_sessions(&app.pending_session_refs).await;
+        app.pending_session_refs.clear();
+        if let Some(ref mut picker) = app.session_picker {
+            picker.extend(next_page, false);
+        }
+
+        // Verify: sentinel gone, 3 sessions total
+        let picker = app.session_picker.as_mut().expect("picker");
+        // Navigate to last row and press Enter — should now be Select, not LoadMore
+        // Move to top first
+        picker.move_up();
+        picker.move_up();
+        // Move to bottom again (3 sessions total now)
+        for _ in 0..5 {
+            picker.move_down();
+        }
+        let action = picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            SessionPickerAction::Select(id) => {
+                assert!(
+                    refs.iter().any(|r| r.id == id),
+                    "selected id should be a real session"
+                );
+            }
+            other => panic!("expected Select after LoadMore, got {other:?}"),
+        }
+    }
+
     #[test]
     fn session_picker_select_returns_selected_id() {
         use crate::frontend::tui::SessionPickerAction;
@@ -2223,7 +2342,7 @@ mod tests {
             first_user_message: "hello".to_string(),
             modified: SystemTime::UNIX_EPOCH,
         }];
-        let mut picker = crate::frontend::tui::SessionPicker::new(summaries);
+        let mut picker = crate::frontend::tui::SessionPicker::new(summaries, false);
         let action = picker.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,

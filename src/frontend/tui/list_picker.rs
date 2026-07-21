@@ -85,6 +85,25 @@ impl<T> ListPicker<T> {
         }
     }
 
+    pub fn extend<U: IntoIterator<Item = T>>(&mut self, more: U) {
+        let was_empty = self.items.is_empty();
+        self.items.extend(more);
+        if was_empty && !self.items.is_empty() {
+            self.state.select(Some(0));
+        }
+    }
+
+    pub fn pop_last(&mut self) -> Option<T> {
+        let item = self.items.pop()?;
+        let len = self.items.len();
+        if len == 0 {
+            self.state.select(None);
+        } else if self.state.selected().is_some_and(|i| i >= len) {
+            self.state.select(Some(len - 1));
+        }
+        Some(item)
+    }
+
     pub fn render<F>(
         &mut self,
         frame: &mut Frame,
@@ -233,5 +252,47 @@ mod tests {
             picker.handle_key(key(KeyCode::Char('x')), false),
             PickerAction::None
         );
+    }
+
+    #[test]
+    fn extend_appends_items_and_preserves_selection() {
+        let mut picker = make_picker(2);
+        picker.state.select(Some(0));
+        let more = vec!["item 2".to_string(), "item 3".to_string()];
+        picker.extend(more);
+        assert_eq!(picker.items.len(), 4);
+        assert_eq!(picker.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn extend_on_empty_picker_selects_first() {
+        let mut picker: ListPicker<String> = ListPicker::new(vec![]);
+        assert_eq!(picker.selected_index(), None);
+        let items = vec!["item 0".to_string(), "item 1".to_string()];
+        picker.extend(items);
+        assert_eq!(picker.items.len(), 2);
+        assert_eq!(picker.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn pop_last_removes_last_and_adjusts_selection() {
+        let mut picker = make_picker(3);
+        picker.move_down();
+        picker.move_down();
+        assert_eq!(picker.selected_index(), Some(2));
+        let popped = picker.pop_last();
+        assert_eq!(popped, Some("item 2".to_string()));
+        assert_eq!(picker.items.len(), 2);
+        assert_eq!(picker.selected_index(), Some(1));
+    }
+
+    #[test]
+    fn pop_last_on_single_item_clears_selection() {
+        let mut picker = make_picker(1);
+        assert_eq!(picker.selected_index(), Some(0));
+        let popped = picker.pop_last();
+        assert_eq!(popped, Some("item 0".to_string()));
+        assert_eq!(picker.items.len(), 0);
+        assert_eq!(picker.selected_index(), None);
     }
 }
