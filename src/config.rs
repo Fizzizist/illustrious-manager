@@ -156,7 +156,7 @@ const DEFAULT_REGION: &str = "us-east5";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_BACKEND: &str = "vertex";
 
-const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", "ollama", "opencode_go", or "openai_compat"
+const CONFIG_TEMPLATE: &str = r#"# Which backend to use: "vertex", "zai", "ollama", "opencode_go", "anthropic", or "openai_compat"
 backend = "vertex"
 # where the session database files are stored. Defaults to $HOME/.config/illustrious-manager/sessions
 # or a local `illustrious-manager-sessions` directory if $HOME is not found.
@@ -214,6 +214,17 @@ model = "glm-5.1"
 # max_tokens = 16384
 # Reasoning style for OpenAI-protocol models: "none", "zai_enable_thinking", "qwen_chat_template", "default"
 # reasoning = "default"
+
+# [anthropic]
+# Direct Anthropic Messages API backend.
+# Required: your Anthropic API key
+# api_key = ""
+# Base URL (defaults to the Anthropic API endpoint)
+# base_url = "https://api.anthropic.com/v1"
+# Model to use (defaults to claude-opus-4-8)
+# model = "claude-opus-4-8"
+# Optional: override max_tokens for this backend (agent default is 8192)
+# max_tokens = 65536
 
 # [compaction]
 # Role name used for compaction sub-agents. Defaults to "compaction".
@@ -311,6 +322,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub opencode_go: Option<OpenCodeGoConfig>,
     #[serde(default)]
+    pub anthropic: Option<AnthropicConfig>,
+    #[serde(default)]
     pub tools: ToolsConfig,
     /// Named model roles. When empty, a `default` role is synthesized from
     /// the top-level `backend` + `[vertex]`/`[zai]` blocks for back-compat.
@@ -387,6 +400,28 @@ fn default_openai_compat_model() -> String {
 }
 
 pub const OPENCODE_GO_DEFAULT_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
+pub const ANTHROPIC_DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
+
+fn default_anthropic_base_url() -> String {
+    ANTHROPIC_DEFAULT_BASE_URL.to_string()
+}
+
+fn default_anthropic_model() -> String {
+    "claude-opus-4-8".to_string()
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct AnthropicConfig {
+    #[serde(skip_serializing)]
+    pub api_key: String,
+    #[serde(default = "default_anthropic_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_anthropic_model")]
+    pub model: String,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+}
 
 fn default_opencode_go_base_url() -> String {
     OPENCODE_GO_DEFAULT_BASE_URL.to_string()
@@ -556,6 +591,11 @@ impl AppConfig {
                 .as_ref()
                 .map(|o| o.model.clone())
                 .unwrap_or_else(default_opencode_go_model),
+            "anthropic" => self
+                .anthropic
+                .as_ref()
+                .map(|a| a.model.clone())
+                .unwrap_or_else(default_anthropic_model),
             _ => self.vertex.model.clone(),
         };
         self.models.insert(
@@ -613,6 +653,13 @@ pub fn apply_overrides(
                 && let Some(ref mut oc) = config.opencode_go
             {
                 oc.model = m.to_string();
+            }
+        }
+        "anthropic" => {
+            if let Some(m) = model
+                && let Some(ref mut a) = config.anthropic
+            {
+                a.model = m.to_string();
             }
         }
         _ => {}
@@ -797,9 +844,43 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 }
             }
         },
+        "anthropic" => match &config.anthropic {
+            None => {
+                bail!(
+                    "anthropic backend configuration is missing. Add a [anthropic] section to your config file."
+                );
+            }
+            Some(a) if a.api_key.is_empty() => {
+                bail!(
+                    "API key is required for anthropic backend. Set it in your [anthropic] config section."
+                );
+            }
+            Some(a) if a.base_url.trim().is_empty() => {
+                bail!(
+                    "base_url is required for anthropic backend. Set it in your [anthropic] config section \
+                     (e.g. '{}').",
+                    ANTHROPIC_DEFAULT_BASE_URL,
+                );
+            }
+            Some(a) if a.base_url.trim_end_matches('/').ends_with("/messages") => {
+                bail!(
+                    "base_url must not include '/messages' — provide the base URL only \
+                     (e.g. '{}') and the backend will append the path automatically.",
+                    ANTHROPIC_DEFAULT_BASE_URL,
+                );
+            }
+            Some(a) if a.base_url.contains('?') => {
+                bail!(
+                    "base_url must not contain a query string. Provide only the base URL \
+                     (e.g. '{}').",
+                    ANTHROPIC_DEFAULT_BASE_URL,
+                );
+            }
+            _ => {}
+        },
         _ => {
             bail!(
-                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama, openai_compat, opencode_go",
+                "Invalid backend '{}'. Supported backends are: vertex, zai, ollama, openai_compat, anthropic, opencode_go",
                 config.backend
             );
         }
@@ -880,9 +961,39 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     }
                 }
             },
+            "anthropic" => match &config.anthropic {
+                None => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but no [anthropic] section is present."
+                    );
+                }
+                Some(a) if a.api_key.is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].api_key is not configured."
+                    );
+                }
+                Some(a) if a.base_url.trim().is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url is not configured."
+                    );
+                }
+                Some(a) if a.base_url.trim_end_matches('/').ends_with("/messages") => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url \
+                         must not include '/messages' — the backend appends the path automatically."
+                    );
+                }
+                Some(a) if a.base_url.contains('?') => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url \
+                         must not contain a query string."
+                    );
+                }
+                _ => {}
+            },
             other => {
                 bail!(
-                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama, openai_compat, opencode_go"
+                    "Model role '{name}' references unknown backend '{other}'. Supported: vertex, zai, ollama, openai_compat, anthropic, opencode_go"
                 );
             }
         }
@@ -1019,6 +1130,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1044,6 +1156,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1068,6 +1181,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1096,6 +1210,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1124,6 +1239,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1148,6 +1264,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1173,6 +1290,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1206,6 +1324,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1232,6 +1351,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Always,
                 sandbox_root: "/tmp/sandbox".to_string(),
@@ -1264,6 +1384,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: sessions_dir.clone(),
             models: BTreeMap::new(),
@@ -1291,6 +1412,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1349,6 +1471,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1400,6 +1523,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1456,6 +1580,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1481,6 +1606,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1514,6 +1640,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1554,6 +1681,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1583,6 +1711,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1612,6 +1741,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1641,6 +1771,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1669,6 +1800,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1697,6 +1829,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1733,6 +1866,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1769,6 +1903,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1803,6 +1938,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -1841,6 +1977,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1882,6 +2019,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -1943,6 +2081,7 @@ mod tests {
             }),
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2125,6 +2264,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2159,6 +2299,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2193,6 +2334,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2227,6 +2369,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2306,6 +2449,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2352,6 +2496,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2387,6 +2532,7 @@ mod tests {
                 reasoning: ReasoningStyleConfig::None,
             }),
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2471,6 +2617,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2507,6 +2654,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2540,6 +2688,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2575,6 +2724,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2612,6 +2762,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2649,6 +2800,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -2705,6 +2857,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -2750,6 +2903,7 @@ mod tests {
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
             }),
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
@@ -2763,6 +2917,573 @@ mod tests {
         assert!(
             msg.contains("grok-code") && msg.contains("both"),
             "error should mention duplicate model and 'both'; got: {msg}"
+        );
+    }
+
+    // ── anthropic config tests ────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_config_parses_with_defaults() {
+        let toml_str = r#"
+            backend = "anthropic"
+            [vertex]
+            project = ""
+            [anthropic]
+            api_key = "test-key"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        let a = config
+            .anthropic
+            .expect("anthropic config should be present");
+        assert_eq!(a.api_key, "test-key");
+        assert_eq!(a.base_url, ANTHROPIC_DEFAULT_BASE_URL);
+        assert_eq!(a.model, "claude-opus-4-8");
+        assert!(a.max_tokens.is_none());
+    }
+
+    #[test]
+    fn anthropic_config_parses_with_all_fields() {
+        let toml_str = r#"
+            backend = "anthropic"
+            [vertex]
+            project = ""
+            [anthropic]
+            api_key = "my-key"
+            base_url = "https://custom.anthropic.com/v1"
+            model = "claude-sonnet-4-20250514"
+            max_tokens = 65536
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        let a = config.anthropic.expect("anthropic config present");
+        assert_eq!(a.api_key, "my-key");
+        assert_eq!(a.base_url, "https://custom.anthropic.com/v1");
+        assert_eq!(a.model, "claude-sonnet-4-20250514");
+        assert_eq!(a.max_tokens, Some(65536));
+    }
+
+    #[test]
+    fn validate_anthropic_backend_missing_section_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("[anthropic]"),
+            "error should mention [anthropic]"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_empty_api_key_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("API key"));
+    }
+
+    #[test]
+    fn validate_anthropic_backend_with_messages_suffix_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1/messages".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("/messages"),
+            "error should mention /messages suffix"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_valid_config_succeeds() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: Some(65536),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(
+            result.is_ok(),
+            "valid anthropic config should pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_empty_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: String::new(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("base_url") && msg.contains("required"),
+            "error should mention base_url is required; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_whitespace_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "   ".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err(), "whitespace-only base_url should error");
+    }
+
+    #[test]
+    fn validate_anthropic_backend_query_string_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1?token=x".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("query string"),
+            "error should mention query string; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_messages_suffix_with_trailing_slash_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1/messages/".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("/messages"),
+            "error should catch /messages even after trailing-slash trim"
+        );
+    }
+
+    #[test]
+    fn normalize_back_compat_synthesizes_default_role_for_anthropic() {
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+        assert!(
+            config.models.contains_key("default"),
+            "default role should be synthesized for anthropic backend"
+        );
+        assert_eq!(config.models["default"].backend, "anthropic");
+        assert_eq!(config.models["default"].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn normalize_back_compat_synthesizes_default_model_for_anthropic_without_section() {
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+        assert_eq!(config.models["default"].model, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn apply_overrides_anthropic_model() {
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+        apply_overrides(&mut config, None, None, Some("claude-sonnet-4-20250514"));
+        assert_eq!(
+            config.anthropic.as_ref().expect("anthropic present").model,
+            "claude-sonnet-4-20250514",
+        );
+        let resolved = config
+            .resolve_role("default")
+            .expect("default role exists after normalize_back_compat");
+        assert_eq!(resolved.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_unconfigured_section() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("anthropic") && msg.contains("is present"),
+            "error should mention missing anthropic section; got: {msg}",
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_empty_api_key() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("api_key") && msg.contains("not configured"),
+            "error should mention missing api_key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_messages_suffix_base_url() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1/messages".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("/messages") && msg.contains("my-role"),
+            "error should mention /messages and role name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_empty_base_url() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: String::new(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("base_url") && msg.contains("my-role"),
+            "error should mention base_url and role name; got: {msg}"
         );
     }
 }

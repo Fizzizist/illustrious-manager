@@ -265,3 +265,93 @@ model = "glm-5.1"
         "project flag should not affect vertex config when backend is zai"
     );
 }
+
+#[test]
+fn test_parse_anthropic_config_with_defaults() {
+    let toml_content = r#"
+backend = "anthropic"
+
+[vertex]
+project = "my-project"
+
+[anthropic]
+api_key = "test-api-key"
+"#;
+    let mut tmp = NamedTempFile::new().expect("Failed to create temp file");
+    write!(tmp, "{}", toml_content).expect("Failed to write to temp file");
+
+    let config = illustrious_manager::config::load_config_from_path(tmp.path())
+        .expect("Failed to load config from temp file");
+    assert_eq!(config.backend, "anthropic");
+    let a = config
+        .anthropic
+        .as_ref()
+        .expect("anthropic config should be present");
+    assert_eq!(a.api_key, "test-api-key");
+    assert_eq!(a.base_url, "https://api.anthropic.com/v1");
+    assert_eq!(a.model, "claude-opus-4-8");
+}
+
+#[test]
+fn test_cli_model_overrides_anthropic_model() {
+    let toml_content = r#"
+backend = "anthropic"
+
+[vertex]
+project = "my-project"
+
+[anthropic]
+api_key = "test-api-key"
+model = "claude-opus-4-8"
+"#;
+    let mut tmp = NamedTempFile::new().expect("Failed to create temp file");
+    write!(tmp, "{}", toml_content).expect("Failed to write to temp file");
+
+    let mut config = illustrious_manager::config::load_config_from_path(tmp.path())
+        .expect("Failed to load config from temp file");
+
+    illustrious_manager::config::apply_overrides(
+        &mut config,
+        None,
+        None,
+        Some("claude-sonnet-4-20250514"),
+    );
+
+    let a = config
+        .anthropic
+        .as_ref()
+        .expect("anthropic config should be present");
+    assert_eq!(a.model, "claude-sonnet-4-20250514");
+}
+
+#[test]
+fn test_cli_vertex_flags_ignored_for_anthropic_backend() {
+    let toml_content = r#"
+backend = "anthropic"
+
+[vertex]
+project = "original-project"
+region = "us-east5"
+
+[anthropic]
+api_key = "test-api-key"
+model = "claude-opus-4-8"
+"#;
+    let mut tmp = NamedTempFile::new().expect("Failed to create temp file");
+    write!(tmp, "{}", toml_content).expect("Failed to write to temp file");
+
+    let mut config = illustrious_manager::config::load_config_from_path(tmp.path())
+        .expect("Failed to load config from temp file");
+
+    illustrious_manager::config::apply_overrides(
+        &mut config,
+        Some("cli-project"),
+        Some("europe-west1"),
+        None,
+    );
+
+    assert_eq!(
+        config.vertex.project, "original-project",
+        "project flag should not affect vertex config when backend is anthropic"
+    );
+}

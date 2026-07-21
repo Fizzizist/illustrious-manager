@@ -6,6 +6,7 @@ use crate::config::{AppConfig, RetryConfig};
 use crate::logging::log_warn;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod anthropic;
 pub mod anthropic_compat;
 pub mod error;
 pub mod ndjson;
@@ -219,6 +220,21 @@ impl BackendFactory {
                     model: resolved.model,
                 })
             }
+            "anthropic" => {
+                let anthropic_config = self.config.anthropic.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses anthropic backend but no [anthropic] section is configured."
+                    )
+                })?;
+                let backend = anthropic::AnthropicBackend::new(anthropic_config)?;
+                Ok(BackendSelection {
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
+                    model: resolved.model,
+                })
+            }
             "opencode_go" => {
                 let oc_go = self.config.opencode_go.as_ref().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -346,6 +362,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -363,6 +380,89 @@ mod tests {
         assert!(
             err.to_string().contains("nonexistent"),
             "error should mention the unknown role name"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_factory_anthropic_arm_succeeds_and_errors_when_section_absent() {
+        use crate::config::{
+            ANTHROPIC_DEFAULT_BASE_URL, AnthropicConfig, AppConfig, RetryConfig, ToolsConfig,
+            VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        // ── Happy path ──
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let factory = super::BackendFactory::new(config);
+        let selection = factory
+            .for_role("default")
+            .await
+            .expect("anthropic factory arm should succeed with a configured section");
+        assert_eq!(selection.model, "claude-opus-4-8");
+
+        // ── Error path: [anthropic] section absent ──
+        let mut config_missing = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config_missing.models.insert(
+            "anth-role".to_string(),
+            crate::config::ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+
+        let factory_missing = super::BackendFactory::new(config_missing);
+        let err = factory_missing
+            .for_role("anth-role")
+            .await
+            .err()
+            .expect("should error when [anthropic] section is absent");
+        assert!(
+            err.to_string()
+                .contains("[anthropic] section is configured"),
+            "error should mention missing [anthropic] section; got: {err}"
         );
     }
 
@@ -397,6 +497,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,
