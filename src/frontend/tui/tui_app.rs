@@ -420,7 +420,7 @@ impl App {
                 }
                 _ => {
                     self.pending_g = false;
-                    false
+                    true
                 }
             },
             AppFocus::Input => false,
