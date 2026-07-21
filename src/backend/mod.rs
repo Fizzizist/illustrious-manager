@@ -8,6 +8,7 @@ use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 pub mod anthropic;
 pub mod anthropic_compat;
+pub mod defaults;
 pub mod error;
 pub mod ndjson;
 pub mod ollama;
@@ -29,6 +30,7 @@ pub trait LlmBackend: Send + Sync {
 pub struct BackendSelection {
     pub backend: Box<dyn LlmBackend>,
     pub model: String,
+    pub max_tokens: u32,
 }
 
 pub struct RetryingBackend {
@@ -165,6 +167,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: defaults::VERTEX,
                 })
             }
             "zai" => {
@@ -180,6 +183,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: defaults::ZAI,
                 })
             }
             "ollama" => {
@@ -195,6 +199,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: defaults::OLLAMA,
                 })
             }
             "openai_compat" => {
@@ -218,6 +223,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: oc_toml.max_tokens.unwrap_or(defaults::OPENAI_COMPAT),
                 })
             }
             "anthropic" => {
@@ -233,6 +239,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: anthropic_config.max_tokens.unwrap_or(defaults::ANTHROPIC),
                 })
             }
             "opencode_go" => {
@@ -248,6 +255,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
+                    max_tokens: oc_go.max_tokens.unwrap_or(defaults::OPENCODE_GO),
                 })
             }
             other => anyhow::bail!("Unknown backend '{other}' for role '{role}'"),
@@ -271,7 +279,11 @@ impl BackendFactory {
     /// bypassing role resolution and auth. For use in tests only.
     #[cfg(test)]
     pub fn make_selection(backend: Box<dyn LlmBackend>, model: String) -> BackendSelection {
-        BackendSelection { backend, model }
+        BackendSelection {
+            backend,
+            model,
+            max_tokens: 8_192,
+        }
     }
 }
 
@@ -840,5 +852,146 @@ mod tests {
         async fn project_id(&self) -> Result<std::sync::Arc<str>, gcp_auth::Error> {
             unimplemented!("fake provider")
         }
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_max_tokens_from_config_override() {
+        use crate::config::{
+            ANTHROPIC_DEFAULT_BASE_URL, AnthropicConfig, AppConfig, RetryConfig, ToolsConfig,
+            VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: Some(32768),
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let factory = super::BackendFactory::new(config);
+        let selection = factory
+            .for_role("default")
+            .await
+            .expect("for_role should succeed");
+        assert_eq!(
+            selection.max_tokens, 32768,
+            "config override should take precedence over default"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_max_tokens_from_default_when_no_override() {
+        use crate::config::{
+            ANTHROPIC_DEFAULT_BASE_URL, AnthropicConfig, AppConfig, RetryConfig, ToolsConfig,
+            VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let factory = super::BackendFactory::new(config);
+        let selection = factory
+            .for_role("default")
+            .await
+            .expect("for_role should succeed");
+        assert_eq!(
+            selection.max_tokens,
+            super::defaults::ANTHROPIC,
+            "should use anthropic default when no override"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_vertex_max_tokens_to_vertex_default() {
+        use crate::config::{AppConfig, ModelRole, RetryConfig, ToolsConfig, VertexConfig};
+        use std::collections::BTreeMap;
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "test-role".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let factory = super::BackendFactory::new(config);
+
+        let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+        factory
+            .vertex_auth_cache
+            .seed("proj", "us-east5", fake_provider);
+
+        let selection = factory
+            .for_role("test-role")
+            .await
+            .expect("for_role should succeed");
+        assert_eq!(
+            selection.max_tokens,
+            super::defaults::VERTEX,
+            "vertex should use vertex default (8192)"
+        );
     }
 }

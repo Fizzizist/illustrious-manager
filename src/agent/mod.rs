@@ -190,14 +190,23 @@ impl Agent {
             .clone()
     }
 
+    pub fn max_tokens(&self) -> u32 {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_tokens
+    }
+
     pub fn set_model(&self, model: String) {
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
 
     /// Replace the backend and model simultaneously (used by `/role` command).
-    pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String) {
+    pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String, max_tokens: u32) {
         *self.backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
-        self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
+        let mut config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        config.model = model;
+        config.max_tokens = max_tokens;
     }
 
     pub fn set_chat_mode(&self, on: bool) {
@@ -600,19 +609,26 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     if text_accumulated.is_empty()
-                        && thinking_accumulated.is_empty()
-                        && config.max_tokens > 0
-                        && last_output_tokens >= config.max_tokens
                         && max_token_retries_used < max_token_retries
+                        && ((config.max_tokens > 0 && last_output_tokens >= config.max_tokens)
+                            || last_output_tokens == 0)
                     {
-                        let error = anyhow::Error::from(
-                            crate::backend::error::BackendError::MaxTokensExceeded {
-                                input_tokens: peak_input_tokens,
-                                output_tokens: last_output_tokens,
-                            },
-                        );
-                        record_retry(&format!("{error:#}"), &history_arc, &session, &event_tx)
-                            .await;
+                        let error_msg =
+                            if config.max_tokens > 0 && last_output_tokens >= config.max_tokens {
+                                let error = anyhow::Error::from(
+                                    crate::backend::error::BackendError::MaxTokensExceeded {
+                                        input_tokens: peak_input_tokens,
+                                        output_tokens: last_output_tokens,
+                                    },
+                                );
+                                format!("{error:#}")
+                            } else {
+                                "Empty response: stream produced no text, no tool calls, and no \
+                             usage. This may indicate a truncated stream or a max_tokens budget \
+                             consumed entirely by internal reasoning."
+                                    .to_string()
+                            };
+                        record_retry(&error_msg, &history_arc, &session, &event_tx).await;
                         max_token_retries_used += 1;
                         iterations -= 1;
                         continue 'outer;
@@ -1129,8 +1145,6 @@ fn truncate_tool_result(content: &str, max_bytes: u64) -> String {
     result
 }
 
-pub(crate) const DEFAULT_MAX_TOKENS: u32 = 8_192;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1193,14 +1207,6 @@ mod tests {
             Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
             Ok(StreamEvent::ThinkingSignature("sig_abc123".to_string())),
             Ok(StreamEvent::TextDelta(text.to_string())),
-            Ok(StreamEvent::Done),
-        ]
-    }
-
-    fn thinking_only_response(thinking: &str) -> Vec<Result<StreamEvent>> {
-        vec![
-            Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
-            Ok(StreamEvent::ThinkingSignature("sig_def456".to_string())),
             Ok(StreamEvent::Done),
         ]
     }
@@ -2367,6 +2373,7 @@ mod tests {
         let selection = BackendSelection {
             backend: Box::new(SequencedBackend::new(vec![])),
             model: "claude-test-model".to_string(),
+            max_tokens: 8_192,
         };
 
         let tool_config = ToolsConfig {
@@ -3615,7 +3622,16 @@ mod tests {
 
     #[tokio::test]
     async fn thinking_only_response_persisted_in_history() {
-        let backend = SequencedBackend::new(vec![thinking_only_response("just thinking")]);
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::ThinkingDelta("just thinking".to_string())),
+            Ok(StreamEvent::ThinkingSignature("sig_def456".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 50,
+                output_tokens: 10,
+                stop_reason: "end_turn".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ]]);
         let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
 
         let stream = agent
@@ -4599,6 +4615,7 @@ mod tests {
         agent.set_backend(
             Arc::new(backend2) as Arc<dyn LlmBackend>,
             "model-two".to_string(),
+            65536,
         );
         assert_eq!(agent.model(), "model-two");
 
@@ -6176,6 +6193,250 @@ mod tests {
                     .iter()
                     .any(|b| matches!(b, ContentBlock::Text(t) if t == "should not be reached"))),
             "history must NOT contain text from second response vector; got {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_backend_updates_max_tokens() {
+        let captured = Arc::new(Mutex::new(Vec::<RequestConfig>::new()));
+        let captured_clone = Arc::clone(&captured);
+
+        struct ConfigCapturingBackend {
+            captured: Arc<Mutex<Vec<RequestConfig>>>,
+            events: Arc<Vec<StreamEvent>>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for ConfigCapturingBackend {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                config: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                self.captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(config.clone());
+                let (tx, rx) = futures::channel::mpsc::unbounded();
+                for event in self.events.iter() {
+                    tx.unbounded_send(Ok(event.clone()))
+                        .unwrap_or_else(|e| panic!("send failed: {e:?}"));
+                }
+                Ok(Box::pin(rx))
+            }
+        }
+
+        let events = Arc::new(vec![
+            StreamEvent::TextDelta("ok".to_string()),
+            StreamEvent::Done,
+        ]);
+
+        let backend1 = ConfigCapturingBackend {
+            captured: Arc::clone(&captured_clone),
+            events: Arc::clone(&events),
+        };
+        let config = RequestConfig {
+            model: "model-a".to_string(),
+            max_tokens: 100,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        };
+        let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
+
+        let backend2 = ConfigCapturingBackend {
+            captured: Arc::clone(&captured_clone),
+            events: Arc::clone(&events),
+        };
+        agent.set_backend(
+            Arc::new(backend2) as Arc<dyn LlmBackend>,
+            "model-b".to_string(),
+            65536,
+        );
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let _ = collect_events(stream).await;
+
+        let configs = captured_clone.lock().unwrap_or_else(|e| e.into_inner());
+        let last_config = configs
+            .last()
+            .expect("should have at least one captured config");
+        assert_eq!(
+            last_config.max_tokens, 65536,
+            "max_tokens should be updated to 65536 after set_backend; got {}",
+            last_config.max_tokens
+        );
+        assert_eq!(
+            last_config.model, "model-b",
+            "model should be updated to model-b"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stream_with_zero_usage_triggers_retry_not_silent_blank() {
+        let empty_response: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::Done)];
+        let backend = SequencedBackend::new(vec![empty_response, text_response("recovered")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should emit Retrying for empty stream with zero usage; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error when retry succeeds; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "should emit ResponseComplete after retry; got {events:?}"
+        );
+
+        let history = agent.history();
+        assert!(
+            history.iter().any(|m| m.role == Role::User
+                && m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))),
+            "error message must be injected into history"
+        );
+    }
+
+    #[tokio::test]
+    async fn stealth_max_tokens_with_thinking_triggers_retry() {
+        let thinking_only_stealth: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::ThinkingDelta("consumed budget".to_string())),
+            Ok(StreamEvent::ThinkingSignature("sig".to_string())),
+            Ok(StreamEvent::Usage {
+                input_tokens: 50,
+                output_tokens: 100,
+                stop_reason: "stop".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ];
+        let backend =
+            SequencedBackend::new(vec![thinking_only_stealth, text_response("recovered")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should emit Retrying when thinking consumes budget; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit Error when retry succeeds; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "should emit ResponseComplete after retry; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stream_exhausts_retries_then_emits_response_complete() {
+        fn empty_response() -> Vec<Result<StreamEvent>> {
+            vec![Ok(StreamEvent::Done)]
+        }
+        let backend =
+            SequencedBackend::new(vec![empty_response(), empty_response(), empty_response()]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
+        assert_eq!(
+            retrying_count, 2,
+            "should have 2 Retrying events (2 retries within budget); got {retrying_count}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
+            "should emit ResponseComplete(\"\") after exhausting retries; got {events:?}"
+        );
+
+        let history = agent.history();
+        let error_count = history
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .filter(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t.contains("[ERROR]")))
+            })
+            .count();
+        assert_eq!(
+            error_count, 2,
+            "should have 2 [ERROR] messages in history (one per retry); got {error_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stream_with_zero_retries_emits_response_complete_immediately() {
+        let empty_response: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::Done)];
+        let backend = SequencedBackend::new(vec![empty_response]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 0,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should not emit Retrying when max_token_retries=0; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
+            "should emit ResponseComplete(\"\") immediately with zero retries; got {events:?}"
         );
     }
 }

@@ -331,8 +331,10 @@ impl SlashCommand for RoleCommand {
             match factory.for_role(&role_name).await {
                 Ok(selection) => {
                     let new_model = selection.model.clone();
+                    let max_tokens = selection.max_tokens;
                     let backend: Arc<dyn crate::backend::LlmBackend> = Arc::from(selection.backend);
-                    ctx.agent.set_backend(backend, new_model.clone());
+                    ctx.agent
+                        .set_backend(backend, new_model.clone(), max_tokens);
                     ctx.app.model = new_model.clone();
                     ctx.app.conversation.push(ConversationEntry::new(
                         ConversationRole::Info,
@@ -1287,6 +1289,12 @@ mod tests {
             ctx.agent.model(),
             "fast-model",
             "agent model should be updated to the role's model"
+        );
+        assert_eq!(
+            ctx.agent.max_tokens(),
+            16384,
+            "agent max_tokens should be updated to the openai_compat default (16384); got {}",
+            ctx.agent.max_tokens()
         );
         assert!(
             ctx.app

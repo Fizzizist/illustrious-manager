@@ -466,6 +466,7 @@ mod tests {
                 let selection = BackendSelection {
                     backend: Box::new(ImmediateTextBackend),
                     model: "claude-test".to_string(),
+                    max_tokens: 8_192,
                 };
 
                 let agent = match spawn_agent_with_selection(
