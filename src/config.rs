@@ -855,10 +855,24 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                     "API key is required for anthropic backend. Set it in your [anthropic] config section."
                 );
             }
+            Some(a) if a.base_url.trim().is_empty() => {
+                bail!(
+                    "base_url is required for anthropic backend. Set it in your [anthropic] config section \
+                     (e.g. '{}').",
+                    ANTHROPIC_DEFAULT_BASE_URL,
+                );
+            }
             Some(a) if a.base_url.trim_end_matches('/').ends_with("/messages") => {
                 bail!(
                     "base_url must not include '/messages' — provide the base URL only \
                      (e.g. '{}') and the backend will append the path automatically.",
+                    ANTHROPIC_DEFAULT_BASE_URL,
+                );
+            }
+            Some(a) if a.base_url.contains('?') => {
+                bail!(
+                    "base_url must not contain a query string. Provide only the base URL \
+                     (e.g. '{}').",
                     ANTHROPIC_DEFAULT_BASE_URL,
                 );
             }
@@ -956,6 +970,23 @@ pub fn validate(config: &AppConfig, config_path: Option<&Path>) -> Result<()> {
                 Some(a) if a.api_key.is_empty() => {
                     bail!(
                         "Model role '{name}' uses backend 'anthropic' but [anthropic].api_key is not configured."
+                    );
+                }
+                Some(a) if a.base_url.trim().is_empty() => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url is not configured."
+                    );
+                }
+                Some(a) if a.base_url.trim_end_matches('/').ends_with("/messages") => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url \
+                         must not include '/messages' — the backend appends the path automatically."
+                    );
+                }
+                Some(a) if a.base_url.contains('?') => {
+                    bail!(
+                        "Model role '{name}' uses backend 'anthropic' but [anthropic].base_url \
+                         must not contain a query string."
                     );
                 }
                 _ => {}
@@ -3058,6 +3089,140 @@ mod tests {
     }
 
     #[test]
+    fn validate_anthropic_backend_empty_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: String::new(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("base_url") && msg.contains("required"),
+            "error should mention base_url is required; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_whitespace_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "   ".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err(), "whitespace-only base_url should error");
+    }
+
+    #[test]
+    fn validate_anthropic_backend_query_string_base_url_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1?token=x".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("query string"),
+            "error should mention query string; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_backend_messages_suffix_with_trailing_slash_errors() {
+        let config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1/messages/".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("/messages"),
+            "error should catch /messages even after trailing-slash trim"
+        );
+    }
+
+    #[test]
     fn normalize_back_compat_synthesizes_default_role_for_anthropic() {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
@@ -3233,6 +3398,92 @@ mod tests {
         assert!(
             msg.contains("api_key") && msg.contains("not configured"),
             "error should mention missing api_key; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_messages_suffix_base_url() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: "https://api.anthropic.com/v1/messages".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("/messages") && msg.contains("my-role"),
+            "error should mention /messages and role name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_anthropic_role_rejects_empty_base_url() {
+        let mut models = BTreeMap::new();
+        models.insert(
+            "my-role".to_string(),
+            ModelRole {
+                backend: "anthropic".to_string(),
+                model: "claude-opus-4-8".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: String::new(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let result = validate(&config, None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("base_url") && msg.contains("my-role"),
+            "error should mention base_url and role name; got: {msg}"
         );
     }
 }

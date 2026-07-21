@@ -116,6 +116,7 @@ mod tests {
         assert_eq!(compat.anthropic_version, "2023-06-01");
         assert!(compat.anthropic_beta.is_none());
         assert!(compat.endpoint.ends_with("/messages"));
+        assert_eq!(compat.auth_token.as_deref(), Some("test-key"));
     }
 
     #[test]

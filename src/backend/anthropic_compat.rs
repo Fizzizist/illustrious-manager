@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
+use reqwest::header::HeaderValue;
 
 use super::LlmBackend;
 use super::error::BackendError;
@@ -306,17 +307,26 @@ impl AnthropicCompatBackend {
 
         headers.insert(
             reqwest::header::CONTENT_TYPE,
-            "application/json".parse().unwrap(),
+            HeaderValue::from_static("application/json"),
         );
 
         if let Some(ref token) = self.config.auth_token {
             match self.config.auth_style {
                 AuthStyle::Bearer => {
-                    let auth_value = format!("Bearer {}", token).parse().unwrap();
+                    let auth_value = HeaderValue::from_str(&format!("Bearer {}", token))
+                        .with_context(|| {
+                            format!(
+                                "auth token contains characters invalid for an HTTP header value: {token:?}"
+                            )
+                        })?;
                     headers.insert(reqwest::header::AUTHORIZATION, auth_value);
                 }
                 AuthStyle::XApiKey => {
-                    let key_value = token.parse().unwrap();
+                    let key_value = HeaderValue::from_str(token).with_context(|| {
+                        format!(
+                            "API key contains characters invalid for an HTTP header value: {token:?}"
+                        )
+                    })?;
                     headers.insert(
                         reqwest::header::HeaderName::from_static("x-api-key"),
                         key_value,
@@ -326,7 +336,13 @@ impl AnthropicCompatBackend {
         }
 
         if self.config.include_model_in_body {
-            let version_value = self.config.anthropic_version.parse().unwrap();
+            let version_value = HeaderValue::from_str(&self.config.anthropic_version)
+                .with_context(|| {
+                    format!(
+                        "anthropic_version contains characters invalid for an HTTP header value: {:?}",
+                        self.config.anthropic_version
+                    )
+                })?;
             headers.insert(
                 reqwest::header::HeaderName::from_static("anthropic-version"),
                 version_value,
@@ -334,7 +350,11 @@ impl AnthropicCompatBackend {
         }
 
         if let Some(ref beta) = self.config.anthropic_beta {
-            let beta_value = beta.parse().unwrap();
+            let beta_value = HeaderValue::from_str(beta).with_context(|| {
+                format!(
+                    "anthropic_beta contains characters invalid for an HTTP header value: {beta:?}"
+                )
+            })?;
             headers.insert(
                 reqwest::header::HeaderName::from_static("anthropic-beta"),
                 beta_value,
@@ -1512,25 +1532,38 @@ mod tests {
     }
 
     #[test]
-    fn build_request_headers_omits_anthropic_version_when_model_not_in_body() {
+    fn build_request_headers_rejects_control_char_in_bearer_token() {
         let backend = AnthropicCompatBackend::new(
             Client::new(),
             AnthropicCompatConfig {
                 endpoint: "https://test.example.com".to_string(),
-                auth_token: Some("test-token".to_string()),
+                auth_token: Some("token-with-\n-newline".to_string()),
                 auth_style: AuthStyle::Bearer,
-                anthropic_version: "vertex-2023-10-16".to_string(),
-                include_model_in_body: false,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
             },
         );
-        let headers = backend
-            .build_request_headers()
-            .expect("should build headers");
-        assert!(
-            headers.get("anthropic-version").is_none(),
-            "anthropic-version header should be absent when include_model_in_body is false"
+        let result = backend.build_request_headers();
+        assert!(result.is_err(), "newline in auth token should reject");
+    }
+
+    #[test]
+    fn build_request_headers_rejects_control_char_in_x_api_key() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com".to_string(),
+                auth_token: Some("key-with-\r-carriage".to_string()),
+                auth_style: AuthStyle::XApiKey,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
         );
+        let result = backend.build_request_headers();
+        assert!(result.is_err(), "carriage return in API key should reject");
     }
 }
