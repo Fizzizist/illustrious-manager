@@ -4,7 +4,7 @@ use crate::config::{AppConfig, generate_config_message};
 use crate::frontend::tui::tasks_picker::{TasksPicker, sort_tasks};
 use crate::frontend::tui::tui_app::{App, AppState};
 use crate::frontend::tui::{ConversationEntry, ConversationRole, SessionPicker};
-use crate::session::{enumerate_sessions, hydrate_sessions};
+use crate::session::{enumerate_sessions, hydrate_next_page};
 use crate::types::AgentEvent;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -112,11 +112,9 @@ impl SlashCommand for SessionsCommand {
         Box::pin(async move {
             ctx.app.input.clear();
             match enumerate_sessions(&ctx.config.sessions_dir).await {
-                Ok(refs) => {
-                    let page_len = refs.len().min(SESSION_PAGE_SIZE);
-                    let page = hydrate_sessions(&refs[..page_len]).await;
-                    let has_more = refs.len() > SESSION_PAGE_SIZE;
-                    ctx.app.pending_session_refs = refs.into_iter().skip(page_len).collect();
+                Ok(mut refs) => {
+                    let (page, has_more) = hydrate_next_page(&mut refs, SESSION_PAGE_SIZE).await;
+                    ctx.app.pending_session_refs = refs;
                     ctx.app.session_picker = Some(SessionPicker::new(page, has_more));
                     ctx.app.set_state(AppState::SessionPicker);
                 }

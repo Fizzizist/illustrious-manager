@@ -29,7 +29,7 @@ use crate::agent::Agent;
 use crate::backend::BackendFactory;
 use crate::config::AppConfig;
 use crate::logging::Logger;
-use crate::session::{SessionRef, hydrate_sessions};
+use crate::session::SessionRef;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, ConfirmationResponse};
 
@@ -67,7 +67,6 @@ pub struct App {
     pub viewport_height: u16,
     pub text_width: u16,
     pub session_picker: Option<SessionPicker>,
-    // mtime ordering captured at enumeration time — a session resumed mid-pagination won't re-float
     pub pending_session_refs: Vec<SessionRef>,
     pub tasks_picker: Option<TasksPicker>,
     pub usage: TokenUsage,
@@ -989,10 +988,7 @@ async fn run_app(
                                     }
                                     SessionPickerAction::LoadMore => {
                                         let page_size = crate::frontend::tui::commands::SESSION_PAGE_SIZE;
-                                        let page_len = app.pending_session_refs.len().min(page_size);
-                                        let page = hydrate_sessions(&app.pending_session_refs[..page_len]).await;
-                                        let has_more = app.pending_session_refs.len() > page_size;
-                                        app.pending_session_refs = app.pending_session_refs.split_off(page_len);
+                                        let (page, has_more) = crate::session::hydrate_next_page(&mut app.pending_session_refs, page_size).await;
                                         if let Some(ref mut picker) = app.session_picker {
                                             picker.extend(page, has_more);
                                         }

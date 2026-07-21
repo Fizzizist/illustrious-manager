@@ -90,6 +90,17 @@ pub async fn hydrate_sessions(refs: &[SessionRef]) -> Vec<SessionSummary> {
     summaries
 }
 
+pub async fn hydrate_next_page(
+    pending: &mut Vec<SessionRef>,
+    page_size: usize,
+) -> (Vec<SessionSummary>, bool) {
+    let page_len = pending.len().min(page_size);
+    let page = hydrate_sessions(&pending[..page_len]).await;
+    let has_more = pending.len() > page_size;
+    pending.drain(..page_len);
+    (page, has_more)
+}
+
 pub async fn list_sessions(session_dir: &std::path::Path) -> Result<Vec<SessionSummary>> {
     let refs = enumerate_sessions(session_dir).await?;
     Ok(hydrate_sessions(&refs).await)
