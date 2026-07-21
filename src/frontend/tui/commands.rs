@@ -571,6 +571,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),

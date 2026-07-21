@@ -409,6 +409,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig {
                 confirmation: ConfirmationMode::Never,
                 ..Default::default()

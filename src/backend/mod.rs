@@ -6,6 +6,7 @@ use crate::config::{AppConfig, RetryConfig};
 use crate::logging::log_warn;
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
+pub mod anthropic;
 pub mod anthropic_compat;
 pub mod error;
 pub mod ndjson;
@@ -219,6 +220,21 @@ impl BackendFactory {
                     model: resolved.model,
                 })
             }
+            "anthropic" => {
+                let anthropic_config = self.config.anthropic.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Role '{role}' uses anthropic backend but no [anthropic] section is configured."
+                    )
+                })?;
+                let backend = anthropic::AnthropicBackend::new(anthropic_config)?;
+                Ok(BackendSelection {
+                    backend: Box::new(RetryingBackend::new(
+                        Box::new(backend),
+                        self.config.retry.clone(),
+                    )),
+                    model: resolved.model,
+                })
+            }
             "opencode_go" => {
                 let oc_go = self.config.opencode_go.as_ref().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -346,6 +362,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models: BTreeMap::new(),
@@ -397,6 +414,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
             models,

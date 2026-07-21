@@ -1095,6 +1095,7 @@ mod tests {
             ollama: None,
             openai_compat: None,
             opencode_go: None,
+            anthropic: None,
             tools: ToolsConfig::default(),
             sessions_dir: std::path::PathBuf::from("/sessions"),
             models: std::collections::BTreeMap::new(),

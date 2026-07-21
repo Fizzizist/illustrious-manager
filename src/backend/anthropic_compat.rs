@@ -213,6 +213,10 @@ impl AnthropicCompatBackend {
         Self { client, config }
     }
 
+    pub fn config(&self) -> &AnthropicCompatConfig {
+        &self.config
+    }
+
     fn build_request_body(
         &self,
         messages: &[Message],
@@ -1481,6 +1485,52 @@ mod tests {
         assert!(
             headers.get(reqwest::header::AUTHORIZATION).is_none(),
             "should not have Authorization header"
+        );
+    }
+
+    #[test]
+    fn build_request_headers_includes_anthropic_version_when_model_in_body() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com".to_string(),
+                auth_token: Some("test-key".to_string()),
+                auth_style: AuthStyle::XApiKey,
+                anthropic_version: "2023-06-01".to_string(),
+                include_model_in_body: true,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let headers = backend
+            .build_request_headers()
+            .expect("should build headers");
+        let version_header = headers.get("anthropic-version").expect(
+            "anthropic-version header should be present when include_model_in_body is true",
+        );
+        assert_eq!(version_header.to_str().unwrap(), "2023-06-01");
+    }
+
+    #[test]
+    fn build_request_headers_omits_anthropic_version_when_model_not_in_body() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            AnthropicCompatConfig {
+                endpoint: "https://test.example.com".to_string(),
+                auth_token: Some("test-token".to_string()),
+                auth_style: AuthStyle::Bearer,
+                anthropic_version: "vertex-2023-10-16".to_string(),
+                include_model_in_body: false,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let headers = backend
+            .build_request_headers()
+            .expect("should build headers");
+        assert!(
+            headers.get("anthropic-version").is_none(),
+            "anthropic-version header should be absent when include_model_in_body is false"
         );
     }
 }
