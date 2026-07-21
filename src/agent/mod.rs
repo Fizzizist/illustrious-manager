@@ -190,6 +190,13 @@ impl Agent {
             .clone()
     }
 
+    pub fn max_tokens(&self) -> u32 {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_tokens
+    }
+
     pub fn set_model(&self, model: String) {
         self.config.lock().unwrap_or_else(|e| e.into_inner()).model = model;
     }
@@ -602,32 +609,26 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     if text_accumulated.is_empty()
-                        && config.max_tokens > 0
-                        && last_output_tokens >= config.max_tokens
                         && max_token_retries_used < max_token_retries
+                        && ((config.max_tokens > 0 && last_output_tokens >= config.max_tokens)
+                            || last_output_tokens == 0)
                     {
-                        let error = anyhow::Error::from(
-                            crate::backend::error::BackendError::MaxTokensExceeded {
-                                input_tokens: peak_input_tokens,
-                                output_tokens: last_output_tokens,
-                            },
-                        );
-                        record_retry(&format!("{error:#}"), &history_arc, &session, &event_tx)
-                            .await;
-                        max_token_retries_used += 1;
-                        iterations -= 1;
-                        continue 'outer;
-                    }
-
-                    if text_accumulated.is_empty()
-                        && tool_calls.is_empty()
-                        && last_output_tokens == 0
-                        && max_token_retries_used < max_token_retries
-                    {
-                        let error_msg = "Empty response: stream produced no text, no thinking, \
-                             no tool calls, and no usage. This may indicate a truncated stream \
-                             or a max_tokens budget consumed entirely by internal reasoning.";
-                        record_retry(error_msg, &history_arc, &session, &event_tx).await;
+                        let error_msg =
+                            if config.max_tokens > 0 && last_output_tokens >= config.max_tokens {
+                                let error = anyhow::Error::from(
+                                    crate::backend::error::BackendError::MaxTokensExceeded {
+                                        input_tokens: peak_input_tokens,
+                                        output_tokens: last_output_tokens,
+                                    },
+                                );
+                                format!("{error:#}")
+                            } else {
+                                "Empty response: stream produced no text, no tool calls, and no \
+                             usage. This may indicate a truncated stream or a max_tokens budget \
+                             consumed entirely by internal reasoning."
+                                    .to_string()
+                            };
+                        record_retry(&error_msg, &history_arc, &session, &event_tx).await;
                         max_token_retries_used += 1;
                         iterations -= 1;
                         continue 'outer;
@@ -1206,14 +1207,6 @@ mod tests {
             Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
             Ok(StreamEvent::ThinkingSignature("sig_abc123".to_string())),
             Ok(StreamEvent::TextDelta(text.to_string())),
-            Ok(StreamEvent::Done),
-        ]
-    }
-
-    fn thinking_only_response(thinking: &str) -> Vec<Result<StreamEvent>> {
-        vec![
-            Ok(StreamEvent::ThinkingDelta(thinking.to_string())),
-            Ok(StreamEvent::ThinkingSignature("sig_def456".to_string())),
             Ok(StreamEvent::Done),
         ]
     }
@@ -6415,6 +6408,35 @@ mod tests {
         assert_eq!(
             error_count, 2,
             "should have 2 [ERROR] messages in history (one per retry); got {error_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_stream_with_zero_retries_emits_response_complete_immediately() {
+        let empty_response: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::Done)];
+        let backend = SequencedBackend::new(vec![empty_response]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 0,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should not emit Retrying when max_token_retries=0; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
+            "should emit ResponseComplete(\"\") immediately with zero retries; got {events:?}"
         );
     }
 }

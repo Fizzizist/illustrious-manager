@@ -1290,6 +1290,12 @@ mod tests {
             "fast-model",
             "agent model should be updated to the role's model"
         );
+        assert_eq!(
+            ctx.agent.max_tokens(),
+            16384,
+            "agent max_tokens should be updated to the openai_compat default (16384); got {}",
+            ctx.agent.max_tokens()
+        );
         assert!(
             ctx.app
                 .conversation
