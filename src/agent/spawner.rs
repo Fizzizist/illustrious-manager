@@ -9,7 +9,7 @@ use crate::session::Session;
 use crate::tools::ToolRegistry;
 use crate::types::{AgentEvent, RequestConfig};
 
-use super::{Agent, DEFAULT_MAX_TOKENS};
+use super::Agent;
 
 /// Outcome of a headless sub-agent run.
 pub struct HeadlessOutcome {
@@ -260,7 +260,7 @@ pub async fn spawn_agent_with_selection(
 ) -> anyhow::Result<Agent> {
     let request_config = RequestConfig {
         model: selection.model,
-        max_tokens: DEFAULT_MAX_TOKENS,
+        max_tokens: selection.max_tokens,
         tools: tools.definitions(),
         thinking: None,
         cancel_token: None,

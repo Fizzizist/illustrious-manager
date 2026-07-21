@@ -170,10 +170,7 @@ impl AnthropicCompatSseParser {
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("message_delta missing 'stop_reason'"))?
                     .to_string();
-                let output_tokens = json["usage"]["output_tokens"]
-                    .as_u64()
-                    .ok_or_else(|| anyhow::anyhow!("message_delta missing 'output_tokens'"))?
-                    as u32;
+                let output_tokens = json["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
                 if stop_reason == "max_tokens" {
                     return Err(BackendError::MaxTokensExceeded {
                         input_tokens: self.input_tokens,
@@ -1565,5 +1562,27 @@ mod tests {
         );
         let result = backend.build_request_headers();
         assert!(result.is_err(), "carriage return in API key should reject");
+    }
+
+    #[test]
+    fn message_delta_without_usage_defaults_to_zero() {
+        let mut parser = AnthropicCompatSseParser::new();
+        parser
+            .parse(r#"{"type":"message_start","message":{"usage":{"input_tokens":100}}}"#)
+            .expect("message_start");
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#;
+        let result = parser.parse(data).expect("should parse successfully");
+        match result {
+            Some(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+                stop_reason,
+            }) => {
+                assert_eq!(input_tokens, 100);
+                assert_eq!(output_tokens, 0, "missing usage should default to 0");
+                assert_eq!(stop_reason, "end_turn");
+            }
+            other => panic!("expected Usage event, got {:?}", other),
+        }
     }
 }
