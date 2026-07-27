@@ -147,7 +147,13 @@ impl OpenAiCompatSseParser {
 
         // No early return after ThinkingDelta — fall through so a co-located
         // `content` field in the same chunk is also processed.
-        if let Some(reasoning) = json["choices"][0]["delta"]["reasoning_content"].as_str()
+        //
+        // Providers disagree on the field name: older vLLM and z.ai emit
+        // `reasoning_content`, newer vLLM builds emit `reasoning`.
+        let delta = &json["choices"][0]["delta"];
+        if let Some(reasoning) = delta["reasoning_content"]
+            .as_str()
+            .or_else(|| delta["reasoning"].as_str())
             && !reasoning.is_empty()
         {
             self.event_buffer
@@ -750,6 +756,54 @@ mod tests {
         let data = r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#;
         let event = p.parse(data).unwrap();
         assert!(matches!(event, Some(StreamEvent::ThinkingDelta(t)) if t == "step 1"));
+    }
+
+    #[test]
+    fn parser_reasoning_field_emits_thinking_delta() {
+        // Regression: newer vLLM builds emit `reasoning` rather than
+        // `reasoning_content`; thinking was silently dropped.
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"delta":{"reasoning":"step 1"}}]}"#;
+        let event = p.parse(data).unwrap();
+        assert!(matches!(event, Some(StreamEvent::ThinkingDelta(t)) if t == "step 1"));
+    }
+
+    #[test]
+    fn parser_reasoning_field_and_content_in_same_chunk_both_emitted() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"delta":{"reasoning":"think","content":"answer"}}]}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e1, StreamEvent::ThinkingDelta(ref t) if t == "think"),
+            "first event must be ThinkingDelta; got {e1:?}"
+        );
+        let e2 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e2, StreamEvent::TextDelta(ref t) if t == "answer"),
+            "second event must be TextDelta; got {e2:?}"
+        );
+        assert!(p.event_buffer.is_empty());
+    }
+
+    #[test]
+    fn parser_reasoning_content_takes_precedence_over_reasoning() {
+        // Both present: prefer the explicit `reasoning_content` and emit once.
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data =
+            r#"{"choices":[{"delta":{"reasoning_content":"canonical","reasoning":"alias"}}]}"#;
+        p.fill_buffer(data).expect("parse ok");
+
+        let e1 = p.event_buffer.remove(0);
+        assert!(
+            matches!(e1, StreamEvent::ThinkingDelta(ref t) if t == "canonical"),
+            "must emit reasoning_content once; got {e1:?}"
+        );
+        assert!(
+            p.event_buffer.is_empty(),
+            "must not emit a duplicate ThinkingDelta"
+        );
     }
 
     #[test]
