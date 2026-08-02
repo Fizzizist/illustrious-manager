@@ -1457,8 +1457,9 @@ mod tests {
 
     #[tokio::test]
     async fn bash_command_esc_cancels_and_records_cancellation_result() {
-        use crate::frontend::tui::tui_app::{handle_agent_event, handle_esc};
+        use crate::frontend::tui::tui_app::{KeyDisposition, handle_agent_event};
         use crate::types::ContentBlock;
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         let dir = tempfile::TempDir::new().expect("temp dir");
         let session_inner = crate::session::Session::new(None, dir.path().to_path_buf())
@@ -1498,7 +1499,13 @@ mod tests {
         assert_eq!(ctx.app.state, AppState::RunningBash);
 
         // Simulate Esc — cancels the token
-        handle_esc(ctx.app);
+        let esc_key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let disposition = ctx.app.application_command(&esc_key);
+        assert_eq!(
+            disposition,
+            KeyDisposition::Consumed,
+            "Esc in RunningBash should be Consumed by application_command"
+        );
 
         // Drop ctx so app is accessible
         drop(ctx);

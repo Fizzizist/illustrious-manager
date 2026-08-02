@@ -48,10 +48,20 @@ pub enum AppState {
     RunningBash,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppFocus {
     Input,
     Conversation,
+}
+
+/// Semantic result of a key-dispatch seam. The event loop consults
+/// `application_command` first; only when it returns `PassThrough` does
+/// dispatch descend to `focus_command`, then to the state machine.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyDisposition {
+    Quit,
+    Consumed,
+    PassThrough,
 }
 
 pub struct App {
@@ -105,6 +115,7 @@ impl App {
             AppState::RunningBash => self.input.set_mode(AppMode::RunningBash),
         }
         self.pending_g = false;
+        self.pending_w = false;
         self.activity_start = match &self.state {
             AppState::Streaming | AppState::RunningBash | AppState::Compacting => {
                 Some(std::time::Instant::now())
@@ -340,7 +351,38 @@ impl App {
         }
     }
 
-    pub fn handle_global_key(&mut self, key: &KeyEvent) -> bool {
+    pub fn application_command(&mut self, key: &KeyEvent) -> KeyDisposition {
+        match key {
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            } => KeyDisposition::Quit,
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => match self.state {
+                AppState::Streaming | AppState::RunningBash => {
+                    if let Some(token) = &self.cancel_token {
+                        token.cancel();
+                    }
+                    KeyDisposition::Consumed
+                }
+                AppState::ToolConfirmation { .. } => {
+                    if let Some(tx) = &self.confirmation_tx {
+                        let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
+                    }
+                    if let Some(token) = &self.cancel_token {
+                        token.cancel();
+                    }
+                    KeyDisposition::Consumed
+                }
+                _ => KeyDisposition::PassThrough,
+            },
+            _ => KeyDisposition::PassThrough,
+        }
+    }
+
+    pub fn focus_command(&mut self, key: &KeyEvent) -> KeyDisposition {
         if self.pending_w {
             let result = match key {
                 KeyEvent {
@@ -349,7 +391,7 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Conversation;
-                    true
+                    KeyDisposition::Consumed
                 }
                 KeyEvent {
                     code: KeyCode::Char('j'),
@@ -357,9 +399,9 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Input;
-                    true
+                    KeyDisposition::Consumed
                 }
-                _ => true,
+                _ => KeyDisposition::Consumed,
             };
             self.pending_w = false;
             return result;
@@ -372,7 +414,7 @@ impl App {
         } = key
         {
             self.pending_w = true;
-            return true;
+            return KeyDisposition::Consumed;
         }
 
         match self.focus {
@@ -384,7 +426,7 @@ impl App {
                 } => {
                     let amount = self.half_page();
                     self.scroll_up(amount);
-                    true
+                    KeyDisposition::Consumed
                 }
                 KeyEvent {
                     code: KeyCode::Char('d'),
@@ -393,7 +435,7 @@ impl App {
                 } => {
                     let amount = self.half_page();
                     self.scroll_down(amount);
-                    true
+                    KeyDisposition::Consumed
                 }
                 KeyEvent {
                     code: KeyCode::Char('g'),
@@ -407,7 +449,7 @@ impl App {
                     } else {
                         self.pending_g = true;
                     }
-                    true
+                    KeyDisposition::Consumed
                 }
                 KeyEvent {
                     code: KeyCode::Char('G'),
@@ -416,14 +458,14 @@ impl App {
                 } if modifiers.contains(KeyModifiers::SHIFT) => {
                     self.scroll_offset = 0;
                     self.pending_g = false;
-                    true
+                    KeyDisposition::Consumed
                 }
                 _ => {
                     self.pending_g = false;
-                    true
+                    KeyDisposition::Consumed
                 }
             },
-            AppFocus::Input => false,
+            AppFocus::Input => KeyDisposition::PassThrough,
         }
     }
 
@@ -435,6 +477,7 @@ impl App {
         self.session_picker = None;
         self.pending_session_refs.clear();
         self.pending_g = false;
+        self.pending_w = false;
         self.activity_start = None;
     }
 }
@@ -530,33 +573,6 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
 
     if let Some(ref mut picker) = app.tasks_picker {
         picker.render(frame, frame.area());
-    }
-}
-
-/// Handle an Esc keypress. In `Streaming` state, fires the cancel token. In
-/// `ToolConfirmation` state, sends `Rejected` and fires the cancel token. In
-/// all other states, this is a no-op.
-pub fn handle_esc(app: &mut App) {
-    match app.state {
-        AppState::Streaming => {
-            if let Some(token) = &app.cancel_token {
-                token.cancel();
-            }
-        }
-        AppState::ToolConfirmation { .. } => {
-            if let Some(tx) = &app.confirmation_tx {
-                let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
-            }
-            if let Some(token) = &app.cancel_token {
-                token.cancel();
-            }
-        }
-        AppState::RunningBash => {
-            if let Some(token) = &app.cancel_token {
-                token.cancel();
-            }
-        }
-        _ => {}
     }
 }
 
@@ -866,15 +882,17 @@ async fn run_app(
                     if matches!(app.state, AppState::Input) {
                         app.input.insert_paste(text);
                     }
-                } else if let Event::Key(key) = terminal_event && !app.handle_global_key(&key) {
-                    match app.state {
+                } else if let Event::Key(key) = terminal_event {
+                    match app.application_command(&key) {
+                        KeyDisposition::Quit => break,
+                        KeyDisposition::Consumed => {}
+                        KeyDisposition::PassThrough => {
+                            if let KeyDisposition::Consumed = app.focus_command(&key) {
+                                continue;
+                            }
+                            match app.state {
                         AppState::Input => {
                             match key {
-                                KeyEvent {
-                                    code: KeyCode::Char('c'),
-                                    modifiers: KeyModifiers::CONTROL,
-                                    ..
-                                } => break,
                                 KeyEvent {
                                     code: KeyCode::Enter,
                                     modifiers: KeyModifiers::NONE,
@@ -901,26 +919,12 @@ async fn run_app(
                                         }
                                     }
                                 }
-                                KeyEvent {
-                                    code: KeyCode::Enter,
-                                    modifiers: KeyModifiers::NONE,
-                                    ..
-                                } => {
-                                    app.input.input(key);
-                                }
                                 _ => {
                                     app.input.input(key);
                                 }
                             }
                         },
                         AppState::SessionPicker => {
-                            if let KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } = key {
-                                break;
-                            }
                             if let Some(ref mut picker) = app.session_picker {
                                 let action = picker.handle_key(key);
                                 match action {
@@ -998,13 +1002,6 @@ async fn run_app(
                             }
                         },
                         AppState::TasksPicker => {
-                            if let KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } = key {
-                                break;
-                            }
                             if let Some(ref mut picker) = app.tasks_picker {
                                 let action = picker.handle_key(key);
                                 if matches!(action, TasksPickerAction::Close) {
@@ -1025,18 +1022,6 @@ async fn run_app(
                                     code: KeyCode::Char('n') | KeyCode::Char('N'),
                                     ..
                                 } => Some(ConfirmationResponse::Rejected),
-                                KeyEvent {
-                                    code: KeyCode::Esc,
-                                    ..
-                                } => {
-                                    handle_esc(&mut app);
-                                    None
-                                }
-                                KeyEvent {
-                                    code: KeyCode::Char('c'),
-                                    modifiers: KeyModifiers::CONTROL,
-                                    ..
-                                } => break,
                                 _ => None,
                             };
                             if let Some(response) = response {
@@ -1067,14 +1052,6 @@ async fn run_app(
                             }
                         }
                         AppState::Compacting => {
-                            if let KeyEvent {
-                                code: KeyCode::Char('c'),
-                                modifiers: KeyModifiers::CONTROL,
-                                ..
-                            } = key
-                            {
-                                break;
-                            }
                             if let KeyEvent { code: KeyCode::Esc, .. } = key {
                                 if let Some(handle) = app.compaction_task.take() {
                                     handle.abort();
@@ -1083,22 +1060,12 @@ async fn run_app(
                                 app.scroll_offset = 0;
                             }
                         },
-                        _ => {
-                            if let
-                                KeyEvent {
-                                    code: KeyCode::Char('c'),
-                                    modifiers: KeyModifiers::CONTROL,
-                                    ..
-                                } = key {
-                                    break;
-                                }
-                            if let KeyEvent { code: KeyCode::Esc, .. } = key {
-                                handle_esc(&mut app);
-                            }
-                        }
+                        _ => {}
                     }
                 }
             }
+        }
+        }
         }
     }
 
@@ -2609,6 +2576,14 @@ mod tests {
 
     // ── Cancellation / Esc behaviour ─────────────────────────────────────
 
+    fn esc_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    }
+
+    fn ctrl_c_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
     #[test]
     fn esc_during_streaming_cancels_token() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
@@ -2621,7 +2596,8 @@ mod tests {
             "token should not be cancelled before Esc"
         );
 
-        handle_esc(&mut app);
+        let d = app.application_command(&esc_key());
+        assert_eq!(d, KeyDisposition::Consumed);
 
         assert!(
             token.is_cancelled(),
@@ -2630,14 +2606,19 @@ mod tests {
     }
 
     #[test]
-    fn esc_in_input_state_is_noop() {
+    fn esc_in_input_state_is_passthrough() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let token = CancellationToken::new();
         app.cancel_token = Some(token.clone());
         app.set_state(AppState::Input);
         app.set_input("hello");
 
-        handle_esc(&mut app);
+        let d = app.application_command(&esc_key());
+        assert_eq!(
+            d,
+            KeyDisposition::PassThrough,
+            "Esc in Input should pass through to the state machine (vim)"
+        );
 
         assert!(
             !token.is_cancelled(),
@@ -2662,7 +2643,8 @@ mod tests {
             index: 1,
         });
 
-        handle_esc(&mut app);
+        let d = app.application_command(&esc_key());
+        assert_eq!(d, KeyDisposition::Consumed);
 
         assert!(
             token.is_cancelled(),
@@ -2673,6 +2655,213 @@ mod tests {
             response,
             ConfirmationResponse::Rejected,
             "Esc in ToolConfirmation must send Rejected"
+        );
+    }
+
+    #[test]
+    fn esc_during_running_bash_cancels_token() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::RunningBash);
+
+        let d = app.application_command(&esc_key());
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert!(token.is_cancelled());
+    }
+
+    // ── ctrl+c quit — universal across all states × focuses ─────────────
+
+    #[test]
+    fn ctrl_c_quits_from_every_state_and_focus() {
+        let states: Vec<AppState> = vec![
+            AppState::Input,
+            AppState::Streaming,
+            AppState::ToolConfirmation {
+                name: "bash".to_string(),
+                input: serde_json::json!({}),
+                index: 1,
+            },
+            AppState::SessionPicker,
+            AppState::TasksPicker,
+            AppState::Compacting,
+            AppState::RunningBash,
+        ];
+
+        for state in &states {
+            for focus in &[AppFocus::Input, AppFocus::Conversation] {
+                let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+                app.set_state(state.clone());
+                app.focus = focus.clone();
+                let d = app.application_command(&ctrl_c_key());
+                assert_eq!(
+                    d,
+                    KeyDisposition::Quit,
+                    "ctrl+c should Quit from state={state:?} focus={focus:?}"
+                );
+            }
+        }
+    }
+
+    // ── pending_w regression: ctrl+c immediately after Ctrl+W ────────────
+
+    #[test]
+    fn ctrl_c_quits_immediately_after_ctrl_w() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Input;
+
+        // Press Ctrl+W — sets pending_w
+        let w_key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        let d = app.focus_command(&w_key);
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert!(app.pending_w, "pending_w should be set after Ctrl+W");
+
+        // Press Ctrl+C — application_command is checked first, so it must Quit
+        // regardless of pending_w.
+        let d = app.application_command(&ctrl_c_key());
+        assert_eq!(
+            d,
+            KeyDisposition::Quit,
+            "ctrl+c must Quit even when pending_w is set"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_immediately_after_ctrl_w_conversation_focus() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.focus = AppFocus::Conversation;
+
+        let w_key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        let _ = app.focus_command(&w_key);
+        assert!(app.pending_w);
+
+        let d = app.application_command(&ctrl_c_key());
+        assert_eq!(d, KeyDisposition::Quit);
+    }
+
+    // ── Esc during streaming under conversation focus (bug fix) ──────────
+
+    #[test]
+    fn esc_cancels_stream_under_conversation_focus() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let token = CancellationToken::new();
+        app.cancel_token = Some(token.clone());
+        app.set_state(AppState::Streaming);
+        app.focus = AppFocus::Conversation;
+
+        let d = app.application_command(&esc_key());
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert!(token.is_cancelled());
+    }
+
+    // ── focus_command behavior preservation ────────────────────────────
+
+    #[test]
+    fn focus_command_conversation_consumes_unconsumed_keys() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Conversation;
+
+        let d = app.focus_command(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(d, KeyDisposition::Consumed);
+    }
+
+    #[test]
+    fn focus_command_input_passes_through_ordinary_keys() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Input;
+
+        let d = app.focus_command(&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(d, KeyDisposition::PassThrough);
+    }
+
+    #[test]
+    fn focus_command_conversation_ctrl_u_scrolls() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Conversation;
+
+        let d = app.focus_command(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert!(app.scroll_offset > 0, "ctrl+u should scroll up");
+    }
+
+    #[test]
+    fn focus_command_conversation_ctrl_d_scrolls() {
+        let mut app = app_with_content(10);
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Conversation;
+        app.scroll_offset = 20;
+
+        let d = app.focus_command(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert_eq!(
+            app.scroll_offset, 15,
+            "ctrl+d should scroll down by half page"
+        );
+    }
+
+    #[test]
+    fn focus_command_ctrl_w_switches_focus_to_conversation() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Input;
+
+        let w_key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        let d = app.focus_command(&w_key);
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert!(app.pending_w);
+
+        let k_key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        let d = app.focus_command(&k_key);
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert_eq!(app.focus, AppFocus::Conversation);
+        assert!(!app.pending_w, "pending_w should be cleared after chord");
+    }
+
+    #[test]
+    fn focus_command_ctrl_w_then_j_switches_to_input() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Input);
+        app.focus = AppFocus::Conversation;
+
+        let w_key = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL);
+        let _ = app.focus_command(&w_key);
+
+        let j_key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        let d = app.focus_command(&j_key);
+        assert_eq!(d, KeyDisposition::Consumed);
+        assert_eq!(app.focus, AppFocus::Input);
+        assert!(!app.pending_w);
+    }
+
+    // ── pending_w cleared by set_state ──────────────────────────────────
+
+    #[test]
+    fn set_state_clears_pending_w() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.pending_w = true;
+
+        app.set_state(AppState::Streaming);
+        assert!(!app.pending_w, "Streaming state should clear pending_w");
+
+        app.pending_w = true;
+        app.set_state(AppState::Input);
+        assert!(!app.pending_w, "Input state should clear pending_w");
+    }
+
+    #[test]
+    fn reset_for_session_switch_clears_pending_w() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.pending_w = true;
+        app.activity_start = Some(std::time::Instant::now());
+        app.reset_for_session_switch();
+        assert!(
+            !app.pending_w,
+            "pending_w should be false after reset_for_session_switch"
         );
     }
 
