@@ -54,9 +54,6 @@ pub enum AppFocus {
     Conversation,
 }
 
-/// Semantic result of a key-dispatch seam. The event loop consults
-/// `application_command` first; only when it returns `PassThrough` does
-/// dispatch descend to `focus_command`, then to the state machine.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeyDisposition {
     Quit,
