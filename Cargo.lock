@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "illustrious-manager"
-version = "0.12.3"
+version = "0.12.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3897,13 +3897,14 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "search-semantically"
-version = "0.1.10"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37fa8ddc3964086ff402bc070f822ddaed4e950cb81bd8d98571d249f210adb7"
+checksum = "a2bd47b3de27024924a0738552aa6ff439206f5fa97d2283134d13cd798c9b57"
 dependencies = [
  "anyhow",
  "dirs",
  "ignore",
+ "libloading 0.9.0",
  "ndarray",
  "ort",
  "reqwest",
