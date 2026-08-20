@@ -3840,6 +3840,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: crate::config::VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3881,6 +3882,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: crate::config::VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),

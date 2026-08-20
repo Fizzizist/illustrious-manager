@@ -5,7 +5,7 @@
 //! ensures the main agent, sub-agents, and role-switched agents all resolve
 //! to the same per-backend default.
 
-/// Vertex AI — no config override mechanism exists; always 8192.
+/// Vertex AI — used when `[vertex].max_tokens` is absent.
 pub const VERTEX: u32 = 8_192;
 
 /// z.ai — no config override field; always 8192.

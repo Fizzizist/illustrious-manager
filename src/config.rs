@@ -169,6 +169,8 @@ project = ""
 region = "us-east5"
 # Model to use
 model = "claude-sonnet-4-20250514"
+# Optional: override max_tokens for this backend
+# max_tokens = 8192
 
 [zai]
 # Required: your z.ai API key
@@ -344,6 +346,8 @@ pub struct VertexConfig {
     pub region: String,
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -1122,6 +1126,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1148,6 +1153,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "my-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1173,6 +1179,7 @@ mod tests {
         let config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1199,6 +1206,7 @@ mod tests {
         let config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1228,6 +1236,7 @@ mod tests {
         let config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1256,6 +1265,7 @@ mod tests {
         let config = AppConfig {
             backend: "invalid".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1282,6 +1292,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "my-gcp-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1313,6 +1324,7 @@ mod tests {
         let config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1343,6 +1355,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1376,6 +1389,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1404,6 +1418,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1463,6 +1478,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1515,6 +1531,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1572,6 +1589,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1598,6 +1616,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1632,6 +1651,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1670,6 +1690,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1703,6 +1724,7 @@ mod tests {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1729,6 +1751,7 @@ mod tests {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1759,6 +1782,7 @@ mod tests {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1788,6 +1812,7 @@ mod tests {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1817,6 +1842,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1858,6 +1884,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "p".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1892,6 +1919,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "zai".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1926,6 +1954,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -1969,6 +1998,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2007,6 +2037,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2069,6 +2100,7 @@ mod tests {
         let config = AppConfig {
             backend: "ollama".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2256,6 +2288,7 @@ mod tests {
         let config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2285,6 +2318,7 @@ mod tests {
         let config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2320,6 +2354,7 @@ mod tests {
         let config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2355,6 +2390,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2435,6 +2471,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2482,6 +2519,7 @@ mod tests {
         let config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2518,6 +2556,7 @@ mod tests {
         let config = AppConfig {
             backend: "openai_compat".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2609,6 +2648,7 @@ mod tests {
         let config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2638,6 +2678,7 @@ mod tests {
         let config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2672,6 +2713,7 @@ mod tests {
         let config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2708,6 +2750,7 @@ mod tests {
         let config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2746,6 +2789,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2784,6 +2828,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "opencode_go".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2841,6 +2886,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2887,6 +2933,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2918,6 +2965,27 @@ mod tests {
             msg.contains("grok-code") && msg.contains("both"),
             "error should mention duplicate model and 'both'; got: {msg}"
         );
+    }
+
+    #[test]
+    fn vertex_config_max_tokens_defaults_to_none() {
+        let toml_str = r#"
+            [vertex]
+            project = "my-project"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(config.vertex.max_tokens.is_none());
+    }
+
+    #[test]
+    fn vertex_config_parses_max_tokens_override() {
+        let toml_str = r#"
+            [vertex]
+            project = "my-project"
+            max_tokens = 32768
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(config.vertex.max_tokens, Some(32768));
     }
 
     // ── anthropic config tests ────────────────────────────────────────────
@@ -2966,6 +3034,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -2995,6 +3064,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3026,6 +3096,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3060,6 +3131,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3093,6 +3165,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3128,6 +3201,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3158,6 +3232,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3193,6 +3268,7 @@ mod tests {
         let config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3227,6 +3303,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3262,6 +3339,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3287,6 +3365,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3333,6 +3412,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3371,6 +3451,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3414,6 +3495,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -3457,6 +3539,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),

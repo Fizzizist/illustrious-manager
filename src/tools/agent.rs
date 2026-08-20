@@ -401,6 +401,7 @@ mod tests {
         let app_config = Arc::new(AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "test".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-test".to_string(),

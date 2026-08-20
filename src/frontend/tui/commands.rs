@@ -565,6 +565,7 @@ mod tests {
         AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),

@@ -167,7 +167,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
-                    max_tokens: defaults::VERTEX,
+                    max_tokens: self.config.vertex.max_tokens.unwrap_or(defaults::VERTEX),
                 })
             }
             "zai" => {
@@ -366,6 +366,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -407,6 +408,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -441,6 +443,7 @@ mod tests {
         let mut config_missing = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -501,6 +504,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "shared-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -865,6 +869,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -910,6 +915,7 @@ mod tests {
         let mut config = AppConfig {
             backend: "anthropic".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -961,6 +967,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
@@ -992,6 +999,56 @@ mod tests {
             selection.max_tokens,
             super::defaults::VERTEX,
             "vertex should use vertex default (8192)"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_vertex_max_tokens_from_config_override() {
+        use crate::config::{AppConfig, ModelRole, RetryConfig, ToolsConfig, VertexConfig};
+        use std::collections::BTreeMap;
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "test-role".to_string(),
+            ModelRole {
+                backend: "vertex".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "vertex".to_string(),
+            vertex: VertexConfig {
+                max_tokens: Some(32768),
+                project: "proj".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let factory = super::BackendFactory::new(config);
+
+        let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+        factory
+            .vertex_auth_cache
+            .seed("proj", "us-east5", fake_provider);
+
+        let selection = factory
+            .for_role("test-role")
+            .await
+            .expect("for_role should succeed");
+        assert_eq!(
+            selection.max_tokens, 32768,
+            "config override should take precedence over the vertex default"
         );
     }
 }

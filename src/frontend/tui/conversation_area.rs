@@ -1087,6 +1087,7 @@ mod tests {
         let config = AppConfig {
             backend: "vertex".to_string(),
             vertex: VertexConfig {
+                max_tokens: None,
                 project: "my-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
