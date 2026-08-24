@@ -11,7 +11,7 @@ pub const VERTEX: u32 = 8_192;
 /// z.ai — no config override field; always 8192.
 pub const ZAI: u32 = 8_192;
 
-/// Ollama — no config override field; always 8192.
+/// Ollama — used when `[ollama].max_tokens` is absent.
 pub const OLLAMA: u32 = 8_192;
 
 /// OpenAI-compatible — matches the config example in CLAUDE.md.

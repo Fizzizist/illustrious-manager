@@ -185,6 +185,8 @@ model = "glm-5.1"
 # model = "gpt-oss:120b"
 # Base URL for Ollama API (change for self-hosted)
 # base_url = "https://ollama.com/api/chat"
+# Optional: override max_tokens for this backend
+# max_tokens = 8192
 
 # [openai_compat]
 # Required: base URL of the OpenAI-compatible endpoint (without /chat/completions)
@@ -358,6 +360,8 @@ pub struct OllamaConfig {
     pub model: String,
     #[serde(default = "default_ollama_base_url")]
     pub base_url: String,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 fn default_ollama_model() -> String {
@@ -1761,6 +1765,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1792,6 +1797,7 @@ mod tests {
                 api_key: "".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "http://localhost:11434/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1822,6 +1828,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1852,6 +1859,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1964,6 +1972,7 @@ mod tests {
                 api_key: "k".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2047,6 +2056,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2110,6 +2120,7 @@ mod tests {
                 api_key: "secret-key".to_string(),
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: None,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2986,6 +2997,48 @@ mod tests {
         "#;
         let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
         assert_eq!(config.vertex.max_tokens, Some(32768));
+    }
+
+    // ── ollama config tests ───────────────────────────────────────────────
+
+    #[test]
+    fn ollama_config_max_tokens_defaults_to_none() {
+        let toml_str = r#"
+            [vertex]
+            project = "my-project"
+            [ollama]
+            api_key = "key"
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(config.ollama.is_some());
+        assert!(
+            config
+                .ollama
+                .as_ref()
+                .expect("ollama config present")
+                .max_tokens
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn ollama_config_parses_max_tokens_override() {
+        let toml_str = r#"
+            [vertex]
+            project = "my-project"
+            [ollama]
+            api_key = "key"
+            max_tokens = 32768
+        "#;
+        let config: AppConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(
+            config
+                .ollama
+                .as_ref()
+                .expect("ollama config present")
+                .max_tokens,
+            Some(32768)
+        );
     }
 
     // ── anthropic config tests ────────────────────────────────────────────

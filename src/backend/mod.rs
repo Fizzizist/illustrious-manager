@@ -199,7 +199,7 @@ impl BackendFactory {
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
-                    max_tokens: defaults::OLLAMA,
+                    max_tokens: ollama_config.max_tokens.unwrap_or(defaults::OLLAMA),
                 })
             }
             "openai_compat" => {
@@ -1049,6 +1049,58 @@ mod tests {
         assert_eq!(
             selection.max_tokens, 32768,
             "config override should take precedence over the vertex default"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_ollama_max_tokens_from_config_override() {
+        use crate::config::{
+            AppConfig, ModelRole, OllamaConfig, RetryConfig, ToolsConfig, VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        let mut models = BTreeMap::new();
+        models.insert(
+            "test-role".to_string(),
+            ModelRole {
+                backend: "ollama".to_string(),
+                model: "gpt-oss:120b".to_string(),
+            },
+        );
+        let config = AppConfig {
+            backend: "ollama".to_string(),
+            vertex: VertexConfig {
+                max_tokens: None,
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "https://ollama.com/api/chat".to_string(),
+                max_tokens: Some(32768),
+            }),
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models,
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        let factory = super::BackendFactory::new(config);
+
+        let selection = factory
+            .for_role("test-role")
+            .await
+            .expect("for_role should succeed");
+        assert_eq!(
+            selection.max_tokens, 32768,
+            "config override should take precedence over the ollama default"
         );
     }
 }
