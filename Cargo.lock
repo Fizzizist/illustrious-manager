@@ -1989,7 +1989,7 @@ dependencies = [
 
 [[package]]
 name = "illustrious-manager"
-version = "0.12.6"
+version = "0.12.7"
 dependencies = [
  "anyhow",
  "async-trait",
