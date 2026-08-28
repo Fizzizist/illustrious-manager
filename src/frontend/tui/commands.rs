@@ -569,7 +569,6 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
-                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1259,7 +1258,6 @@ mod tests {
             model: "fast-model".to_string(),
             max_tokens: None,
             reasoning: ReasoningStyleConfig::None,
-            vision: false,
         });
         config.models.insert(
             "fast".to_string(),

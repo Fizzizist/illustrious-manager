@@ -74,7 +74,6 @@ mod tests {
             base_url: crate::config::ANTHROPIC_DEFAULT_BASE_URL.to_string(),
             model: "claude-opus-4-8".to_string(),
             max_tokens: None,
-            vision: false,
         }
     }
 

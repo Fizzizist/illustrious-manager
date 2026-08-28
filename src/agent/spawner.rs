@@ -117,13 +117,10 @@ pub fn clamp_confirmation(
 
 /// Builds a fresh `ToolRegistry` for a sub-agent.
 ///
-/// The closure receives the sub-agent's session and a `vision` flag (resolved
-/// from the sub-agent's role) so that session-bound tools (e.g. task tools)
-/// are wired to the sub-agent rather than the parent, and `image_viewer` is
-/// registered only when the sub-agent's backend supports vision.
-pub type RegistryBuilder = Box<
-    dyn Fn(Arc<tokio::sync::Mutex<Session>>, bool) -> anyhow::Result<ToolRegistry> + Send + Sync,
->;
+/// The closure receives the sub-agent's session so that session-bound tools
+/// (e.g. task tools) are wired to the sub-agent rather than the parent.
+pub type RegistryBuilder =
+    Box<dyn Fn(Arc<tokio::sync::Mutex<Session>>) -> anyhow::Result<ToolRegistry> + Send + Sync>;
 
 /// Factory used by `AgentTool` to spawn independent sub-agents.
 pub struct AgentSpawner {
@@ -174,7 +171,7 @@ impl AgentSpawner {
             }
         };
 
-        let registry = match (self.registry_builder)(Arc::clone(&session), selection.vision) {
+        let registry = match (self.registry_builder)(Arc::clone(&session)) {
             Ok(r) => r,
             Err(e) => {
                 return HeadlessOutcome {

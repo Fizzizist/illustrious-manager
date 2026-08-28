@@ -112,7 +112,6 @@ mod tests {
             anthropic_models: vec!["minimax-m1".to_string()],
             max_tokens: None,
             reasoning: ReasoningStyleConfig::Default,
-            vision: false,
         }
     }
 

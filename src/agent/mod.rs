@@ -2500,7 +2500,6 @@ mod tests {
             backend: Box::new(SequencedBackend::new(vec![])),
             model: "claude-test-model".to_string(),
             max_tokens: 8_192,
-            vision: false,
         };
 
         let tool_config = ToolsConfig {
@@ -3971,7 +3970,6 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
-                vision: false,
             },
             zai: None,
             ollama: None,
@@ -4014,7 +4012,6 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
-                vision: false,
             },
             zai: None,
             ollama: None,

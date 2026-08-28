@@ -1091,7 +1091,6 @@ mod tests {
                 project: "my-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
-                vision: false,
             },
             zai: None,
             ollama: None,

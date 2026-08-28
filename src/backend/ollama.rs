@@ -534,7 +534,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -564,7 +563,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -607,7 +605,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -639,7 +636,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -667,7 +663,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -711,7 +706,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -746,7 +740,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -800,7 +793,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
@@ -813,7 +805,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "http://localhost:11434/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         });
         assert!(result.is_ok(), "should accept empty key for self-hosted");
     }
@@ -825,7 +816,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         });
         assert!(backend.is_ok());
         let b = backend.unwrap();
@@ -913,7 +903,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -940,7 +929,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -1046,7 +1034,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -1088,7 +1075,6 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
-            vision: false,
         })
         .unwrap();
         let config = RequestConfig {

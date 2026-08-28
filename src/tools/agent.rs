@@ -405,7 +405,6 @@ mod tests {
                 project: "test".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-test".to_string(),
-                vision: false,
             },
             zai: None,
             ollama: None,
@@ -469,7 +468,6 @@ mod tests {
                     backend: Box::new(ImmediateTextBackend),
                     model: "claude-test".to_string(),
                     max_tokens: 8_192,
-                    vision: false,
                 };
 
                 let agent = match spawn_agent_with_selection(
