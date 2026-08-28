@@ -462,7 +462,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
-                content: "file.txt".to_string(),
+                content: vec![ContentBlock::Text("file.txt".to_string())],
                 is_error: false,
             }],
             created_at: 0.0,
@@ -482,7 +482,7 @@ mod tests {
                 is_error,
             } => {
                 assert_eq!(tool_use_id, "t1");
-                assert_eq!(content, "file.txt");
+                assert_eq!(content, &vec![ContentBlock::Text("file.txt".to_string())]);
                 assert!(!is_error);
             }
             _ => panic!("expected tool_result"),
@@ -973,5 +973,52 @@ mod tests {
             4,
             "two pages of size 2 should cover 4 of 5 refs"
         );
+    }
+
+    #[tokio::test]
+    async fn image_content_block_roundtrips_through_session_db() {
+        let dir = TempDir::new().expect("temp dir");
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("create");
+        let msg = Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "img-tool-1".to_string(),
+                content: vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "iVBORw0KGgo=".to_string(),
+                    },
+                    ContentBlock::Text("a picture".to_string()),
+                ],
+                is_error: false,
+            }],
+            created_at: 1234567.0,
+        };
+        session
+            .conversation()
+            .insert_message(&msg)
+            .await
+            .expect("insert");
+        let history = session.conversation().load_history().await.expect("load");
+        assert_eq!(history.len(), 1);
+        match &history[0].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(content.len(), 2);
+                match &content[0] {
+                    ContentBlock::Image { media_type, data } => {
+                        assert_eq!(media_type, "image/png");
+                        assert_eq!(data, "iVBORw0KGgo=");
+                    }
+                    _ => panic!("expected Image block"),
+                }
+                match &content[1] {
+                    ContentBlock::Text(t) => assert_eq!(t, "a picture"),
+                    _ => panic!("expected Text companion"),
+                }
+            }
+            _ => panic!("expected ToolResult"),
+        }
     }
 }

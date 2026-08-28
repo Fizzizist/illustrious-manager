@@ -1,8 +1,8 @@
 ---
 source: src/frontend/tui/conversation_area.rs
+assertion_line: 1124
 expression: terminal.backend()
 ---
-"                                                            "
 "  • backend: vertex                                         "
 "  • compaction.max_context_window_len: 0                    "
 "  • compaction.role: compaction                             "
@@ -21,4 +21,5 @@ expression: terminal.backend()
 "  • vertex.model: claude-sonnet-4-20250514                  "
 "  • vertex.project: my-project                              "
 "  • vertex.region: us-east5                                 "
+"  • vertex.vision: false                                    "
 "                                                            "

@@ -569,6 +569,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1258,6 +1259,7 @@ mod tests {
             model: "fast-model".to_string(),
             max_tokens: None,
             reasoning: ReasoningStyleConfig::None,
+            vision: false,
         });
         config.models.insert(
             "fast".to_string(),
@@ -1553,7 +1555,7 @@ mod tests {
                         content,
                         is_error,
                         ..
-                    } if content.contains("cancelled") && *is_error
+                    } if content.iter().any(|cb| matches!(cb, ContentBlock::Text(t) if t.contains("cancelled"))) && *is_error
                 )
             })
         });

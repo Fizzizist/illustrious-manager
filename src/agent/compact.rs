@@ -81,13 +81,27 @@ pub async fn compact_with(
                         content, is_error, ..
                     } => {
                         let label = if *is_error { "error" } else { "result" };
-                        parts.push(format!("{role_label}: [Tool {label}: {content}]"));
+                        let text: String = content
+                            .iter()
+                            .filter_map(|b| {
+                                if let crate::types::ContentBlock::Text(s) = b {
+                                    Some(s.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        parts.push(format!("{role_label}: [Tool {label}: {text}]"));
                     }
                     crate::types::ContentBlock::Thinking { text, .. } => {
                         parts.push(format!("{role_label}: [Thinking: {text}]"));
                     }
                     crate::types::ContentBlock::RedactedThinking { .. } => {
                         parts.push(format!("{role_label}: [Redacted thinking]"));
+                    }
+                    crate::types::ContentBlock::Image { media_type, .. } => {
+                        parts.push(format!("{role_label}: [Image: {media_type}]"));
                     }
                 }
             }

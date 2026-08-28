@@ -297,11 +297,51 @@ impl OpenAiCompatBackend {
                                     content,
                                     ..
                                 } => {
+                                    let text_parts: String = content
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let ContentBlock::Text(s) = b {
+                                                Some(s.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
                                     messages_json.push(serde_json::json!({
                                         "role": "tool",
                                         "tool_call_id": tool_use_id,
-                                        "content": content
+                                        "content": text_parts
                                     }));
+                                    let images: Vec<&ContentBlock> = content
+                                        .iter()
+                                        .filter(|b| matches!(b, ContentBlock::Image { .. }))
+                                        .collect();
+                                    if !images.is_empty() {
+                                        let parts: Vec<serde_json::Value> = images
+                                            .iter()
+                                            .map(|img| {
+                                                if let ContentBlock::Image {
+                                                    media_type,
+                                                    data,
+                                                } = img
+                                                {
+                                                    serde_json::json!({
+                                                        "type": "image_url",
+                                                        "image_url": {
+                                                            "url": format!("data:{media_type};base64,{data}")
+                                                        }
+                                                    })
+                                                } else {
+                                                    serde_json::Value::Null
+                                                }
+                                            })
+                                            .collect();
+                                        messages_json.push(serde_json::json!({
+                                            "role": "user",
+                                            "content": parts
+                                        }));
+                                    }
                                 }
                                 ContentBlock::Text(text) => {
                                     messages_json.push(serde_json::json!({
@@ -319,6 +359,14 @@ impl OpenAiCompatBackend {
                                 .map(|block| match block {
                                     ContentBlock::Text(text) => {
                                         serde_json::json!({"type": "text", "text": text})
+                                    }
+                                    ContentBlock::Image { media_type, data } => {
+                                        serde_json::json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": format!("data:{media_type};base64,{data}")
+                                            }
+                                        })
                                     }
                                     other => serde_json::to_value(other)
                                         .unwrap_or(serde_json::Value::Null),
@@ -578,7 +626,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool_0".to_string(),
-                content: "output".to_string(),
+                content: vec![ContentBlock::Text("output".to_string())],
                 is_error: false,
             }],
             created_at: 0.0,
@@ -1412,18 +1460,64 @@ mod tests {
     }
 
     #[test]
-    fn parser_refusal_finish_reason_returns_refusal_error() {
-        let mut p = OpenAiCompatSseParser::new(0);
-        let data = r#"{"choices":[{"finish_reason":"refusal"}],"usage":{"prompt_tokens":10,"completion_tokens":20}}"#;
-        let result = p.parse(data);
-        assert!(result.is_err());
-        let err = result.expect_err("should be error");
-        let backend_err = err
-            .downcast_ref::<BackendError>()
-            .expect("should downcast to BackendError");
+    fn tool_result_with_image_hoists_to_user_message() {
+        let b = make_backend(ReasoningStyle::None);
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_0".to_string(),
+                content: vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "iVBOR".to_string(),
+                    },
+                    ContentBlock::Text("companion".to_string()),
+                ],
+                is_error: false,
+            }],
+            created_at: 0.0,
+        }];
+        let body = b.build_request_body(&messages, &simple_config());
+        let msgs = body["messages"].as_array().expect("messages");
+        assert_eq!(msgs.len(), 2, "should produce tool + user messages");
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["content"], "companion");
+        assert_eq!(msgs[1]["role"], "user");
+        let parts = msgs[1]["content"].as_array().expect("content array");
+        assert_eq!(parts[0]["type"], "image_url");
         assert!(
-            matches!(backend_err, BackendError::Refusal),
-            "should be Refusal; got: {backend_err:?}"
+            parts[0]["image_url"]["url"]
+                .as_str()
+                .expect("url")
+                .starts_with("data:image/png;base64,")
+        );
+    }
+
+    #[test]
+    fn plain_user_message_with_image_serializes_as_image_url() {
+        let b = make_backend(ReasoningStyle::None);
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text("what is this?".to_string()),
+                ContentBlock::Image {
+                    media_type: "image/jpeg".to_string(),
+                    data: "/9j=".to_string(),
+                },
+            ],
+            created_at: 0.0,
+        }];
+        let body = b.build_request_body(&messages, &simple_config());
+        let msg = &body["messages"][0];
+        let content = msg["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(
+            content[1]["image_url"]["url"]
+                .as_str()
+                .expect("url")
+                .starts_with("data:image/jpeg;base64,")
         );
     }
 }

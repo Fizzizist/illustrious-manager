@@ -215,15 +215,26 @@ impl App {
                         } else {
                             ConversationRole::ToolResult
                         };
+                        let display: String = content
+                            .iter()
+                            .filter_map(|b| match b {
+                                crate::types::ContentBlock::Text(s) => Some(s.clone()),
+                                crate::types::ContentBlock::Image { media_type, .. } => {
+                                    Some(format!("[image: {}]", media_type))
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         let entry = if is_indexed && entry_role == ConversationRole::ToolResult {
                             ConversationEntry::new_indexed(
                                 entry_role,
-                                content.clone(),
+                                display,
                                 tool_index,
                                 timestamp.clone(),
                             )
                         } else {
-                            ConversationEntry::new(entry_role, content.clone(), timestamp.clone())
+                            ConversationEntry::new(entry_role, display, timestamp.clone())
                         };
                         Some(entry)
                     }
@@ -238,6 +249,13 @@ impl App {
                         Some(ConversationEntry::new(
                             ConversationRole::Thinking,
                             "[redacted thinking]".to_string(),
+                            timestamp.clone(),
+                        ))
+                    }
+                    crate::types::ContentBlock::Image { media_type, .. } => {
+                        Some(ConversationEntry::new(
+                            role.clone(),
+                            format!("[image: {}]", media_type),
                             timestamp.clone(),
                         ))
                     }
@@ -1832,7 +1850,7 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "t1".to_string(),
-                    content: "file.txt".to_string(),
+                    content: vec![ContentBlock::Text("file.txt".to_string())],
                     is_error: false,
                 }],
                 created_at: 0.0,
@@ -1887,17 +1905,17 @@ mod tests {
                 content: vec![
                     ContentBlock::ToolResult {
                         tool_use_id: "t1".to_string(),
-                        content: "file.txt".to_string(),
+                        content: vec![ContentBlock::Text("file.txt".to_string())],
                         is_error: false,
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "t2".to_string(),
-                        content: "/home/user".to_string(),
+                        content: vec![ContentBlock::Text("/home/user".to_string())],
                         is_error: false,
                     },
                     ContentBlock::ToolResult {
                         tool_use_id: "t3".to_string(),
-                        content: "alice".to_string(),
+                        content: vec![ContentBlock::Text("alice".to_string())],
                         is_error: false,
                     },
                 ],

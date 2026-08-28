@@ -202,7 +202,12 @@ impl Agent {
     }
 
     /// Replace the backend and model simultaneously (used by `/role` command).
-    pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String, max_tokens: u32) {
+    pub fn set_backend(
+        &self,
+        backend: Arc<dyn crate::backend::LlmBackend>,
+        model: String,
+        max_tokens: u32,
+    ) {
         *self.backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
         let mut config = self.config.lock().unwrap_or_else(|e| e.into_inner());
         config.model = model;
@@ -296,7 +301,7 @@ impl Agent {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,
-                content: truncated,
+                content: vec![ContentBlock::Text(truncated)],
                 is_error,
             }],
             created_at: now_timestamp(),
@@ -460,8 +465,42 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
+                        if max_token_retries_used < max_token_retries
+                            && e.downcast_ref::<crate::backend::error::BackendError>()
+                                .is_some_and(|be| be.is_bad_request())
+                        {
+                            record_retry_stripping_images(
+                                &format!("{e:#}"),
+                                &history_arc,
+                                &session,
+                                &event_tx,
+                            )
+                            .await;
+                            max_token_retries_used += 1;
+                            iterations -= 1;
+                            continue 'outer;
+                        }
+
+                        if max_token_retries_used < max_token_retries
+                            && e.downcast_ref::<crate::backend::error::BackendError>()
+                                .is_some_and(|be| be.is_max_tokens())
+                        {
+                            record_retry(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                                .await;
+                            max_token_retries_used += 1;
+                            iterations -= 1;
+                            continue 'outer;
+                        }
+
+                        if e.downcast_ref::<crate::backend::error::BackendError>()
+                            .is_some_and(|be| be.is_refusal())
+                        {
+                            let _ = event_tx.unbounded_send(AgentEvent::Error(format!("{e:#}")));
+                            break 'outer;
+                        }
+
                         record_error(&format!("{e:#}"), &history_arc, &session, &event_tx).await;
-                        break;
+                        break 'outer;
                     }
                 };
 
@@ -587,6 +626,22 @@ impl Agent {
                             {
                                 record_retry(&format!("{e:#}"), &history_arc, &session, &event_tx)
                                     .await;
+                                max_token_retries_used += 1;
+                                iterations -= 1;
+                                continue 'outer;
+                            }
+
+                            if max_token_retries_used < max_token_retries
+                                && e.downcast_ref::<crate::backend::error::BackendError>()
+                                    .is_some_and(|be| be.is_bad_request())
+                            {
+                                record_retry_stripping_images(
+                                    &format!("{e:#}"),
+                                    &history_arc,
+                                    &session,
+                                    &event_tx,
+                                )
+                                .await;
                                 max_token_retries_used += 1;
                                 iterations -= 1;
                                 continue 'outer;
@@ -849,6 +904,56 @@ async fn record_retry(
     inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Retrying).await;
 }
 
+/// Like `record_retry`, but first replaces every `ContentBlock::Image` in
+/// history with a text placeholder.  This is needed when the API rejected the
+/// request because of image content (HTTP 400): simply retrying would send
+/// the same images again and fail identically.  Stripping them lets the
+/// model actually run, see the error, and self-correct (e.g. stop calling
+/// `image_viewer` on a backend that does not support images).
+async fn record_retry_stripping_images(
+    error_msg: &str,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    {
+        let mut hist = lock(history);
+        for msg in hist.iter_mut() {
+            for block in msg.content.iter_mut() {
+                match block {
+                    ContentBlock::Image { media_type, .. } => {
+                        *block = ContentBlock::Text(format!(
+                            "[image removed: {media_type} (not supported by this backend)]"
+                        ));
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        for cb in content.iter_mut() {
+                            if let ContentBlock::Image { media_type, .. } = cb {
+                                *cb = ContentBlock::Text(format!(
+                                    "[image removed: {media_type} \
+                                     (not supported by this backend)]"
+                                ));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Re-persist the modified history to the session DB.  Deactivate all
+    // existing rows and re-insert the modified messages, mirroring `compact`.
+    {
+        let hist = lock(history).clone();
+        let sess = session.lock().await;
+        let _ = sess.conversation().deactivate_all().await;
+        for msg in &hist {
+            let _ = sess.conversation().insert_message(msg).await;
+        }
+    }
+    inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Retrying).await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     tool_calls: Vec<PendingToolCall>,
@@ -992,7 +1097,7 @@ async fn execute_tool_calls(
                         r.index,
                         r.id.clone(),
                         r.name.clone(),
-                        err.clone(),
+                        vec![ContentBlock::Text(err.clone())],
                         true,
                         vec![],
                     ),
@@ -1000,7 +1105,10 @@ async fn execute_tool_calls(
                         r.index,
                         r.id.clone(),
                         r.name.clone(),
-                        "Tool rejected: chat mode restricts to read-only operations".to_string(),
+                        vec![ContentBlock::Text(
+                            "Tool rejected: chat mode restricts to read-only operations"
+                                .to_string(),
+                        )],
                         true,
                         vec![],
                     ),
@@ -1008,7 +1116,9 @@ async fn execute_tool_calls(
                         r.index,
                         r.id.clone(),
                         r.name.clone(),
-                        "User declined to execute this tool.".to_string(),
+                        vec![ContentBlock::Text(
+                            "User declined to execute this tool.".to_string(),
+                        )],
                         true,
                         vec![],
                     ),
@@ -1029,37 +1139,23 @@ async fn execute_tool_calls(
                                     r.index,
                                     r.id.clone(),
                                     r.name.clone(),
-                                    "Tool cancelled by user.".to_string(),
+                                    vec![ContentBlock::Text("Tool cancelled by user.".to_string())],
                                     true,
                                     vec![],
                                 ),
-                                Some(Ok(result)) => {
-                                    let content = result
-                                        .content
-                                        .iter()
-                                        .filter_map(|b| {
-                                            if let ContentBlock::Text(s) = b {
-                                                Some(s.clone())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n");
-                                    (
-                                        r.index,
-                                        r.id.clone(),
-                                        r.name.clone(),
-                                        content,
-                                        result.is_error,
-                                        result.agent_events,
-                                    )
-                                }
+                                Some(Ok(result)) => (
+                                    r.index,
+                                    r.id.clone(),
+                                    r.name.clone(),
+                                    result.content,
+                                    result.is_error,
+                                    result.agent_events,
+                                ),
                                 Some(Err(e)) => (
                                     r.index,
                                     r.id.clone(),
                                     r.name.clone(),
-                                    e.to_string(),
+                                    vec![ContentBlock::Text(e.to_string())],
                                     true,
                                     vec![],
                                 ),
@@ -1069,7 +1165,7 @@ async fn execute_tool_calls(
                             r.index,
                             r.id.clone(),
                             r.name.clone(),
-                            e.to_string(),
+                            vec![ContentBlock::Text(e.to_string())],
                             true,
                             vec![],
                         ),
@@ -1086,13 +1182,14 @@ async fn execute_tool_calls(
         for extra_event in agent_events {
             let _ = event_tx.unbounded_send(extra_event);
         }
+        let display = blocks_to_display_string(&content);
         let _ = event_tx.unbounded_send(AgentEvent::ToolResult {
             name: name.clone(),
-            content: content.clone(),
+            content: display,
             is_error,
             index,
         });
-        let truncated = truncate_tool_result(&content, max_tool_result_bytes);
+        let truncated = truncate_tool_result_blocks(&content, max_tool_result_bytes);
         tool_result_blocks.push(ContentBlock::ToolResult {
             tool_use_id: id,
             content: truncated,
@@ -1143,6 +1240,35 @@ fn truncate_tool_result(content: &str, max_bytes: u64) -> String {
     }
 
     result
+}
+
+/// Render content blocks into a display string for `AgentEvent::ToolResult`
+/// and the TUI/stdout frontends. Text blocks are joined with newlines; image
+/// blocks become `[image: media_type]` placeholders so base64 never touches
+/// logs or the TUI. Non-display blocks (thinking, etc.) are omitted.
+fn blocks_to_display_string(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(s) => Some(s.clone()),
+            ContentBlock::Image { media_type, .. } => Some(format!("[image: {}]", media_type)),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Per-block truncation for tool results stored in history. Text blocks are
+/// individually truncated via `truncate_tool_result`; image blocks pass
+/// through whole (the tool pre-enforces the size cap).
+fn truncate_tool_result_blocks(blocks: &[ContentBlock], max_bytes: u64) -> Vec<ContentBlock> {
+    blocks
+        .iter()
+        .map(|b| match b {
+            ContentBlock::Text(s) => ContentBlock::Text(truncate_tool_result(s, max_bytes)),
+            other => other.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2374,6 +2500,7 @@ mod tests {
             backend: Box::new(SequencedBackend::new(vec![])),
             model: "claude-test-model".to_string(),
             max_tokens: 8_192,
+            vision: false,
         };
 
         let tool_config = ToolsConfig {
@@ -3844,6 +3971,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3886,6 +4014,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -4587,15 +4716,26 @@ mod tests {
                 }
             })
             .expect("should find ToolResult content");
+        let truncated_text: String = truncated
+            .iter()
+            .filter_map(|b| {
+                if let ContentBlock::Text(s) = b {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(
-            truncated.len() <= cap as usize,
+            truncated_text.len() <= cap as usize,
             "history ToolResult should be ≤ {} bytes, was {}",
             cap,
-            truncated.len()
+            truncated_text.len()
         );
         assert!(
-            truncated.contains("[... output truncated:"),
+            truncated_text.contains("[... output truncated:"),
             "truncated history content should contain the sentinel"
         );
     }
@@ -4745,12 +4885,23 @@ mod tests {
         let history = agent.history();
         let user_msg = history.last().expect("should have user message");
         if let ContentBlock::ToolResult { content, .. } = &user_msg.content[0] {
+            let content_text: String = content
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text(s) = b {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
-                content.len() <= 200,
+                content_text.len() <= 200,
                 "in-history content should be truncated to ≤ 200 bytes"
             );
             assert!(
-                content.contains("[... output truncated:"),
+                content_text.contains("[... output truncated:"),
                 "should contain truncation sentinel"
             );
         } else {
@@ -4915,13 +5066,24 @@ mod tests {
         let history = agent.history();
         let user_msg = history.last().expect("should have user message");
         if let ContentBlock::ToolResult { content, .. } = &user_msg.content[0] {
+            let content_text: String = content
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text(s) = b {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             assert!(
-                content.len() <= 200,
+                content_text.len() <= 200,
                 "in-history ToolResult should be truncated to ≤ 200 bytes, got {}",
-                content.len()
+                content_text.len()
             );
             assert!(
-                content.contains("[... output truncated:"),
+                content_text.contains("[... output truncated:"),
                 "truncated content should contain sentinel"
             );
         } else {
@@ -6069,6 +6231,194 @@ mod tests {
                 "Retrying must come before retry TokenReceived; got retrying at {ri}, token at {ti}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn bad_request_400_strips_images_and_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Backend that returns 400 on first call (when images are in history),
+        // then succeeds on second call (after images are stripped).
+        struct ImageCheckingBackend {
+            responses: tokio::sync::Mutex<Vec<Option<Vec<Result<StreamEvent>>>>>,
+            errors: Vec<Option<BackendError>>,
+            call_count: Arc<AtomicUsize>,
+            saw_images: Arc<std::sync::Mutex<Vec<bool>>>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for ImageCheckingBackend {
+            async fn send_message(
+                &self,
+                messages: &[Message],
+                _: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let has_images = messages.iter().any(|m| {
+                    m.content.iter().any(|b| match b {
+                        ContentBlock::Image { .. } => true,
+                        ContentBlock::ToolResult { content, .. } => content
+                            .iter()
+                            .any(|cb| matches!(cb, ContentBlock::Image { .. })),
+                        _ => false,
+                    })
+                });
+                self.saw_images.lock().expect("lock").push(has_images);
+                if let Some(Some(e)) = self.errors.get(idx) {
+                    return Err(e.clone().into());
+                }
+                let mut responses = self.responses.lock().await;
+                let events = responses
+                    .get_mut(idx)
+                    .and_then(|opt| opt.take())
+                    .unwrap_or_else(|| vec![Ok(StreamEvent::Done)]);
+                Ok(Box::pin(stream::iter(events)))
+            }
+        }
+
+        // Mock tool that returns an Image content block.
+        struct ImageTool;
+        #[async_trait]
+        impl crate::tools::Tool for ImageTool {
+            fn name(&self) -> &str {
+                "image_viewer"
+            }
+            fn description(&self) -> &str {
+                "view images"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                use std::sync::LazyLock;
+                static SCHEMA: LazyLock<serde_json::Value> =
+                    LazyLock::new(|| serde_json::json!({"type": "object"}));
+                &SCHEMA
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+            ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
+                Ok(crate::tools::ToolResult {
+                    content: vec![
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "iVBOR".to_string(),
+                        },
+                        ContentBlock::Text("an image".to_string()),
+                    ],
+                    is_error: false,
+                    agent_events: vec![],
+                })
+            }
+        }
+
+        let backend = ImageCheckingBackend {
+            responses: tokio::sync::Mutex::new(vec![
+                // First call: model calls image_viewer, returns a tool_use.
+                Some(vec![
+                    Ok(StreamEvent::ToolUseStart {
+                        id: "tu1".to_string(),
+                        name: "image_viewer".to_string(),
+                    }),
+                    Ok(StreamEvent::ToolUseDelta(
+                        r#"{"path":"test.png"}"#.to_string(),
+                    )),
+                    Ok(StreamEvent::ToolUseDone),
+                    Ok(StreamEvent::Done),
+                ]),
+                // Second call would have images, but we return 400 instead.
+                None,
+                // Third call: images stripped → succeeds.
+                Some(text_response("I cannot view images on this backend.")),
+            ]),
+            errors: vec![
+                None,
+                Some(BackendError::HttpStatus {
+                    code: 400,
+                    body: "image content not supported".to_string(),
+                }),
+                None,
+            ],
+            call_count: Arc::new(AtomicUsize::new(0)),
+            saw_images: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+        let saw_images = backend.saw_images.clone();
+
+        let agent = agent_with_mode(backend, Some(Box::new(ImageTool)), ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("view test.png".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Retrying(_))),
+            "should emit Retrying for 400 error; got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TokenReceived(t) if t == "I cannot view images on this backend.")),
+            "should recover and stream the final response; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should not emit terminal Error; got {events:?}"
+        );
+
+        // The third call (after stripping) must NOT see any image blocks.
+        let saw = saw_images.lock().expect("lock");
+        assert!(
+            saw.len() >= 3,
+            "backend should have been called at least 3 times, got {}",
+            saw.len()
+        );
+        assert!(
+            saw[1],
+            "second call should contain image blocks (before stripping)"
+        );
+        assert!(
+            !saw[2],
+            "third call must not contain image blocks (they should be stripped); got {saw:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_request_400_exhausting_retries_emits_terminal_error() {
+        let inner = AlwaysBackendError::new(BackendError::HttpStatus {
+            code: 400,
+            body: "bad request".to_string(),
+        });
+        let backend = RetryingBackend::new(Box::new(inner), fast_retry());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
+        assert_eq!(
+            retrying_count, 2,
+            "should retry exactly max_token_retries times (2), got {retrying_count}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "should emit terminal Error after exhausting 400 retries; got {events:?}"
+        );
     }
 
     #[tokio::test]

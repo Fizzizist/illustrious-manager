@@ -32,6 +32,14 @@ impl BackendError {
         matches!(self, BackendError::MaxTokensExceeded { .. })
     }
 
+    /// Whether the error is a "bad request" (HTTP 400). The agent treats these
+    /// as self-correctable: the error is injected into history so the model can
+    /// adjust (e.g. stop sending image content to a model that doesn't support
+    /// it), and the stream continues rather than terminating.
+    pub fn is_bad_request(&self) -> bool {
+        matches!(self, BackendError::HttpStatus { code: 400, .. })
+    }
+
     pub fn is_refusal(&self) -> bool {
         matches!(self, BackendError::Refusal)
     }
@@ -375,6 +383,46 @@ mod tests {
             .is_refusal()
         );
         assert!(!BackendError::Other("something".to_string()).is_refusal());
+    }
+
+    #[test]
+    fn is_bad_request_true_for_400() {
+        let err = BackendError::HttpStatus {
+            code: 400,
+            body: "image content not supported".to_string(),
+        };
+        assert!(err.is_bad_request());
+    }
+
+    #[test]
+    fn is_bad_request_false_for_other_codes() {
+        assert!(
+            !BackendError::HttpStatus {
+                code: 500,
+                body: "overloaded".to_string(),
+            }
+            .is_bad_request()
+        );
+        assert!(
+            !BackendError::HttpStatus {
+                code: 429,
+                body: "rate limited".to_string(),
+            }
+            .is_bad_request()
+        );
+        assert!(
+            !BackendError::Transport {
+                message: "connection refused".to_string(),
+            }
+            .is_bad_request()
+        );
+        assert!(
+            !BackendError::MaxTokensExceeded {
+                input_tokens: 100,
+                output_tokens: 200,
+            }
+            .is_bad_request()
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct BackendSelection {
     pub backend: Box<dyn LlmBackend>,
     pub model: String,
     pub max_tokens: u32,
+    pub vision: bool,
 }
 
 pub struct RetryingBackend {
@@ -152,8 +153,6 @@ impl BackendFactory {
         let resolved = self.config.resolve_role(role)?;
         match resolved.backend_name.as_str() {
             "vertex" => {
-                // TODO: per-role project/region overrides — when `ModelRole` gains
-                // those fields, pass them here instead of reading from `self.config.vertex`.
                 let project = self.config.vertex.project.clone();
                 let region = self.config.vertex.region.clone();
                 let auth = self
@@ -168,6 +167,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: self.config.vertex.max_tokens.unwrap_or(defaults::VERTEX),
+                    vision: self.config.vertex.vision,
                 })
             }
             "zai" => {
@@ -184,6 +184,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: defaults::ZAI,
+                    vision: zai_config.vision,
                 })
             }
             "ollama" => {
@@ -200,6 +201,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: ollama_config.max_tokens.unwrap_or(defaults::OLLAMA),
+                    vision: ollama_config.vision,
                 })
             }
             "openai_compat" => {
@@ -224,6 +226,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: oc_toml.max_tokens.unwrap_or(defaults::OPENAI_COMPAT),
+                    vision: oc_toml.vision,
                 })
             }
             "anthropic" => {
@@ -240,6 +243,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: anthropic_config.max_tokens.unwrap_or(defaults::ANTHROPIC),
+                    vision: anthropic_config.vision,
                 })
             }
             "opencode_go" => {
@@ -256,6 +260,7 @@ impl BackendFactory {
                     )),
                     model: resolved.model,
                     max_tokens: oc_go.max_tokens.unwrap_or(defaults::OPENCODE_GO),
+                    vision: oc_go.vision,
                 })
             }
             other => anyhow::bail!("Unknown backend '{other}' for role '{role}'"),
@@ -283,6 +288,7 @@ impl BackendFactory {
             backend,
             model,
             max_tokens: 8_192,
+            vision: false,
         }
     }
 }
@@ -370,6 +376,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -412,6 +419,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -422,6 +430,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -447,6 +456,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -508,6 +518,7 @@ mod tests {
                 project: "shared-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -873,6 +884,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -883,6 +895,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: Some(32768),
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -919,6 +932,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -929,6 +943,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -971,6 +986,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1022,6 +1038,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1074,6 +1091,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1081,6 +1099,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: Some(32768),
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1101,6 +1120,102 @@ mod tests {
         assert_eq!(
             selection.max_tokens, 32768,
             "config override should take precedence over the ollama default"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_vision_from_config_override() {
+        use crate::config::{
+            ANTHROPIC_DEFAULT_BASE_URL, AnthropicConfig, AppConfig, RetryConfig, ToolsConfig,
+            VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                max_tokens: None,
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+                vision: false,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let factory = super::BackendFactory::new(config);
+        let selection = factory
+            .for_role("default")
+            .await
+            .expect("for_role should succeed");
+        assert!(
+            !selection.vision,
+            "vision should be false from config override"
+        );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_vision_from_default_when_no_override() {
+        use crate::config::{
+            ANTHROPIC_DEFAULT_BASE_URL, AnthropicConfig, AppConfig, RetryConfig, ToolsConfig,
+            VertexConfig,
+        };
+        use std::collections::BTreeMap;
+
+        let mut config = AppConfig {
+            backend: "anthropic".to_string(),
+            vertex: VertexConfig {
+                max_tokens: None,
+                project: "".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+                vision: true,
+            },
+            zai: None,
+            ollama: None,
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: Some(AnthropicConfig {
+                api_key: "test-key".to_string(),
+                base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
+                model: "claude-opus-4-8".to_string(),
+                max_tokens: None,
+                vision: true,
+            }),
+            tools: ToolsConfig::default(),
+            sessions_dir: std::env::temp_dir(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let factory = super::BackendFactory::new(config);
+        let selection = factory
+            .for_role("default")
+            .await
+            .expect("for_role should succeed");
+        assert!(
+            selection.vision,
+            "vision should be true from anthropic default"
         );
     }
 }

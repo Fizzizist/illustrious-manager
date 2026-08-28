@@ -171,12 +171,17 @@ region = "us-east5"
 model = "claude-sonnet-4-20250514"
 # Optional: override max_tokens for this backend
 # max_tokens = 8192
+# Whether models on this backend support image input (default: true for Vertex/Claude).
+# When true, the image_viewer tool is registered for this role.
+# vision = true
 
 [zai]
 # Required: your z.ai API key
 api_key = ""
 # Model to use
 model = "glm-5.1"
+# Whether models on this backend support image input (default: false for z.ai).
+# vision = false
 
 # [ollama]
 # Required: your Ollama API key
@@ -187,6 +192,8 @@ model = "glm-5.1"
 # base_url = "https://ollama.com/api/chat"
 # Optional: override max_tokens for this backend
 # max_tokens = 8192
+# Whether models on this backend support image input (default: false for Ollama).
+# vision = false
 
 # [openai_compat]
 # Required: base URL of the OpenAI-compatible endpoint (without /chat/completions)
@@ -199,6 +206,8 @@ model = "glm-5.1"
 # max_tokens = 16384
 # Reasoning style: "none", "zai_enable_thinking", "qwen_chat_template", "default"
 # reasoning = "qwen_chat_template"
+# Whether models on this endpoint support image input (default: false).
+# vision = false
 
 # [opencode_go]
 # OpenCode Go — dual-protocol backend. Triages model name against config-driven
@@ -218,6 +227,8 @@ model = "glm-5.1"
 # max_tokens = 16384
 # Reasoning style for OpenAI-protocol models: "none", "zai_enable_thinking", "qwen_chat_template", "default"
 # reasoning = "default"
+# Whether models on this backend support image input (default: true for OpenCode Go).
+# vision = true
 
 # [anthropic]
 # Direct Anthropic Messages API backend.
@@ -229,6 +240,8 @@ model = "glm-5.1"
 # model = "claude-opus-4-8"
 # Optional: override max_tokens for this backend (agent default is 8192)
 # max_tokens = 65536
+# Whether models on this backend support image input (default: true for Anthropic).
+# vision = true
 
 # [compaction]
 # Role name used for compaction sub-agents. Defaults to "compaction".
@@ -350,6 +363,12 @@ pub struct VertexConfig {
     pub model: String,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_vertex_vision")]
+    pub vision: bool,
+}
+
+fn default_vertex_vision() -> bool {
+    crate::backend::defaults::VISION_VERTEX
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -362,6 +381,12 @@ pub struct OllamaConfig {
     pub base_url: String,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_ollama_vision")]
+    pub vision: bool,
+}
+
+fn default_ollama_vision() -> bool {
+    crate::backend::defaults::VISION_OLLAMA
 }
 
 fn default_ollama_model() -> String {
@@ -378,6 +403,12 @@ pub struct ZaiConfig {
     pub api_key: String,
     #[serde(default = "default_zai_model")]
     pub model: String,
+    #[serde(default = "default_zai_vision")]
+    pub vision: bool,
+}
+
+fn default_zai_vision() -> bool {
+    crate::backend::defaults::VISION_ZAI
 }
 
 /// Reasoning style for OpenAI-compatible backends, mirroring `openai_compat::ReasoningStyle`.
@@ -401,6 +432,12 @@ pub struct OpenAiCompatConfigToml {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub reasoning: ReasoningStyleConfig,
+    #[serde(default = "default_openai_compat_vision")]
+    pub vision: bool,
+}
+
+fn default_openai_compat_vision() -> bool {
+    crate::backend::defaults::VISION_OPENAI_COMPAT
 }
 
 fn default_openai_compat_model() -> String {
@@ -429,6 +466,12 @@ pub struct AnthropicConfig {
     pub model: String,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_anthropic_vision")]
+    pub vision: bool,
+}
+
+fn default_anthropic_vision() -> bool {
+    crate::backend::defaults::VISION_ANTHROPIC
 }
 
 fn default_opencode_go_base_url() -> String {
@@ -455,6 +498,12 @@ pub struct OpenCodeGoConfig {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub reasoning: ReasoningStyleConfig,
+    #[serde(default = "default_opencode_go_vision")]
+    pub vision: bool,
+}
+
+fn default_opencode_go_vision() -> bool {
+    crate::backend::defaults::VISION_OPENCODE_GO
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1134,6 +1183,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1161,6 +1211,7 @@ mod tests {
                 project: "my-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1187,6 +1238,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1214,10 +1266,12 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: Some(ZaiConfig {
                 api_key: "".to_string(),
                 model: "glm-5.1".to_string(),
+                vision: false,
             }),
             ollama: None,
             openai_compat: None,
@@ -1244,10 +1298,12 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: Some(ZaiConfig {
                 api_key: "test-key".to_string(),
                 model: "glm-5.1".to_string(),
+                vision: false,
             }),
             ollama: None,
             openai_compat: None,
@@ -1273,6 +1329,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1300,6 +1357,7 @@ mod tests {
                 project: "my-gcp-project".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1332,10 +1390,12 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: Some(ZaiConfig {
                 api_key: "secret-key".to_string(),
                 model: "glm-5.1".to_string(),
+                vision: false,
             }),
             ollama: None,
             openai_compat: None,
@@ -1363,6 +1423,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1397,6 +1458,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1426,6 +1488,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1486,6 +1549,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1539,6 +1603,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1597,6 +1662,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1624,6 +1690,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1659,6 +1726,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1698,10 +1766,12 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: Some(ZaiConfig {
                 api_key: "".to_string(),
                 model: "glm-5.1".to_string(),
+                vision: false,
             }),
             ollama: None,
             openai_compat: None,
@@ -1732,6 +1802,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1759,6 +1830,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1766,6 +1838,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1791,6 +1864,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1798,6 +1872,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "http://localhost:11434/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1822,6 +1897,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1829,6 +1905,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1853,6 +1930,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1860,6 +1938,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -1896,6 +1975,7 @@ mod tests {
                 project: "p".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -1931,10 +2011,12 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: Some(ZaiConfig {
                 api_key: "k".to_string(),
                 model: "glm-5.1".to_string(),
+                vision: false,
             }),
             ollama: None,
             openai_compat: None,
@@ -1966,6 +2048,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -1973,6 +2056,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2011,6 +2095,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2050,6 +2135,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -2057,6 +2143,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2114,6 +2201,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: Some(OllamaConfig {
@@ -2121,6 +2209,7 @@ mod tests {
                 model: "gpt-oss:120b".to_string(),
                 base_url: "https://ollama.com/api/chat".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             openai_compat: None,
             opencode_go: None,
@@ -2303,6 +2392,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2333,6 +2423,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2342,6 +2433,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2369,6 +2461,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2378,6 +2471,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2405,6 +2499,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2414,6 +2509,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2486,6 +2582,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2495,6 +2592,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2534,6 +2632,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2543,6 +2642,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2571,6 +2671,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2580,6 +2681,7 @@ mod tests {
                 model: "Qwen/Qwen3-32B".to_string(),
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::None,
+                vision: false,
             }),
             opencode_go: None,
             anthropic: None,
@@ -2663,6 +2765,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2693,6 +2796,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2705,6 +2809,7 @@ mod tests {
                 anthropic_models: vec![],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2728,6 +2833,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2740,6 +2846,7 @@ mod tests {
                 anthropic_models: vec!["minimax-m1".to_string()],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2765,6 +2872,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2777,6 +2885,7 @@ mod tests {
                 anthropic_models: vec!["grok-code".to_string()],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2804,6 +2913,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2816,6 +2926,7 @@ mod tests {
                 anthropic_models: vec![],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2843,6 +2954,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2855,6 +2967,7 @@ mod tests {
                 anthropic_models: vec![],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2901,6 +3014,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2913,6 +3027,7 @@ mod tests {
                 anthropic_models: vec!["minimax-m1".to_string()],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -2948,6 +3063,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -2960,6 +3076,7 @@ mod tests {
                 anthropic_models: vec!["grok-code".to_string()],
                 max_tokens: None,
                 reasoning: ReasoningStyleConfig::Default,
+                vision: false,
             }),
             anthropic: None,
             tools: ToolsConfig::default(),
@@ -3091,6 +3208,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3121,6 +3239,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3131,6 +3250,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3153,6 +3273,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3163,6 +3284,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1/messages".to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3188,6 +3310,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3198,6 +3321,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: Some(65536),
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3222,6 +3346,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3232,6 +3357,7 @@ mod tests {
                 base_url: String::new(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3258,6 +3384,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3268,6 +3395,7 @@ mod tests {
                 base_url: "   ".to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3289,6 +3417,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3299,6 +3428,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1?token=x".to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3325,6 +3455,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3335,6 +3466,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1/messages/".to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3360,6 +3492,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3370,6 +3503,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3396,6 +3530,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3422,6 +3557,7 @@ mod tests {
                 project: "".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3432,6 +3568,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3469,6 +3606,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3508,6 +3646,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3518,6 +3657,7 @@ mod tests {
                 base_url: ANTHROPIC_DEFAULT_BASE_URL.to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3552,6 +3692,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3562,6 +3703,7 @@ mod tests {
                 base_url: "https://api.anthropic.com/v1/messages".to_string(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),
@@ -3596,6 +3738,7 @@ mod tests {
                 project: "proj".to_string(),
                 region: "us-east5".to_string(),
                 model: "claude-sonnet-4-20250514".to_string(),
+                vision: false,
             },
             zai: None,
             ollama: None,
@@ -3606,6 +3749,7 @@ mod tests {
                 base_url: String::new(),
                 model: "claude-opus-4-8".to_string(),
                 max_tokens: None,
+                vision: false,
             }),
             tools: ToolsConfig::default(),
             sessions_dir: std::env::temp_dir(),

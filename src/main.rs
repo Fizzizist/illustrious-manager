@@ -27,6 +27,7 @@ use tools::ToolRegistry;
 use tools::agent::AgentTool;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
+use tools::image_viewer::ImageViewer;
 use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
@@ -157,12 +158,16 @@ async fn main() -> Result<()> {
 
     let chat_mode = crate::types::ChatMode::new(cli.chat);
 
+    let default_selection = factory.for_role("default").await?;
+    let vision = default_selection.vision;
+
     let mut registry = build_tool_registry(
         Arc::clone(&session_arc),
         &app_config.tools,
         &skills,
         None,
         chat_mode.clone(),
+        vision,
     )?;
 
     let spawner = build_agent_spawner_and_register(
@@ -285,12 +290,17 @@ fn extend_sandbox_with_tmp(policy: SandboxPolicy) -> SandboxPolicy {
 /// `agent_tool` is `Some` for sub-agent registries (enabling recursive spawning)
 /// and `None` for the parent registry, where `build_agent_spawner_and_register`
 /// adds `AgentTool` after constructing the spawner.
+///
+/// When `vision` is `true`, the `image_viewer` tool is registered so the model
+/// can read image files. When `false`, it is omitted — a model that calls it
+/// will receive a non-retryable `ToolError::NotFound`.
 fn build_tool_registry(
     session: Arc<tokio::sync::Mutex<Session>>,
     tools_config: &config::ToolsConfig,
     skills: &HashMap<String, PathBuf>,
     agent_tool: Option<AgentTool>,
     chat_mode: crate::types::ChatMode,
+    vision: bool,
 ) -> Result<ToolRegistry> {
     let sandbox_policy = SandboxPolicy::new(Path::new(&tools_config.sandbox_root));
     let sandbox_policy = extend_sandbox_with_tmp(sandbox_policy);
@@ -304,7 +314,7 @@ fn build_tool_registry(
         chat_mode.clone(),
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
-    reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
+    reg.register(Box::new(WriteFileTool::new(sandbox_policy.clone())))?;
     reg.register(Box::new(SearchTool::new(PathBuf::from(
         &tools_config.sandbox_root,
     ))))?;
@@ -313,6 +323,9 @@ fn build_tool_registry(
     reg.register(Box::new(ListTasksTool::new(Arc::clone(&session))))?;
     reg.register(Box::new(UpdateTaskTool::new(Arc::clone(&session))))?;
     reg.register(Box::new(DeleteTaskTool::new(session)))?;
+    if vision {
+        reg.register(Box::new(ImageViewer::new(sandbox_policy)))?;
+    }
     if let Some(tool) = agent_tool {
         reg.register(Box::new(tool))?;
     }
@@ -347,7 +360,7 @@ fn build_agent_spawner_and_register(
         app_config: app_config_clone,
         registry_builder: Box::new({
             let chat_mode_clone = chat_mode.clone();
-            move |sub_session| {
+            move |sub_session, sub_vision| {
                 let agent_tool = spawner_cell_clone
                     .get()
                     .map(|s| AgentTool::new(Arc::clone(s), roles_for_closure.clone()));
@@ -357,6 +370,7 @@ fn build_agent_spawner_and_register(
                     &skills_clone,
                     agent_tool,
                     chat_mode_clone.clone(),
+                    sub_vision,
                 )
             }
         }),

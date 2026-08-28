@@ -164,11 +164,36 @@ impl OllamaBackend {
                                     content,
                                     ..
                                 } => {
-                                    messages_json.push(serde_json::json!({
+                                    let text_parts: String = content
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let ContentBlock::Text(s) = b {
+                                                Some(s.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    let images: Vec<String> = content
+                                        .iter()
+                                        .filter_map(|b| {
+                                            if let ContentBlock::Image { data, .. } = b {
+                                                Some(data.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+                                    let mut msg = serde_json::json!({
                                         "role": "tool",
                                         "tool_call_id": tool_use_id,
-                                        "content": content
-                                    }));
+                                        "content": text_parts
+                                    });
+                                    if !images.is_empty() {
+                                        msg["images"] = serde_json::json!(images);
+                                    }
+                                    messages_json.push(msg);
                                 }
                                 ContentBlock::Text(text) => {
                                     messages_json.push(serde_json::json!({
@@ -189,10 +214,25 @@ impl OllamaBackend {
                             })
                             .collect::<Vec<_>>()
                             .join("");
-                        messages_json.push(serde_json::json!({
+                        let images: Vec<String> = m
+                            .content
+                            .iter()
+                            .filter_map(|block| {
+                                if let ContentBlock::Image { data, .. } = block {
+                                    Some(data.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let mut msg = serde_json::json!({
                             "role": "user",
                             "content": content
-                        }));
+                        });
+                        if !images.is_empty() {
+                            msg["images"] = serde_json::json!(images);
+                        }
+                        messages_json.push(msg);
                     }
                 }
                 Role::Assistant => {
@@ -494,6 +534,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -523,6 +564,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -565,6 +607,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -596,6 +639,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -623,6 +667,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -666,6 +711,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -679,7 +725,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "tool_0".to_string(),
-                content: "file1.txt\nfile2.txt".to_string(),
+                content: vec![ContentBlock::Text("file1.txt\nfile2.txt".to_string())],
                 is_error: false,
             }],
             created_at: 0.0,
@@ -700,6 +746,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -728,7 +775,7 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: "tool_0".to_string(),
-                    content: "file1.txt".to_string(),
+                    content: vec![ContentBlock::Text("file1.txt".to_string())],
                     is_error: false,
                 }],
                 created_at: 0.0,
@@ -753,6 +800,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         });
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key"));
@@ -765,6 +813,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "http://localhost:11434/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         });
         assert!(result.is_ok(), "should accept empty key for self-hosted");
     }
@@ -776,6 +825,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         });
         assert!(backend.is_ok());
         let b = backend.unwrap();
@@ -863,6 +913,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -889,6 +940,7 @@ mod tests {
             model: "gpt-oss:120b".to_string(),
             base_url: "https://ollama.com/api/chat".to_string(),
             max_tokens: None,
+            vision: false,
         })
         .unwrap();
         let config = RequestConfig {
@@ -985,5 +1037,84 @@ mod tests {
                 "stealth max-tokens should fire for done_reason={reason}; got: {backend_err:?}"
             );
         }
+    }
+
+    #[test]
+    fn tool_result_with_image_hoists_images_array() {
+        let backend = OllamaBackend::new(&OllamaConfig {
+            api_key: "test-key".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "https://ollama.com/api/chat".to_string(),
+            max_tokens: None,
+            vision: false,
+        })
+        .unwrap();
+        let config = RequestConfig {
+            model: "gpt-oss:120b".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "tool_0".to_string(),
+                content: vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "iVBOR".to_string(),
+                    },
+                    ContentBlock::Text("companion".to_string()),
+                ],
+                is_error: false,
+            }],
+            created_at: 0.0,
+        }];
+        let body = backend.build_request_body(&messages, &config);
+        let msgs = body["messages"].as_array().expect("messages array");
+        assert_eq!(msgs.len(), 1, "should produce one tool message");
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["content"], "companion");
+        let images = msgs[0]["images"].as_array().expect("images array");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0], "iVBOR");
+    }
+
+    #[test]
+    fn plain_user_message_with_image_hoists_images_array() {
+        let backend = OllamaBackend::new(&OllamaConfig {
+            api_key: "test-key".to_string(),
+            model: "gpt-oss:120b".to_string(),
+            base_url: "https://ollama.com/api/chat".to_string(),
+            max_tokens: None,
+            vision: false,
+        })
+        .unwrap();
+        let config = RequestConfig {
+            model: "gpt-oss:120b".to_string(),
+            max_tokens: 4096,
+            tools: vec![],
+            thinking: None,
+            cancel_token: None,
+        };
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text("describe this".to_string()),
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR".to_string(),
+                },
+            ],
+            created_at: 0.0,
+        }];
+        let body = backend.build_request_body(&messages, &config);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["role"], "user");
+        assert_eq!(msg["content"], "describe this");
+        let images = msg["images"].as_array().expect("images array");
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0], "iVBOR");
     }
 }
