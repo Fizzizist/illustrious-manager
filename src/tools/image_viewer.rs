@@ -14,6 +14,73 @@ pub struct ImageViewer {
     schema: Value,
 }
 
+/// Supported image formats. Each variant owns its extensions, MIME type, and
+/// magic-byte header, so adding a format is a single enum entry plus one arm
+/// in each accessor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+impl ImageFormat {
+    const ALL: [ImageFormat; 4] = [
+        ImageFormat::Png,
+        ImageFormat::Jpeg,
+        ImageFormat::Gif,
+        ImageFormat::Webp,
+    ];
+
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "png" => Some(ImageFormat::Png),
+            "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+            "gif" => Some(ImageFormat::Gif),
+            "webp" => Some(ImageFormat::Webp),
+            _ => None,
+        }
+    }
+
+    fn media_type(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            ImageFormat::Gif => "image/gif",
+            ImageFormat::Webp => "image/webp",
+        }
+    }
+
+    fn has_valid_header(self, data: &[u8]) -> bool {
+        match self {
+            ImageFormat::Png => {
+                data.len() >= 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+            }
+            ImageFormat::Jpeg => data.len() >= 3 && data[..3] == [0xFF, 0xD8, 0xFF],
+            ImageFormat::Gif => data.len() >= 6 && matches!(&data[..6], b"GIF87a" | b"GIF89a"),
+            ImageFormat::Webp => {
+                data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
+            }
+        }
+    }
+
+    fn display_name(self) -> String {
+        self.media_type()
+            .strip_prefix("image/")
+            .unwrap_or(self.media_type())
+            .to_string()
+    }
+}
+
+fn supported_formats_list() -> String {
+    ImageFormat::ALL
+        .iter()
+        .map(|f| f.display_name())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl ImageViewer {
     pub fn new(sandbox: SandboxPolicy) -> Self {
         Self {
@@ -23,22 +90,15 @@ impl ImageViewer {
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Path to the image file (relative to sandbox root or absolute within an allowed root). Supported formats: png, jpeg, gif, webp."
+                        "description": format!(
+                            "Path to the image file (relative to sandbox root or absolute within an allowed root). Supported formats: {}.",
+                            supported_formats_list()
+                        )
                     }
                 },
                 "required": ["path"]
             }),
         }
-    }
-}
-
-fn mime_from_extension(ext: &str) -> Option<String> {
-    match ext.to_lowercase().as_str() {
-        "png" => Some("image/png".to_string()),
-        "jpg" | "jpeg" => Some("image/jpeg".to_string()),
-        "gif" => Some("image/gif".to_string()),
-        "webp" => Some("image/webp".to_string()),
-        _ => None,
     }
 }
 
@@ -49,18 +109,6 @@ fn size_limit_error(bytes: u64) -> ToolError {
             "Image is {bytes} bytes; maximum allowed is {} bytes (5MB)",
             MAX_IMAGE_BYTES
         ),
-    }
-}
-
-fn validate_image_header(data: &[u8], media_type: &str) -> bool {
-    match media_type {
-        "image/png" => {
-            data.len() >= 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        }
-        "image/jpeg" => data.len() >= 3 && data[..3] == [0xFF, 0xD8, 0xFF],
-        "image/gif" => data.len() >= 6 && matches!(&data[..6], b"GIF87a" | b"GIF89a"),
-        "image/webp" => data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP",
-        _ => false,
     }
 }
 
@@ -95,16 +143,21 @@ impl Tool for ImageViewer {
                 message: e.to_string(),
             })?;
 
-        let media_type = validated
+        let extension = validated
             .extension()
             .and_then(|e| e.to_str())
-            .and_then(mime_from_extension)
+            .map(str::to_lowercase);
+        let format = extension
+            .as_deref()
+            .and_then(ImageFormat::from_extension)
             .ok_or_else(|| ToolError::Execution {
                 tool_name: "image_viewer".to_string(),
                 message: format!(
-                    "Unsupported file extension for path {path_str}; supported: png, jpg/jpeg, gif, webp"
+                    "Unsupported file extension for path {path_str}; supported: {}",
+                    supported_formats_list()
                 ),
             })?;
+        let media_type = format.media_type();
 
         let file_size = std::fs::metadata(&validated)
             .map_err(|e| ToolError::Execution {
@@ -125,7 +178,7 @@ impl Tool for ImageViewer {
             return Err(size_limit_error(data.len() as u64));
         }
 
-        if !validate_image_header(&data, &media_type) {
+        if !format.has_valid_header(&data) {
             return Err(ToolError::Execution {
                 tool_name: "image_viewer".to_string(),
                 message: format!(
@@ -143,12 +196,11 @@ impl Tool for ImageViewer {
         Ok(ToolResult {
             content: vec![
                 ContentBlock::Image {
-                    media_type: media_type.clone(),
+                    media_type: media_type.to_string(),
                     data: encoded,
                 },
                 ContentBlock::Text(format!(
-                    "Image loaded: {display_name} ({}, {} bytes)",
-                    media_type,
+                    "Image loaded: {display_name} ({media_type}, {} bytes)",
                     data.len()
                 )),
             ],
@@ -248,6 +300,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn schema_lists_all_supported_formats() {
+        let dir = TempDir::new().expect("temp dir");
+        let tool = ImageViewer::new(make_policy(&dir));
+        let schema = tool.input_schema().to_string();
+        assert!(
+            schema.contains("Supported formats: png, jpeg, gif, webp"),
+            "schema must mirror ImageFormat::ALL: {schema}"
+        );
+    }
+
     #[tokio::test]
     async fn oversized_image_rejected() {
         let dir = TempDir::new().expect("temp dir");
@@ -282,6 +345,20 @@ mod tests {
             ToolError::Execution { message, .. } => assert!(message.contains("Unsupported")),
             _ => panic!("expected Execution error"),
         }
+    }
+
+    #[tokio::test]
+    async fn uppercase_extension_accepted() {
+        let dir = TempDir::new().expect("temp dir");
+        let policy = make_policy(&dir);
+        let tool = ImageViewer::new(policy);
+        let img = dir.path().join("TEST.PNG");
+        std::fs::write(&img, [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).expect("write");
+        let result = tool
+            .execute(serde_json::json!({"path": "TEST.PNG"}))
+            .await
+            .expect("ok");
+        assert!(!result.is_error);
     }
 
     #[tokio::test]
