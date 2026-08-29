@@ -220,7 +220,7 @@ impl App {
                             .filter_map(|b| match b {
                                 crate::types::ContentBlock::Text(s) => Some(s.clone()),
                                 crate::types::ContentBlock::Image { media_type, .. } => {
-                                    Some(format!("[image: {}]", media_type))
+                                    Some(crate::types::ContentBlock::image_placeholder(media_type))
                                 }
                                 _ => None,
                             })
@@ -255,7 +255,7 @@ impl App {
                     crate::types::ContentBlock::Image { media_type, .. } => {
                         Some(ConversationEntry::new(
                             role.clone(),
-                            format!("[image: {}]", media_type),
+                            crate::types::ContentBlock::image_placeholder(media_type),
                             timestamp.clone(),
                         ))
                     }

@@ -202,12 +202,7 @@ impl Agent {
     }
 
     /// Replace the backend and model simultaneously (used by `/role` command).
-    pub fn set_backend(
-        &self,
-        backend: Arc<dyn crate::backend::LlmBackend>,
-        model: String,
-        max_tokens: u32,
-    ) {
+    pub fn set_backend(&self, backend: Arc<dyn LlmBackend>, model: String, max_tokens: u32) {
         *self.backend.lock().unwrap_or_else(|e| e.into_inner()) = backend;
         let mut config = self.config.lock().unwrap_or_else(|e| e.into_inner());
         config.model = model;
@@ -421,6 +416,7 @@ impl Agent {
         let max_context_window_len = self.max_context_window_len;
         let last_auto_compacted = Arc::clone(&self.last_auto_compacted);
         let max_tool_result_bytes = self.max_tool_result_bytes;
+        let context_prefix_len = Arc::clone(&self.context_prefix_len);
 
         self.session
             .lock()
@@ -443,6 +439,7 @@ impl Agent {
         tokio::spawn(async move {
             let mut iterations = 0u32;
             let mut max_token_retries_used = 0u32;
+            let mut bad_request_retries_used = 0u32;
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
@@ -465,7 +462,7 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        if max_token_retries_used < max_token_retries
+                        if bad_request_retries_used < max_token_retries
                             && e.downcast_ref::<crate::backend::error::BackendError>()
                                 .is_some_and(|be| be.is_bad_request())
                         {
@@ -473,10 +470,11 @@ impl Agent {
                                 &format!("{e:#}"),
                                 &history_arc,
                                 &session,
+                                &context_prefix_len,
                                 &event_tx,
                             )
                             .await;
-                            max_token_retries_used += 1;
+                            bad_request_retries_used += 1;
                             iterations -= 1;
                             continue 'outer;
                         }
@@ -631,7 +629,7 @@ impl Agent {
                                 continue 'outer;
                             }
 
-                            if max_token_retries_used < max_token_retries
+                            if bad_request_retries_used < max_token_retries
                                 && e.downcast_ref::<crate::backend::error::BackendError>()
                                     .is_some_and(|be| be.is_bad_request())
                             {
@@ -639,10 +637,11 @@ impl Agent {
                                     &format!("{e:#}"),
                                     &history_arc,
                                     &session,
+                                    &context_prefix_len,
                                     &event_tx,
                                 )
                                 .await;
-                                max_token_retries_used += 1;
+                                bad_request_retries_used += 1;
                                 iterations -= 1;
                                 continue 'outer;
                             }
@@ -910,10 +909,15 @@ async fn record_retry(
 /// the same images again and fail identically.  Stripping them lets the
 /// model actually run, see the error, and self-correct (e.g. stop calling
 /// `image_viewer` on a backend that does not support images).
+///
+/// Re-persisted via `Conversation::replace_all` inside a transaction, and
+/// restricted to the persisted suffix of history (beyond the non-persisted
+/// context prefix) so context files are never written to the DB.
 async fn record_retry_stripping_images(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
+    context_prefix_len: &Arc<Mutex<usize>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) {
     {
@@ -941,14 +945,20 @@ async fn record_retry_stripping_images(
             }
         }
     }
-    // Re-persist the modified history to the session DB.  Deactivate all
-    // existing rows and re-insert the modified messages, mirroring `compact`.
     {
         let hist = lock(history).clone();
-        let sess = session.lock().await;
-        let _ = sess.conversation().deactivate_all().await;
-        for msg in &hist {
-            let _ = sess.conversation().insert_message(msg).await;
+        let prefix_len = *context_prefix_len.lock().unwrap_or_else(|e| e.into_inner());
+        let persisted = &hist[prefix_len.min(hist.len())..];
+        if let Err(e) = session
+            .lock()
+            .await
+            .conversation()
+            .replace_all(persisted)
+            .await
+        {
+            crate::logging::log_error(&format!(
+                "Failed to re-persist image-stripped history: {e:#}"
+            ));
         }
     }
     inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Retrying).await;
@@ -1251,7 +1261,9 @@ fn blocks_to_display_string(blocks: &[ContentBlock]) -> String {
         .iter()
         .filter_map(|b| match b {
             ContentBlock::Text(s) => Some(s.clone()),
-            ContentBlock::Image { media_type, .. } => Some(format!("[image: {}]", media_type)),
+            ContentBlock::Image { media_type, .. } => {
+                Some(ContentBlock::image_placeholder(media_type))
+            }
             _ => None,
         })
         .collect::<Vec<_>>()

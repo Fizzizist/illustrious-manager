@@ -5,6 +5,12 @@ use ratatui::widgets::Paragraph;
 
 const STATUS_BG: Color = Color::Rgb(30, 30, 30);
 
+/// Fixed character-count scale applied to `ContentBlock::Image` blocks in
+/// token-usage estimation. Images have no text content, so the status-line
+/// counter uses this constant to keep estimates sane (actual provider token
+/// cost for images is heuristic anyway).
+const IMAGE_PLACEHOLDER_TOKEN_SCALE: usize = 200;
+
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -47,7 +53,7 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
             .map(|block| match block {
                 crate::types::ContentBlock::Text(t) => t.len(),
                 crate::types::ContentBlock::Image { media_type, .. } => {
-                    media_type.len() + crate::frontend::IMAGE_PLACEHOLDER_TOKEN_SCALE as usize
+                    media_type.len() + IMAGE_PLACEHOLDER_TOKEN_SCALE
                 }
                 crate::types::ContentBlock::ToolUse { name, input, .. } => {
                     name.len() + input.to_string().len()
@@ -57,8 +63,7 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
                     .map(|b| match b {
                         crate::types::ContentBlock::Text(t) => t.len(),
                         crate::types::ContentBlock::Image { media_type, .. } => {
-                            media_type.len()
-                                + crate::frontend::IMAGE_PLACEHOLDER_TOKEN_SCALE as usize
+                            media_type.len() + IMAGE_PLACEHOLDER_TOKEN_SCALE
                         }
                         _ => 0,
                     })

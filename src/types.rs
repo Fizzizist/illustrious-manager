@@ -93,6 +93,15 @@ pub enum ContentBlock {
     },
 }
 
+impl ContentBlock {
+    /// Display placeholder for image blocks — used by the agent's display
+    /// path, TUI history rebuild, and stdout frontend. Ensures base64 data
+    /// never leaks into logs or the TUI.
+    pub fn image_placeholder(media_type: &str) -> String {
+        format!("[image: {media_type}]")
+    }
+}
+
 /// Helper for serializing `ContentBlock::Image` in the Anthropic wire format:
 /// `{"type":"base64","media_type":"...","data":"..."}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

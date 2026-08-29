@@ -92,7 +92,7 @@ mod tests {
     fn highlight_plain_text_when_no_language() {
         let content = "just some text\n";
         let lines = highlight_code_block("", content);
-        assert!(lines.len() >= 1, "should have at least 1 line");
+        assert!(!lines.is_empty(), "should have at least 1 line");
         assert!(
             lines[0].spans.iter().any(|s| s.content.contains("just")),
             "should contain the text"

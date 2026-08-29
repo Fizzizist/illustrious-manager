@@ -320,21 +320,16 @@ impl OpenAiCompatBackend {
                                     if !images.is_empty() {
                                         let parts: Vec<serde_json::Value> = images
                                             .iter()
-                                            .map(|img| {
-                                                if let ContentBlock::Image {
-                                                    media_type,
-                                                    data,
-                                                } = img
-                                                {
-                                                    serde_json::json!({
+                                            .filter_map(|img| match img {
+                                                ContentBlock::Image { media_type, data } => {
+                                                    Some(serde_json::json!({
                                                         "type": "image_url",
                                                         "image_url": {
                                                             "url": format!("data:{media_type};base64,{data}")
                                                         }
-                                                    })
-                                                } else {
-                                                    serde_json::Value::Null
+                                                    }))
                                                 }
+                                                _ => None,
                                             })
                                             .collect();
                                         messages_json.push(serde_json::json!({

@@ -42,15 +42,23 @@ fn mime_from_extension(ext: &str) -> Option<String> {
     }
 }
 
+fn size_limit_error(bytes: u64) -> ToolError {
+    ToolError::Execution {
+        tool_name: "image_viewer".to_string(),
+        message: format!(
+            "Image is {bytes} bytes; maximum allowed is {} bytes (5MB)",
+            MAX_IMAGE_BYTES
+        ),
+    }
+}
+
 fn validate_image_header(data: &[u8], media_type: &str) -> bool {
     match media_type {
         "image/png" => {
             data.len() >= 8 && data[..8] == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
         }
         "image/jpeg" => data.len() >= 3 && data[..3] == [0xFF, 0xD8, 0xFF],
-        "image/gif" => {
-            data.len() >= 6 && &data[..6] == b"GIF87a" || data.len() >= 6 && &data[..6] == b"GIF89a"
-        }
+        "image/gif" => data.len() >= 6 && matches!(&data[..6], b"GIF87a" | b"GIF89a"),
         "image/webp" => data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP",
         _ => false,
     }
@@ -98,20 +106,23 @@ impl Tool for ImageViewer {
                 ),
             })?;
 
+        let file_size = std::fs::metadata(&validated)
+            .map_err(|e| ToolError::Execution {
+                tool_name: "image_viewer".to_string(),
+                message: format!("Failed to stat {path_str}: {e}"),
+            })?
+            .len();
+        if file_size > MAX_IMAGE_BYTES as u64 {
+            return Err(size_limit_error(file_size));
+        }
+
         let data = std::fs::read(&validated).map_err(|e| ToolError::Execution {
             tool_name: "image_viewer".to_string(),
             message: format!("Failed to read {path_str}: {e}"),
         })?;
 
         if data.len() > MAX_IMAGE_BYTES {
-            return Err(ToolError::Execution {
-                tool_name: "image_viewer".to_string(),
-                message: format!(
-                    "Image is {} bytes; maximum allowed is {} bytes (5MB)",
-                    data.len(),
-                    MAX_IMAGE_BYTES
-                ),
-            });
+            return Err(size_limit_error(data.len() as u64));
         }
 
         if !validate_image_header(&data, &media_type) {
@@ -144,21 +155,6 @@ impl Tool for ImageViewer {
             is_error: false,
             agent_events: vec![],
         })
-    }
-
-    fn markdown_output(&self, result: &ToolResult) -> String {
-        result
-            .content
-            .iter()
-            .filter_map(|b| {
-                if let ContentBlock::Text(s) = b {
-                    Some(s.as_str())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 
