@@ -12,11 +12,9 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 pub struct ImageViewer {
     sandbox: SandboxPolicy,
     schema: Value,
+    description: String,
 }
 
-/// Supported image formats. Each variant owns its extensions, MIME type, and
-/// magic-byte header, so adding a format is a single enum entry plus one arm
-/// in each accessor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ImageFormat {
     Png,
@@ -83,6 +81,7 @@ fn supported_formats_list() -> String {
 
 impl ImageViewer {
     pub fn new(sandbox: SandboxPolicy) -> Self {
+        let formats = supported_formats_list();
         Self {
             sandbox,
             schema: serde_json::json!({
@@ -91,23 +90,39 @@ impl ImageViewer {
                     "path": {
                         "type": "string",
                         "description": format!(
-                            "Path to the image file (relative to sandbox root or absolute within an allowed root). Supported formats: {}.",
-                            supported_formats_list()
+                            "Path to the image file (relative to sandbox root or absolute within an allowed root). Supported formats: {formats}."
                         )
                     }
                 },
                 "required": ["path"]
             }),
+            description: {
+                let formats = ImageFormat::ALL
+                    .iter()
+                    .map(|f| f.display_name().to_uppercase())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Read an image file from disk and return it to the LLM as image content. \
+                     Supports {formats} up to {limit}MB.",
+                    limit = format_limit_megabytes()
+                )
+            },
         }
     }
+}
+
+fn format_limit_megabytes() -> u128 {
+    (MAX_IMAGE_BYTES as u128).div_ceil(1024 * 1024)
 }
 
 fn size_limit_error(bytes: u64) -> ToolError {
     ToolError::Execution {
         tool_name: "image_viewer".to_string(),
         message: format!(
-            "Image is {bytes} bytes; maximum allowed is {} bytes (5MB)",
-            MAX_IMAGE_BYTES
+            "Image is {bytes} bytes; maximum allowed is {} bytes ({}MB)",
+            MAX_IMAGE_BYTES,
+            format_limit_megabytes()
         ),
     }
 }
@@ -119,7 +134,7 @@ impl Tool for ImageViewer {
     }
 
     fn description(&self) -> &str {
-        "Read an image file from disk and return it to the LLM as image content. Supports PNG, JPEG, GIF, and WebP up to 5MB."
+        &self.description
     }
 
     fn input_schema(&self) -> &Value {
@@ -308,6 +323,17 @@ mod tests {
         assert!(
             schema.contains("Supported formats: png, jpeg, gif, webp"),
             "schema must mirror ImageFormat::ALL: {schema}"
+        );
+    }
+
+    #[test]
+    fn description_lists_all_supported_formats_and_limit() {
+        let dir = TempDir::new().expect("temp dir");
+        let tool = ImageViewer::new(make_policy(&dir));
+        assert_eq!(
+            tool.description(),
+            "Read an image file from disk and return it to the LLM as image content. \
+             Supports PNG, JPEG, GIF, WEBP up to 5MB."
         );
     }
 
