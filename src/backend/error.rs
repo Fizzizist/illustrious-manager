@@ -32,10 +32,7 @@ impl BackendError {
         matches!(self, BackendError::MaxTokensExceeded { .. })
     }
 
-    /// Whether the error is a "bad request" (HTTP 400). The agent treats these
-    /// as self-correctable: the error is injected into history so the model can
-    /// adjust (e.g. stop sending image content to a model that doesn't support
-    /// it), and the stream continues rather than terminating.
+    /// Whether the error is a "bad request" (HTTP 400).
     pub fn is_bad_request(&self) -> bool {
         matches!(self, BackendError::HttpStatus { code: 400, .. })
     }

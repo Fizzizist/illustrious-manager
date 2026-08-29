@@ -139,8 +139,6 @@ impl<'a> ConversationRepo<'a> {
     }
 
     /// Atomically deactivate all active rows and re-insert the given messages.
-    /// Wrapped in a transaction so a crash mid-loop cannot leave the database
-    /// with zero active rows.
     pub async fn replace_all(&self, messages: &[Message]) -> Result<()> {
         self.session
             .conn

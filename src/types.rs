@@ -94,16 +94,13 @@ pub enum ContentBlock {
 }
 
 impl ContentBlock {
-    /// Display placeholder for image blocks — used by the agent's display
-    /// path, TUI history rebuild, and stdout frontend. Ensures base64 data
-    /// never leaks into logs or the TUI.
+    /// Display placeholder for image blocks
     pub fn image_placeholder(media_type: &str) -> String {
         format!("[image: {media_type}]")
     }
 }
 
 /// Helper for serializing `ContentBlock::Image` in the Anthropic wire format:
-/// `{"type":"base64","media_type":"...","data":"..."}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ImageSource {
     #[serde(rename = "type")]
@@ -180,10 +177,7 @@ impl Serialize for ContentBlock {
     }
 }
 
-/// Intermediate type for deserializing `ToolResult.content` which can be
-/// either a legacy string (`"content": "output"`) or an array of content
-/// blocks (`"content": [{"type":"text","text":"output"}]`). The legacy arm
-/// keeps old session databases readable after the refactor.
+/// Intermediate type for deserializing `ToolResult.content`
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 enum ToolResultContent {

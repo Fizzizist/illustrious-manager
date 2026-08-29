@@ -6,9 +6,7 @@ use ratatui::widgets::Paragraph;
 const STATUS_BG: Color = Color::Rgb(30, 30, 30);
 
 /// Fixed character-count scale applied to `ContentBlock::Image` blocks in
-/// token-usage estimation. Images have no text content, so the status-line
-/// counter uses this constant to keep estimates sane (actual provider token
-/// cost for images is heuristic anyway).
+/// token-usage estimation.
 const IMAGE_PLACEHOLDER_TOKEN_SCALE: usize = 200;
 
 #[derive(Debug, Clone, Default)]
