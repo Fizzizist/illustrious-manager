@@ -462,43 +462,39 @@ impl Agent {
                 let backend_stream = match backend.send_message(&history_snapshot, &config).await {
                     Ok(s) => s,
                     Err(e) => {
-                        if bad_request_retries_used < max_token_retries
-                            && e.downcast_ref::<crate::backend::error::BackendError>()
-                                .is_some_and(|be| be.is_bad_request())
-                        {
-                            record_retry_stripping_images(
-                                &format!("{e:#}"),
-                                &history_arc,
-                                &session,
-                                &context_prefix_len,
-                                &event_tx,
-                            )
-                            .await;
-                            bad_request_retries_used += 1;
-                            iterations -= 1;
-                            continue 'outer;
-                        }
-
-                        if max_token_retries_used < max_token_retries
-                            && e.downcast_ref::<crate::backend::error::BackendError>()
-                                .is_some_and(|be| be.is_max_tokens())
-                        {
-                            record_retry(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                        let error_msg = format!("{e:#}");
+                        match backend_error_disposition(
+                            &e,
+                            &mut bad_request_retries_used,
+                            &mut max_token_retries_used,
+                            max_token_retries,
+                        ) {
+                            BackendErrorDisposition::RetryStrippingImages => {
+                                record_retry_stripping_images(
+                                    &error_msg,
+                                    &history_arc,
+                                    &session,
+                                    &context_prefix_len,
+                                    &event_tx,
+                                )
                                 .await;
-                            max_token_retries_used += 1;
-                            iterations -= 1;
-                            continue 'outer;
+                                iterations -= 1;
+                                continue 'outer;
+                            }
+                            BackendErrorDisposition::Retry => {
+                                record_retry(&error_msg, &history_arc, &session, &event_tx).await;
+                                iterations -= 1;
+                                continue 'outer;
+                            }
+                            BackendErrorDisposition::Refusal => {
+                                let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
+                                break 'outer;
+                            }
+                            BackendErrorDisposition::Fatal => {
+                                record_error(&error_msg, &history_arc, &session, &event_tx).await;
+                                break 'outer;
+                            }
                         }
-
-                        if e.downcast_ref::<crate::backend::error::BackendError>()
-                            .is_some_and(|be| be.is_refusal())
-                        {
-                            let _ = event_tx.unbounded_send(AgentEvent::Error(format!("{e:#}")));
-                            break 'outer;
-                        }
-
-                        record_error(&format!("{e:#}"), &history_arc, &session, &event_tx).await;
-                        break 'outer;
                     }
                 };
 
@@ -618,45 +614,41 @@ impl Agent {
                                     .await;
                             }
 
-                            if max_token_retries_used < max_token_retries
-                                && e.downcast_ref::<crate::backend::error::BackendError>()
-                                    .is_some_and(|be| be.is_max_tokens())
-                            {
-                                record_retry(&format!("{e:#}"), &history_arc, &session, &event_tx)
+                            let error_msg = format!("{e:#}");
+                            match backend_error_disposition(
+                                &e,
+                                &mut bad_request_retries_used,
+                                &mut max_token_retries_used,
+                                max_token_retries,
+                            ) {
+                                BackendErrorDisposition::RetryStrippingImages => {
+                                    record_retry_stripping_images(
+                                        &error_msg,
+                                        &history_arc,
+                                        &session,
+                                        &context_prefix_len,
+                                        &event_tx,
+                                    )
                                     .await;
-                                max_token_retries_used += 1;
-                                iterations -= 1;
-                                continue 'outer;
+                                    iterations -= 1;
+                                    continue 'outer;
+                                }
+                                BackendErrorDisposition::Retry => {
+                                    record_retry(&error_msg, &history_arc, &session, &event_tx)
+                                        .await;
+                                    iterations -= 1;
+                                    continue 'outer;
+                                }
+                                BackendErrorDisposition::Refusal => {
+                                    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
+                                    break 'outer;
+                                }
+                                BackendErrorDisposition::Fatal => {
+                                    record_error(&error_msg, &history_arc, &session, &event_tx)
+                                        .await;
+                                    break 'outer;
+                                }
                             }
-
-                            if bad_request_retries_used < max_token_retries
-                                && e.downcast_ref::<crate::backend::error::BackendError>()
-                                    .is_some_and(|be| be.is_bad_request())
-                            {
-                                record_retry_stripping_images(
-                                    &format!("{e:#}"),
-                                    &history_arc,
-                                    &session,
-                                    &context_prefix_len,
-                                    &event_tx,
-                                )
-                                .await;
-                                bad_request_retries_used += 1;
-                                iterations -= 1;
-                                continue 'outer;
-                            }
-
-                            if e.downcast_ref::<crate::backend::error::BackendError>()
-                                .is_some_and(|be| be.is_refusal())
-                            {
-                                let _ =
-                                    event_tx.unbounded_send(AgentEvent::Error(format!("{e:#}")));
-                                break 'outer;
-                            }
-
-                            record_error(&format!("{e:#}"), &history_arc, &session, &event_tx)
-                                .await;
-                            break 'outer;
                         }
                     }
                 }
@@ -894,6 +886,39 @@ async fn record_error(
     inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Error).await;
 }
 
+enum BackendErrorDisposition {
+    RetryStrippingImages,
+    Retry,
+    Refusal,
+    Fatal,
+}
+
+/// Triages a backend error into the dispositions shared by the send-time and
+/// mid-stream error arms, consuming one retry budget when a retry is
+/// prescribed.
+fn backend_error_disposition(
+    e: &anyhow::Error,
+    bad_request_retries_used: &mut u32,
+    max_token_retries_used: &mut u32,
+    max_token_retries: u32,
+) -> BackendErrorDisposition {
+    let Some(be) = e.downcast_ref::<crate::backend::error::BackendError>() else {
+        return BackendErrorDisposition::Fatal;
+    };
+    if *bad_request_retries_used < max_token_retries && be.is_bad_request() {
+        *bad_request_retries_used += 1;
+        return BackendErrorDisposition::RetryStrippingImages;
+    }
+    if *max_token_retries_used < max_token_retries && be.is_max_tokens() {
+        *max_token_retries_used += 1;
+        return BackendErrorDisposition::Retry;
+    }
+    if be.is_refusal() {
+        return BackendErrorDisposition::Refusal;
+    }
+    BackendErrorDisposition::Fatal
+}
+
 async fn record_retry(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
@@ -904,15 +929,7 @@ async fn record_retry(
 }
 
 /// Like `record_retry`, but first replaces every `ContentBlock::Image` in
-/// history with a text placeholder.  This is needed when the API rejected the
-/// request because of image content (HTTP 400): simply retrying would send
-/// the same images again and fail identically.  Stripping them lets the
-/// model actually run, see the error, and self-correct (e.g. stop calling
-/// `image_viewer` on a backend that does not support images).
-///
-/// Re-persisted via `Conversation::replace_all` inside a transaction, and
-/// restricted to the persisted suffix of history (beyond the non-persisted
-/// context prefix) so context files are never written to the DB.
+/// history with a text placeholder.
 async fn record_retry_stripping_images(
     error_msg: &str,
     history: &Arc<Mutex<Vec<Message>>>,
