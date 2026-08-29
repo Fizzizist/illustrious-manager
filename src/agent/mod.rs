@@ -23,7 +23,6 @@ mod spawner;
 
 pub use spawner::{
     AgentSpawner, HeadlessOutcome, RegistryBuilder, clamp_confirmation, run_headless, spawn_agent,
-    spawn_agent_with_selection,
 };
 
 struct PendingToolCall {
@@ -861,9 +860,7 @@ enum BackendErrorDisposition {
     Fatal,
 }
 
-/// Triages a backend error into the dispositions shared by the send-time and
-/// mid-stream error arms, consuming one retry budget when a retry is
-/// prescribed.
+/// Triages a backend errors
 fn backend_error_disposition(
     e: &anyhow::Error,
     bad_request_retries_used: &mut u32,
@@ -887,9 +884,7 @@ fn backend_error_disposition(
     BackendErrorDisposition::Fatal
 }
 
-/// Records the error prescribed by `backend_error_disposition` and returns
-/// `true` when the caller's loop should break (terminal disposition), or
-/// `false` when it should decrement its iteration budget and retry.
+/// Records the error prescribed by `backend_error_disposition`
 #[allow(clippy::too_many_arguments)]
 async fn record_backend_error(
     e: &anyhow::Error,
@@ -1285,9 +1280,7 @@ fn truncate_tool_result(content: &str, max_bytes: u64) -> String {
 }
 
 /// Render content blocks into a display string for `AgentEvent::ToolResult`
-/// and the TUI/stdout frontends. Text blocks are joined with newlines; image
-/// blocks become `[image: media_type]` placeholders so base64 never touches
-/// logs or the TUI. Non-display blocks (thinking, etc.) are omitted.
+/// and the TUI/stdout frontends.
 fn blocks_to_display_string(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
@@ -1302,9 +1295,7 @@ fn blocks_to_display_string(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
-/// Per-block truncation for tool results stored in history. Text blocks are
-/// individually truncated via `truncate_tool_result`; image blocks pass
-/// through whole (the tool pre-enforces the size cap).
+/// Per-block truncation for tool results stored in history.
 fn truncate_tool_result_blocks(blocks: &[ContentBlock], max_bytes: u64) -> Vec<ContentBlock> {
     blocks
         .iter()
@@ -2554,7 +2545,7 @@ mod tests {
 
         let registry = ToolRegistry::new();
 
-        let agent = super::spawn_agent_with_selection(
+        let agent = super::spawn_agent(
             selection,
             &tool_config,
             &crate::config::RetryConfig::default(),
@@ -2562,7 +2553,7 @@ mod tests {
             registry,
         )
         .await
-        .expect("spawn_agent_with_selection should succeed");
+        .expect("spawn_agent should succeed");
 
         assert_eq!(
             agent.model(),

@@ -362,11 +362,11 @@ mod tests {
     // ── Integration test: AgentTool creates a new session DB ─────────────
     //
     // Uses a real AgentSpawner wired to a fake LLM backend via
-    // `spawn_agent_with_selection`, bypassing BackendFactory auth.
+    // `spawn_agent`, bypassing BackendFactory auth.
 
     #[tokio::test]
     async fn agent_tool_creates_new_session_db() {
-        use crate::agent::spawn_agent_with_selection;
+        use crate::agent::spawn_agent;
         use crate::backend::BackendSelection;
         use crate::config::{AppConfig, RetryConfig, ToolsConfig, VertexConfig};
         use crate::session::Session;
@@ -470,7 +470,7 @@ mod tests {
                     max_tokens: 8_192,
                 };
 
-                let agent = match spawn_agent_with_selection(
+                let agent = match spawn_agent(
                     selection,
                     &tool_config,
                     &crate::config::RetryConfig::default(),

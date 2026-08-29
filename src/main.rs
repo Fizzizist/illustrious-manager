@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use agent::spawn_agent_with_selection;
+use agent::spawn_agent;
 use backend::BackendFactory;
 use logging::Logger;
 use session::Session;
@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
     )?;
 
     let agent = Arc::new(
-        spawn_agent_with_selection(
+        spawn_agent(
             default_selection,
             &app_config.tools,
             &app_config.retry,
