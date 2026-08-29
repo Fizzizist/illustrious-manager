@@ -463,38 +463,23 @@ impl Agent {
                     Ok(s) => s,
                     Err(e) => {
                         let error_msg = format!("{e:#}");
-                        match backend_error_disposition(
+                        if record_backend_error(
                             &e,
+                            &error_msg,
                             &mut bad_request_retries_used,
                             &mut max_token_retries_used,
                             max_token_retries,
-                        ) {
-                            BackendErrorDisposition::RetryStrippingImages => {
-                                record_retry_stripping_images(
-                                    &error_msg,
-                                    &history_arc,
-                                    &session,
-                                    &context_prefix_len,
-                                    &event_tx,
-                                )
-                                .await;
-                                iterations -= 1;
-                                continue 'outer;
-                            }
-                            BackendErrorDisposition::Retry => {
-                                record_retry(&error_msg, &history_arc, &session, &event_tx).await;
-                                iterations -= 1;
-                                continue 'outer;
-                            }
-                            BackendErrorDisposition::Refusal => {
-                                let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
-                                break 'outer;
-                            }
-                            BackendErrorDisposition::Fatal => {
-                                record_error(&error_msg, &history_arc, &session, &event_tx).await;
-                                break 'outer;
-                            }
+                            &history_arc,
+                            &session,
+                            &context_prefix_len,
+                            &event_tx,
+                        )
+                        .await
+                        {
+                            break 'outer;
                         }
+                        iterations -= 1;
+                        continue 'outer;
                     }
                 };
 
@@ -615,40 +600,23 @@ impl Agent {
                             }
 
                             let error_msg = format!("{e:#}");
-                            match backend_error_disposition(
+                            if record_backend_error(
                                 &e,
+                                &error_msg,
                                 &mut bad_request_retries_used,
                                 &mut max_token_retries_used,
                                 max_token_retries,
-                            ) {
-                                BackendErrorDisposition::RetryStrippingImages => {
-                                    record_retry_stripping_images(
-                                        &error_msg,
-                                        &history_arc,
-                                        &session,
-                                        &context_prefix_len,
-                                        &event_tx,
-                                    )
-                                    .await;
-                                    iterations -= 1;
-                                    continue 'outer;
-                                }
-                                BackendErrorDisposition::Retry => {
-                                    record_retry(&error_msg, &history_arc, &session, &event_tx)
-                                        .await;
-                                    iterations -= 1;
-                                    continue 'outer;
-                                }
-                                BackendErrorDisposition::Refusal => {
-                                    let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg));
-                                    break 'outer;
-                                }
-                                BackendErrorDisposition::Fatal => {
-                                    record_error(&error_msg, &history_arc, &session, &event_tx)
-                                        .await;
-                                    break 'outer;
-                                }
+                                &history_arc,
+                                &session,
+                                &context_prefix_len,
+                                &event_tx,
+                            )
+                            .await
+                            {
+                                break 'outer;
                             }
+                            iterations -= 1;
+                            continue 'outer;
                         }
                     }
                 }
@@ -917,6 +885,53 @@ fn backend_error_disposition(
         return BackendErrorDisposition::Refusal;
     }
     BackendErrorDisposition::Fatal
+}
+
+/// Records the error prescribed by `backend_error_disposition` and returns
+/// `true` when the caller's loop should break (terminal disposition), or
+/// `false` when it should decrement its iteration budget and retry.
+#[allow(clippy::too_many_arguments)]
+async fn record_backend_error(
+    e: &anyhow::Error,
+    error_msg: &str,
+    bad_request_retries_used: &mut u32,
+    max_token_retries_used: &mut u32,
+    max_token_retries: u32,
+    history: &Arc<Mutex<Vec<Message>>>,
+    session: &Arc<TokioMutex<Session>>,
+    context_prefix_len: &Arc<Mutex<usize>>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> bool {
+    match backend_error_disposition(
+        e,
+        bad_request_retries_used,
+        max_token_retries_used,
+        max_token_retries,
+    ) {
+        BackendErrorDisposition::RetryStrippingImages => {
+            record_retry_stripping_images(
+                error_msg,
+                history,
+                session,
+                context_prefix_len,
+                event_tx,
+            )
+            .await;
+            false
+        }
+        BackendErrorDisposition::Retry => {
+            record_retry(error_msg, history, session, event_tx).await;
+            false
+        }
+        BackendErrorDisposition::Refusal => {
+            let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
+            true
+        }
+        BackendErrorDisposition::Fatal => {
+            record_error(error_msg, history, session, event_tx).await;
+            true
+        }
+    }
 }
 
 async fn record_retry(
