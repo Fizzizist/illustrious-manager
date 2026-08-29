@@ -5,6 +5,10 @@ use ratatui::widgets::Paragraph;
 
 const STATUS_BG: Color = Color::Rgb(30, 30, 30);
 
+/// Fixed character-count scale applied to `ContentBlock::Image` blocks in
+/// token-usage estimation.
+const IMAGE_PLACEHOLDER_TOKEN_SCALE: usize = 200;
+
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
     pub input_tokens: u64,
@@ -46,10 +50,22 @@ pub fn estimate_usage_from_messages(messages: &[crate::types::Message]) -> (u32,
             .iter()
             .map(|block| match block {
                 crate::types::ContentBlock::Text(t) => t.len(),
+                crate::types::ContentBlock::Image { media_type, .. } => {
+                    media_type.len() + IMAGE_PLACEHOLDER_TOKEN_SCALE
+                }
                 crate::types::ContentBlock::ToolUse { name, input, .. } => {
                     name.len() + input.to_string().len()
                 }
-                crate::types::ContentBlock::ToolResult { content, .. } => content.len(),
+                crate::types::ContentBlock::ToolResult { content, .. } => content
+                    .iter()
+                    .map(|b| match b {
+                        crate::types::ContentBlock::Text(t) => t.len(),
+                        crate::types::ContentBlock::Image { media_type, .. } => {
+                            media_type.len() + IMAGE_PLACEHOLDER_TOKEN_SCALE
+                        }
+                        _ => 0,
+                    })
+                    .sum(),
                 // Thinking is excluded from the context budget estimate
                 crate::types::ContentBlock::Thinking { .. } => 0,
                 crate::types::ContentBlock::RedactedThinking { .. } => 0,
@@ -512,7 +528,7 @@ mod tests {
             role: Role::User,
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: "t1".to_string(),
-                content: "a".repeat(40),
+                content: vec![ContentBlock::Text("a".repeat(40))],
                 is_error: false,
             }],
             created_at: 0.0,

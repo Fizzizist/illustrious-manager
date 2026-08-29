@@ -138,6 +138,35 @@ impl<'a> ConversationRepo<'a> {
         Ok(())
     }
 
+    /// Atomically deactivate all active rows and re-insert the given messages.
+    pub async fn replace_all(&self, messages: &[Message]) -> Result<()> {
+        self.session
+            .conn
+            .execute("BEGIN TRANSACTION", ())
+            .await
+            .context("Failed to begin replace_all transaction")?;
+
+        if let Err(e) = self.deactivate_all().await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        for msg in messages {
+            if let Err(e) = self.insert_message(msg).await {
+                let _ = self.session.conn.execute("ROLLBACK", ()).await;
+                return Err(e);
+            }
+        }
+
+        self.session
+            .conn
+            .execute("COMMIT", ())
+            .await
+            .context("Failed to commit replace_all transaction")?;
+
+        Ok(())
+    }
+
     pub async fn read_first_user_message(&self) -> Result<String> {
         let mut rows = self
             .session

@@ -67,11 +67,21 @@ pub fn log_tool_use(name: &str, input: &serde_json::Value) {
 }
 
 pub fn log_tool_result(name: &str, content: &str, is_error: bool) {
+    let max_log = 8_192;
+    let display = if content.len() > max_log {
+        format!(
+            "{}\n[... log output truncated: {} bytes elided ...]",
+            &content[..content.floor_char_boundary(max_log)],
+            content.len()
+        )
+    } else {
+        content.to_string()
+    };
     with_global_writer(|w| {
         let _ = writeln!(
             w,
             "[TOOL RESULT]\nname: {}\ncontent: {}\nis_error: {}\n",
-            name, content, is_error
+            name, display, is_error
         );
     });
 }

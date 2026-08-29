@@ -153,6 +153,24 @@ impl AgentSpawner {
             }
         };
 
+        let tool_config = ToolsConfig {
+            confirmation,
+            ..self.app_config.tools.clone()
+        };
+
+        let selection = match self.factory.for_role(role).await {
+            Ok(s) => s,
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
+                };
+            }
+        };
+
         let registry = match (self.registry_builder)(Arc::clone(&session)) {
             Ok(r) => r,
             Err(e) => {
@@ -174,25 +192,7 @@ impl AgentSpawner {
             registry
         };
 
-        let tool_config = ToolsConfig {
-            confirmation,
-            ..self.app_config.tools.clone()
-        };
-
-        let selection = match self.factory.for_role(role).await {
-            Ok(s) => s,
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to resolve role '{role}': {e}")),
-                };
-            }
-        };
-
-        let agent = match spawn_agent_with_selection(
+        let agent = match spawn_agent(
             selection,
             &tool_config,
             &self.app_config.retry,
@@ -231,27 +231,11 @@ impl AgentSpawner {
     }
 }
 
-/// Spawn a fresh `Agent` for the given named role using the shared `BackendFactory`.
-///
-/// The caller supplies a pre-built `ToolRegistry` and a `Session`. The agent's
-/// model is taken from the role definition; `tool_config` controls iteration
-/// limits and confirmation behaviour.
+/// Constructs an `Agent` from a resolved `BackendSelection`, tool config,
+/// and pre-built `ToolRegistry` + `Session`. Callers resolve the selection
+/// via `BackendFactory::for_role()` (or build one directly with a fake
+/// backend for testing) before calling this.
 pub async fn spawn_agent(
-    factory: &BackendFactory,
-    role: &str,
-    tool_config: &ToolsConfig,
-    retry_config: &crate::config::RetryConfig,
-    session: Arc<TokioMutex<Session>>,
-    tools: ToolRegistry,
-) -> anyhow::Result<Agent> {
-    let selection = factory.for_role(role).await?;
-    spawn_agent_with_selection(selection, tool_config, retry_config, session, tools).await
-}
-
-/// Core of `spawn_agent` — constructs an `Agent` from an already-resolved
-/// `BackendSelection`. Separated out so tests can inject a fake backend without
-/// going through real auth.
-pub async fn spawn_agent_with_selection(
     selection: crate::backend::BackendSelection,
     tool_config: &ToolsConfig,
     retry_config: &crate::config::RetryConfig,

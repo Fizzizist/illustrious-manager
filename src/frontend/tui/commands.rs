@@ -1553,7 +1553,7 @@ mod tests {
                         content,
                         is_error,
                         ..
-                    } if content.contains("cancelled") && *is_error
+                    } if content.iter().any(|cb| matches!(cb, ContentBlock::Text(t) if t.contains("cancelled"))) && *is_error
                 )
             })
         });

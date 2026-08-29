@@ -152,8 +152,6 @@ impl BackendFactory {
         let resolved = self.config.resolve_role(role)?;
         match resolved.backend_name.as_str() {
             "vertex" => {
-                // TODO: per-role project/region overrides — when `ModelRole` gains
-                // those fields, pass them here instead of reading from `self.config.vertex`.
                 let project = self.config.vertex.project.clone();
                 let region = self.config.vertex.region.clone();
                 let auth = self

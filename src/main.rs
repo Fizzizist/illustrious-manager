@@ -27,6 +27,7 @@ use tools::ToolRegistry;
 use tools::agent::AgentTool;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
+use tools::image_viewer::ImageViewer;
 use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
@@ -157,6 +158,8 @@ async fn main() -> Result<()> {
 
     let chat_mode = crate::types::ChatMode::new(cli.chat);
 
+    let default_selection = factory.for_role("default").await?;
+
     let mut registry = build_tool_registry(
         Arc::clone(&session_arc),
         &app_config.tools,
@@ -175,8 +178,7 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(
         spawn_agent(
-            &factory,
-            "default",
+            default_selection,
             &app_config.tools,
             &app_config.retry,
             session_arc,
@@ -304,7 +306,7 @@ fn build_tool_registry(
         chat_mode.clone(),
     )))?;
     reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
-    reg.register(Box::new(WriteFileTool::new(sandbox_policy)))?;
+    reg.register(Box::new(WriteFileTool::new(sandbox_policy.clone())))?;
     reg.register(Box::new(SearchTool::new(PathBuf::from(
         &tools_config.sandbox_root,
     ))))?;
@@ -313,6 +315,7 @@ fn build_tool_registry(
     reg.register(Box::new(ListTasksTool::new(Arc::clone(&session))))?;
     reg.register(Box::new(UpdateTaskTool::new(Arc::clone(&session))))?;
     reg.register(Box::new(DeleteTaskTool::new(session)))?;
+    reg.register(Box::new(ImageViewer::new(sandbox_policy)))?;
     if let Some(tool) = agent_tool {
         reg.register(Box::new(tool))?;
     }

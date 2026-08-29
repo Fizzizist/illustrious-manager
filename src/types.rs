@@ -70,6 +70,10 @@ impl Default for ThinkingConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
     Text(String),
+    Image {
+        media_type: String,
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -77,7 +81,7 @@ pub enum ContentBlock {
     },
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: Vec<ContentBlock>,
         is_error: bool,
     },
     Thinking {
@@ -87,6 +91,22 @@ pub enum ContentBlock {
     RedactedThinking {
         data: String,
     },
+}
+
+impl ContentBlock {
+    /// Display placeholder for image blocks
+    pub fn image_placeholder(media_type: &str) -> String {
+        format!("[image: {media_type}]")
+    }
+}
+
+/// Helper for serializing `ContentBlock::Image` in the Anthropic wire format:
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 impl Serialize for ContentBlock {
@@ -100,6 +120,20 @@ impl Serialize for ContentBlock {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("type", "text")?;
                 map.serialize_entry("text", s)?;
+                map.end()
+            }
+            ContentBlock::Image { media_type, data } => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("type", "image")?;
+                map.serialize_entry(
+                    "source",
+                    &ImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: media_type.clone(),
+                        data: data.clone(),
+                    },
+                )?;
                 map.end()
             }
             ContentBlock::ToolUse { id, name, input } => {
@@ -117,7 +151,7 @@ impl Serialize for ContentBlock {
                 is_error,
             } => {
                 use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map = serializer.serialize_map(Some(3))?;
                 map.serialize_entry("type", "tool_result")?;
                 map.serialize_entry("tool_use_id", tool_use_id)?;
                 map.serialize_entry("content", content)?;
@@ -139,6 +173,23 @@ impl Serialize for ContentBlock {
                 map.serialize_entry("data", data)?;
                 map.end()
             }
+        }
+    }
+}
+
+/// Intermediate type for deserializing `ToolResult.content`
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum ToolResultContent {
+    Blocks(Vec<ContentBlock>),
+    Legacy(String),
+}
+
+impl ToolResultContent {
+    fn into_blocks(self) -> Vec<ContentBlock> {
+        match self {
+            ToolResultContent::Blocks(blocks) => blocks,
+            ToolResultContent::Legacy(s) => vec![ContentBlock::Text(s)],
         }
     }
 }
@@ -183,11 +234,12 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let mut name = None;
                 let mut input = None;
                 let mut tool_use_id = None;
-                let mut content = None;
+                let mut content: Option<ToolResultContent> = None;
                 let mut is_error = None;
                 let mut text = None;
                 let mut signature = None;
                 let mut data = None;
+                let mut image_source: Option<ImageSource> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -224,6 +276,9 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         "data" => {
                             data = Some(map.next_value()?);
                         }
+                        "source" => {
+                            image_source = Some(map.next_value()?);
+                        }
                         _ => {
                             map.next_value::<serde::de::IgnoredAny>()?;
                         }
@@ -234,6 +289,14 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     Some("text") => Ok(ContentBlock::Text(
                         text.ok_or_else(|| de::Error::missing_field("text"))?,
                     )),
+                    Some("image") => {
+                        let source =
+                            image_source.ok_or_else(|| de::Error::missing_field("source"))?;
+                        Ok(ContentBlock::Image {
+                            media_type: source.media_type,
+                            data: source.data,
+                        })
+                    }
                     Some("tool_use") => Ok(ContentBlock::ToolUse {
                         id: id.ok_or_else(|| de::Error::missing_field("id"))?,
                         name: name.ok_or_else(|| de::Error::missing_field("name"))?,
@@ -242,7 +305,9 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     Some("tool_result") => Ok(ContentBlock::ToolResult {
                         tool_use_id: tool_use_id
                             .ok_or_else(|| de::Error::missing_field("tool_use_id"))?,
-                        content: content.ok_or_else(|| de::Error::missing_field("content"))?,
+                        content: content
+                            .ok_or_else(|| de::Error::missing_field("content"))?
+                            .into_blocks(),
                         is_error: is_error.ok_or_else(|| de::Error::missing_field("is_error"))?,
                     }),
                     Some("thinking") => Ok(ContentBlock::Thinking {
@@ -257,6 +322,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         other,
                         &[
                             "text",
+                            "image",
                             "tool_use",
                             "tool_result",
                             "thinking",
@@ -532,7 +598,7 @@ mod tests {
     fn content_block_tool_result_variant_contains_tool_use_id_content_and_error_flag() {
         let block = ContentBlock::ToolResult {
             tool_use_id: "tool-123".to_string(),
-            content: "output".to_string(),
+            content: vec![ContentBlock::Text("output".to_string())],
             is_error: false,
         };
         assert!(matches!(block, ContentBlock::ToolResult { .. }));
@@ -543,7 +609,7 @@ mod tests {
         } = block
         {
             assert_eq!(tool_use_id, "tool-123");
-            assert_eq!(content, "output");
+            assert_eq!(content, vec![ContentBlock::Text("output".to_string())]);
             assert!(!is_error);
         }
     }
@@ -598,14 +664,15 @@ mod tests {
     fn content_block_tool_result_serializes_to_object() {
         let block = ContentBlock::ToolResult {
             tool_use_id: "tool-123".to_string(),
-            content: "output".to_string(),
+            content: vec![ContentBlock::Text("output".to_string())],
             is_error: false,
         };
         let json = serde_json::to_string(&block).expect("ContentBlock should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
         assert_eq!(parsed["type"], "tool_result");
         assert_eq!(parsed["tool_use_id"], "tool-123");
-        assert_eq!(parsed["content"], "output");
+        assert_eq!(parsed["content"][0]["type"], "text");
+        assert_eq!(parsed["content"][0]["text"], "output");
         assert_eq!(parsed["is_error"], false);
     }
 
@@ -907,6 +974,94 @@ mod tests {
         assert!(matches!(&msg.content[0], ContentBlock::Text(_)));
         assert!(matches!(&msg.content[1], ContentBlock::ToolUse { .. }));
         assert!(matches!(&msg.content[2], ContentBlock::ToolResult { .. }));
+    }
+
+    #[test]
+    fn legacy_string_tool_result_content_deserializes_to_text_block() {
+        let json = r#"{
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "legacy string output",
+            "is_error": false
+        }"#;
+        let block: ContentBlock =
+            serde_json::from_str(json).expect("should deserialize legacy string content");
+        match &block {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    content,
+                    &vec![ContentBlock::Text("legacy string output".to_string())]
+                );
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn array_tool_result_content_roundtrips_through_serde() {
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "t2".to_string(),
+            content: vec![
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBOR".to_string(),
+                },
+                ContentBlock::Text("companion text".to_string()),
+            ],
+            is_error: false,
+        };
+        let json = serde_json::to_string(&block).expect("serialize");
+        let deserialized: ContentBlock = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(block, deserialized);
+    }
+
+    #[test]
+    fn image_content_block_roundtrips_through_serde() {
+        let original = ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo=".to_string(),
+        };
+        let json = serde_json::to_string(&original).expect("serialize");
+        let deserialized: ContentBlock = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn image_serializes_to_anthropic_format() {
+        let block = ContentBlock::Image {
+            media_type: "image/jpeg".to_string(),
+            data: "/9j/4AAQ".to_string(),
+        };
+        let json = serde_json::to_string(&block).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed["type"], "image");
+        assert_eq!(parsed["source"]["type"], "base64");
+        assert_eq!(parsed["source"]["media_type"], "image/jpeg");
+        assert_eq!(parsed["source"]["data"], "/9j/4AAQ");
+    }
+
+    #[test]
+    fn image_deserializes_from_anthropic_json() {
+        let json = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}"#;
+        let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
+        match block {
+            ContentBlock::Image { media_type, data } => {
+                assert_eq!(media_type, "image/png");
+                assert_eq!(data, "iVBOR");
+            }
+            other => panic!("expected Image block, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_variant_list_includes_image() {
+        let json = r#"{"type":"unknown_type","text":"x"}"#;
+        let err = serde_json::from_str::<ContentBlock>(json).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("image"),
+            "unknown variant error should list 'image': {msg}"
+        );
     }
 
     #[test]
