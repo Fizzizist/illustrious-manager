@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::Client;
 
 use super::LlmBackend;
 use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig, AuthStyle};
@@ -47,7 +46,7 @@ impl AnthropicBackend {
         };
 
         Ok(Self(AnthropicCompatBackend::new(
-            Client::new(),
+            super::build_http_client()?,
             compat_config,
         )))
     }
