@@ -1,4 +1,4 @@
-use crate::tools::{Tool, ToolError, ToolResult};
+use crate::tools::{Tool, ToolError, ToolResult, run_blocking};
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -58,12 +58,17 @@ impl Tool for SkillTool {
             message: format!("Skill '{}' not found", name),
         })?;
 
-        let content = std::fs::read_to_string(path).map_err(|e| ToolError::Execution {
-            tool_name: "skill".to_string(),
-            message: format!("Failed to read skill file: {}", e),
-        })?;
+        let path_display = path.display().to_string();
+        let path = path.clone();
+        let content = run_blocking("skill", move || {
+            std::fs::read_to_string(&path).map_err(|e| ToolError::Execution {
+                tool_name: "skill".to_string(),
+                message: format!("Failed to read skill file: {}", e),
+            })
+        })
+        .await?;
 
-        let output = format!("Skill path: {}\n\n{}", path.display(), content);
+        let output = format!("Skill path: {}\n\n{}", path_display, content);
 
         Ok(ToolResult {
             content: vec![ContentBlock::Text(output)],

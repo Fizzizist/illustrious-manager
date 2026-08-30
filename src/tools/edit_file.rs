@@ -1,9 +1,11 @@
 use crate::tools::sandbox::SandboxPolicy;
-use crate::tools::{Tool, ToolError, ToolResult};
+use crate::tools::{Tool, ToolError, ToolResult, run_blocking};
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
+
+const TOOL: &str = "edit_file";
 
 /// EditFile tool for performing exact string replacements in files
 ///
@@ -127,41 +129,48 @@ impl Tool for EditFile {
                     message: format!("Path validation failed: {}", e),
                 })?;
 
-        let content = fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
-            tool_name: self.name().to_string(),
-            message: format!("Failed to read file: {}", e),
-        })?;
+        let old_string = old_string.to_string();
+        let new_string = new_string.to_string();
 
-        if !content.contains(old_string) {
-            return Err(ToolError::Execution {
-                tool_name: self.name().to_string(),
-                message: "'old_string' not found in file".to_string(),
-            });
-        }
+        run_blocking(self.name(), move || -> Result<ToolResult, ToolError> {
+            let content =
+                fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
+                    tool_name: TOOL.to_string(),
+                    message: format!("Failed to read file: {}", e),
+                })?;
 
-        let matches = content.matches(old_string).count();
-        if matches > 1 {
-            return Err(ToolError::Execution {
-                tool_name: self.name().to_string(),
-                message: format!("'old_string' matches {} locations, must be unique", matches),
-            });
-        }
+            if !content.contains(&old_string) {
+                return Err(ToolError::Execution {
+                    tool_name: TOOL.to_string(),
+                    message: "'old_string' not found in file".to_string(),
+                });
+            }
 
-        let new_content = content.replacen(old_string, new_string, 1);
+            let matches = content.matches(&old_string).count();
+            if matches > 1 {
+                return Err(ToolError::Execution {
+                    tool_name: TOOL.to_string(),
+                    message: format!("'old_string' matches {} locations, must be unique", matches),
+                });
+            }
 
-        fs::write(&validated_path, new_content).map_err(|e| ToolError::Execution {
-            tool_name: self.name().to_string(),
-            message: format!("Failed to write file: {}", e),
-        })?;
+            let new_content = content.replacen(&old_string, &new_string, 1);
 
-        Ok(ToolResult {
-            content: vec![ContentBlock::Text(format!(
-                "Successfully replaced string in {:?}",
-                validated_path
-            ))],
-            is_error: false,
-            agent_events: vec![],
+            fs::write(&validated_path, new_content).map_err(|e| ToolError::Execution {
+                tool_name: TOOL.to_string(),
+                message: format!("Failed to write file: {}", e),
+            })?;
+
+            Ok(ToolResult {
+                content: vec![ContentBlock::Text(format!(
+                    "Successfully replaced string in {:?}",
+                    validated_path
+                ))],
+                is_error: false,
+                agent_events: vec![],
+            })
         })
+        .await
     }
 }
 

@@ -2,9 +2,9 @@ use crate::types::ContentBlock;
 use async_trait::async_trait;
 use search_semantically::SearchEngine;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::{Tool, ToolError, ToolResult};
+use super::{Tool, ToolError, ToolResult, run_blocking};
 
 pub struct SearchTool {
     sandbox_root: PathBuf,
@@ -43,9 +43,9 @@ impl SearchTool {
         }
     }
 
-    fn delete_index_db(&self) {
+    fn delete_index_db(root: &Path) {
         for suffix in &["search.db", "search.db-wal", "search.db-shm"] {
-            let path = self.sandbox_root.join(".search-index").join(suffix);
+            let path = root.join(".search-index").join(suffix);
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -75,25 +75,29 @@ impl Tool for SearchTool {
         let limit = input["limit"].as_u64().unwrap_or(20) as usize;
         let restrict_to_dir = input["restrictToDir"].as_str().map(String::from);
         let rebuild = input["rebuild"].as_bool().unwrap_or(false);
+        let query = query.to_string();
+        let sandbox_root = self.sandbox_root.clone();
 
-        if rebuild {
-            self.delete_index_db();
-        }
+        let output = run_blocking("search", move || {
+            if rebuild {
+                Self::delete_index_db(&sandbox_root);
+            }
 
-        let engine = SearchEngine::new(self.sandbox_root.clone());
-        let result = engine.search(query, limit, restrict_to_dir.as_deref());
+            let engine = SearchEngine::new(sandbox_root);
+            engine
+                .search(&query, limit, restrict_to_dir.as_deref())
+                .map_err(|e| ToolError::Execution {
+                    tool_name: "search".to_string(),
+                    message: e.to_string(),
+                })
+        })
+        .await?;
 
-        match result {
-            Ok(output) => Ok(ToolResult {
-                content: vec![ContentBlock::Text(output)],
-                is_error: false,
-                agent_events: vec![],
-            }),
-            Err(e) => Err(ToolError::Execution {
-                tool_name: "search".to_string(),
-                message: e.to_string(),
-            }),
-        }
+        Ok(ToolResult {
+            content: vec![ContentBlock::Text(output)],
+            is_error: false,
+            agent_events: vec![],
+        })
     }
 }
 
@@ -167,8 +171,7 @@ mod tests {
         std::fs::write(index_dir.join("search.db"), "fake db content").expect("write");
         std::fs::write(index_dir.join("search.db-wal"), "wal").expect("write");
 
-        let tool = SearchTool::new(temp.path().to_path_buf());
-        tool.delete_index_db();
+        SearchTool::delete_index_db(temp.path());
 
         assert!(!index_dir.join("search.db").exists());
         assert!(!index_dir.join("search.db-wal").exists());
