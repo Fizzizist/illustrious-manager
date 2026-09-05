@@ -93,7 +93,9 @@ fn scan_skills_dir(dir: &Path, skills: &mut HashMap<String, PathBuf>) {
 pub fn discover_skills(pwd: &Path, home: &Path) -> HashMap<String, PathBuf> {
     let mut skills = HashMap::new();
     scan_skills_dir(&home.join(".claude/skills"), &mut skills);
+    scan_skills_dir(&home.join(".agents/skills"), &mut skills);
     scan_skills_dir(&pwd.join(".claude/skills"), &mut skills);
+    scan_skills_dir(&pwd.join(".agents/skills"), &mut skills);
     skills
 }
 
@@ -101,9 +103,11 @@ pub fn discover_skills_from_env() -> HashMap<String, PathBuf> {
     let mut skills = HashMap::new();
     if let Some(home) = dirs::home_dir() {
         scan_skills_dir(&home.join(".claude/skills"), &mut skills);
+        scan_skills_dir(&home.join(".agents/skills"), &mut skills);
     }
     if let Ok(pwd) = std::env::current_dir() {
         scan_skills_dir(&pwd.join(".claude/skills"), &mut skills);
+        scan_skills_dir(&pwd.join(".agents/skills"), &mut skills);
     }
     skills
 }
@@ -144,11 +148,17 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn make_skill(base: &Path, name: &str, content: &str) {
-        let skill_dir = base.join(".claude/skills").join(name);
+    fn make_skill_in(base: &Path, root: &str, name: &str, content: &str) {
+        let skill_dir = base.join(root).join("skills").join(name);
         fs::create_dir_all(&skill_dir).expect("create skill dir");
-        let mut f = File::create(skill_dir.join("SKILL.md")).expect("create SKILL.md");
-        f.write_all(content.as_bytes()).expect("write SKILL.md");
+        File::create(skill_dir.join("SKILL.md"))
+            .expect("create SKILL.md")
+            .write_all(content.as_bytes())
+            .expect("write SKILL.md");
+    }
+
+    fn make_skill(base: &Path, name: &str, content: &str) {
+        make_skill_in(base, ".claude", name, content);
     }
 
     #[tokio::test]
@@ -225,6 +235,56 @@ mod tests {
         assert_eq!(
             content, "# Pwd version",
             "pwd skill should override home skill"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_skills_finds_skills_in_dot_agents_dirs() {
+        let pwd = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        make_skill_in(
+            home.path(),
+            ".agents",
+            "home-agent-skill",
+            "# Home Agent Skill",
+        );
+        make_skill_in(
+            pwd.path(),
+            ".agents",
+            "pwd-agent-skill",
+            "# Pwd Agent Skill",
+        );
+
+        let skills = discover_skills(pwd.path(), home.path());
+
+        assert!(skills.contains_key("home-agent-skill"));
+        assert!(skills.contains_key("pwd-agent-skill"));
+    }
+
+    #[tokio::test]
+    async fn pwd_dot_agents_skill_overrides_home_dot_agents_skill_with_same_name() {
+        let pwd = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        make_skill_in(
+            home.path(),
+            ".agents",
+            "shared-skill",
+            "# Home .agents version",
+        );
+        make_skill_in(
+            pwd.path(),
+            ".agents",
+            "shared-skill",
+            "# Pwd .agents version",
+        );
+
+        let skills = discover_skills(pwd.path(), home.path());
+
+        assert_eq!(skills.len(), 1, "should have one entry for the skill");
+        let content = fs::read_to_string(&skills["shared-skill"]).unwrap();
+        assert_eq!(
+            content, "# Pwd .agents version",
+            "pwd .agents skill should override home .agents skill"
         );
     }
 

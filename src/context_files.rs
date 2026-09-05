@@ -23,6 +23,7 @@ pub fn discover_context_files_from_env() -> Result<Vec<ContextFile>> {
                 pwd.join(".claude/CLAUDE.md"),
                 pwd.join("CLAUDE.md"),
                 pwd.join("AGENTS.md"),
+                pwd.join(".agents/AGENTS.md"),
             ];
 
             for path in pwd_locations {
@@ -44,9 +45,11 @@ pub fn discover_context_files(pwd: &Path, home: &Path) -> Result<Vec<ContextFile
         pwd.join(".claude/CLAUDE.md"),
         pwd.join("CLAUDE.md"),
         pwd.join("AGENTS.md"),
+        pwd.join(".agents/AGENTS.md"),
         home.join(".claude/CLAUDE.md"),
         home.join("CLAUDE.md"),
         home.join("AGENTS.md"),
+        home.join(".agents/AGENTS.md"),
     ];
 
     for path in locations {
@@ -196,5 +199,36 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, pwd_claude);
+    }
+
+    #[test]
+    fn discover_context_files_finds_agents_md_in_dot_agents_dirs() {
+        let temp_pwd = TempDir::new().expect("create temp pwd");
+        let temp_home = TempDir::new().expect("create temp home");
+
+        let pwd_agents_dir = temp_pwd.path().join(".agents");
+        fs::create_dir(&pwd_agents_dir).expect("create .agents dir");
+        let pwd_agents_md = pwd_agents_dir.join("AGENTS.md");
+        File::create(&pwd_agents_md)
+            .expect("create AGENTS.md")
+            .write_all(b"PWD .agents content")
+            .expect("write AGENTS.md");
+
+        let home_agents_dir = temp_home.path().join(".agents");
+        fs::create_dir(&home_agents_dir).expect("create .agents dir");
+        let home_agents_md = home_agents_dir.join("AGENTS.md");
+        File::create(&home_agents_md)
+            .expect("create AGENTS.md")
+            .write_all(b"HOME .agents content")
+            .expect("write AGENTS.md");
+
+        let found = discover_context_files(temp_pwd.path(), temp_home.path())
+            .expect("discover should succeed");
+
+        assert_eq!(found.len(), 2, "should find both .agents files");
+
+        let contents: Vec<_> = found.iter().map(|f| f.content.as_str()).collect();
+        assert!(contents.contains(&"PWD .agents content"));
+        assert!(contents.contains(&"HOME .agents content"));
     }
 }
