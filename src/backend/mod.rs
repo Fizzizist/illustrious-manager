@@ -18,6 +18,14 @@ pub mod sse;
 pub mod vertex;
 pub mod zai;
 
+/// Shared HTTP client for production backends. Bounded connect timeout only;
+/// deliberately no total/read timeout so long thinking streams are not killed.
+pub fn build_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .build()?)
+}
+
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn send_message(
@@ -85,11 +93,32 @@ impl LlmBackend for RetryingBackend {
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let max_retries = self.config.max_retries;
         let mut last_err: Option<anyhow::Error> = None;
+        let token = config.cancel_token.as_ref();
+
+        if token.is_some_and(|t| t.is_cancelled()) {
+            return Err(error::BackendError::Cancelled.into());
+        }
 
         for attempt in 0..=max_retries {
-            match self.inner.send_message(messages, config).await {
+            let attempt_result = if let Some(t) = token {
+                tokio::select! {
+                    biased;
+                    _ = t.cancelled() => Err(error::BackendError::Cancelled.into()),
+                    result = self.inner.send_message(messages, config) => result,
+                }
+            } else {
+                self.inner.send_message(messages, config).await
+            };
+
+            match attempt_result {
                 Ok(stream) => return Ok(stream),
                 Err(e) => {
+                    if e.downcast_ref::<error::BackendError>()
+                        .is_some_and(|be| be.is_cancelled())
+                    {
+                        return Err(e);
+                    }
+
                     let retryable = e
                         .downcast_ref::<error::BackendError>()
                         .is_some_and(|be| be.is_retryable());
@@ -107,13 +136,11 @@ impl LlmBackend for RetryingBackend {
                         delay.as_millis()
                     ));
 
-                    if let Some(ref token) = config.cancel_token {
+                    if let Some(t) = token {
                         tokio::select! {
                             _ = tokio::time::sleep(delay) => {}
-                            _ = token.cancelled() => {
-                                return Err(last_err
-                                    .expect("error was set before sleep")
-                                    .context("retry cancelled by user"));
+                            _ = t.cancelled() => {
+                                return Err(error::BackendError::Cancelled.into());
                             }
                         }
                     } else {
@@ -158,7 +185,7 @@ impl BackendFactory {
                     .vertex_auth_cache
                     .get_or_init(project.clone(), region.clone())
                     .await?;
-                let backend = vertex::VertexBackend::with_auth(project, region, auth);
+                let backend = vertex::VertexBackend::with_auth(project, region, auth)?;
                 Ok(BackendSelection {
                     backend: Box::new(RetryingBackend::new(
                         Box::new(backend),
@@ -760,6 +787,11 @@ mod tests {
         assert!(result.is_err(), "501 should not be retried");
     }
 
+    #[test]
+    fn build_http_client_succeeds() {
+        super::build_http_client().expect("http client should build");
+    }
+
     #[tokio::test]
     async fn retrying_backend_cancellation_aborts_retry() {
         use tokio_util::sync::CancellationToken;
@@ -803,6 +835,162 @@ mod tests {
 
         let result = backend.send_message(&[], &config).await;
         assert!(result.is_err(), "should error when cancelled");
+        let err = result.err().expect("should have error");
+        let be = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(be, BackendError::Cancelled),
+            "should be the typed Cancelled variant; got: {be}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_attempt_returns_cancelled_promptly() {
+        use tokio_util::sync::CancellationToken;
+
+        struct ParksUntilCancelled {
+            token: CancellationToken,
+            call_count: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for ParksUntilCancelled {
+            async fn send_message(
+                &self,
+                _messages: &[Message],
+                _config: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                self.call_count.fetch_add(1, AtomicOrdering::SeqCst);
+                self.token.cancelled().await;
+                Err(BackendError::Transport {
+                    message: "never surfaces".to_string(),
+                }
+                .into())
+            }
+        }
+
+        let token = CancellationToken::new();
+        let mock = ParksUntilCancelled {
+            token: token.clone(),
+            call_count: Arc::new(AtomicUsize::new(0)),
+        };
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let mut config = request_config();
+        config.cancel_token = Some(token.clone());
+
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let result = backend.send_message(&[], &config).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "should error when cancelled");
+        let err = result.err().expect("should have error");
+        let be = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(be, BackendError::Cancelled),
+            "should be the typed Cancelled variant; got: {be}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "cancellation must interrupt the in-flight attempt promptly; took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_before_attempt_skips_inner() {
+        use tokio_util::sync::CancellationToken;
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let mock = FlakyBackend::new(vec![Ok(ok_stream())]);
+        let counter = mock.counter();
+        let backend = RetryingBackend::new(Box::new(mock), retry_config_fast());
+        let mut config = request_config();
+        config.cancel_token = Some(token);
+
+        let result = backend.send_message(&[], &config).await;
+        assert!(result.is_err(), "pre-cancelled request should error");
+        let err = result.err().expect("should have error");
+        let be = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(be, BackendError::Cancelled),
+            "should be the typed Cancelled variant; got: {be}"
+        );
+        assert_eq!(
+            counter.load(AtomicOrdering::SeqCst),
+            0,
+            "inner backend must never be called when pre-cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_blackhole_returns_promptly() {
+        use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig, AuthStyle};
+        use tokio_util::sync::CancellationToken;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                // Accept and park each socket without reading or writing; the
+                // client sees a silent connection.
+                held.push(socket);
+            }
+        });
+
+        let client = super::build_http_client().expect("http client should build");
+        let compat = AnthropicCompatBackend::new(
+            client,
+            AnthropicCompatConfig {
+                endpoint: format!("http://127.0.0.1:{port}/v1/messages"),
+                auth_token: None,
+                auth_style: AuthStyle::Bearer,
+                anthropic_version: "test".into(),
+                include_model_in_body: false,
+                anthropic_beta: None,
+                max_tokens_override: None,
+            },
+        );
+        let token = CancellationToken::new();
+        let backend = RetryingBackend::new(Box::new(compat), retry_config_fast());
+        let mut config = request_config();
+        config.cancel_token = Some(token.clone());
+
+        let token_clone = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            token_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let result = backend.send_message(&[], &config).await;
+        let elapsed = start.elapsed();
+
+        let err = result.err().expect("blackholed request should fail");
+        let be = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(be, BackendError::Cancelled),
+            "dropping the reqwest future must surface Cancelled, not Transport; got: {be}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "cancel must abort a blackholed connect promptly; took {elapsed:?}"
+        );
     }
 
     #[tokio::test]
