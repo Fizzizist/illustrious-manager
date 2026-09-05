@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::{Tool, ToolError, ToolResult, run_blocking};
 
+const TOOL: &str = "search";
+
 pub struct SearchTool {
     sandbox_root: PathBuf,
     schema: Value,
@@ -54,7 +56,7 @@ impl SearchTool {
 #[async_trait]
 impl Tool for SearchTool {
     fn name(&self) -> &str {
-        "search"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -78,7 +80,7 @@ impl Tool for SearchTool {
         let query = query.to_string();
         let sandbox_root = self.sandbox_root.clone();
 
-        let output = run_blocking("search", move || {
+        let output = run_blocking(TOOL, move || {
             if rebuild {
                 Self::delete_index_db(&sandbox_root);
             }
@@ -87,7 +89,7 @@ impl Tool for SearchTool {
             engine
                 .search(&query, limit, restrict_to_dir.as_deref())
                 .map_err(|e| ToolError::Execution {
-                    tool_name: "search".to_string(),
+                    tool_name: TOOL.to_string(),
                     message: e.to_string(),
                 })
         })

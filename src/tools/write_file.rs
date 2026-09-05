@@ -7,6 +7,8 @@ use super::{Tool, ToolError, ToolResult, run_blocking};
 use crate::tools::sandbox::SandboxPolicy;
 use crate::types::ContentBlock;
 
+const TOOL: &str = "write_file";
+
 pub struct WriteFileTool {
     sandbox: SandboxPolicy,
     schema: Value,
@@ -37,7 +39,7 @@ impl WriteFileTool {
 #[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
-        "write_file"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -100,10 +102,10 @@ impl Tool for WriteFileTool {
         let content = content.to_string();
         let sandbox = self.sandbox.clone();
 
-        run_blocking(self.name(), move || {
+        run_blocking(TOOL, move || {
             if let Some(parent) = validated.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution {
-                    tool_name: "write_file".to_string(),
+                    tool_name: TOOL.to_string(),
                     message: format!("Failed to create parent directories: {}", e),
                 })?;
             }
@@ -114,12 +116,12 @@ impl Tool for WriteFileTool {
                 sandbox
                     .validate_write_path(&validated)
                     .map_err(|e| ToolError::Execution {
-                        tool_name: "write_file".to_string(),
+                        tool_name: TOOL.to_string(),
                         message: e.to_string(),
                     })?;
 
             std::fs::write(&validated, content).map_err(|e| ToolError::Execution {
-                tool_name: "write_file".to_string(),
+                tool_name: TOOL.to_string(),
                 message: format!("Failed to write file: {}", e),
             })?;
 

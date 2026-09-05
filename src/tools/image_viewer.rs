@@ -131,7 +131,7 @@ fn size_limit_error(bytes: u64) -> ToolError {
 #[async_trait]
 impl Tool for ImageViewer {
     fn name(&self) -> &str {
-        "image_viewer"
+        TOOL
     }
 
     fn description(&self) -> &str {

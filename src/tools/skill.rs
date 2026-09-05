@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+const TOOL: &str = "skill";
+
 pub struct SkillTool {
     skills: HashMap<String, PathBuf>,
 }
@@ -20,7 +22,7 @@ impl SkillTool {
 #[async_trait]
 impl Tool for SkillTool {
     fn name(&self) -> &str {
-        "skill"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -54,15 +56,15 @@ impl Tool for SkillTool {
                 })?;
 
         let path = self.skills.get(name).ok_or_else(|| ToolError::Execution {
-            tool_name: "skill".to_string(),
+            tool_name: TOOL.to_string(),
             message: format!("Skill '{}' not found", name),
         })?;
 
         let path_display = path.display().to_string();
         let path = path.clone();
-        let content = run_blocking("skill", move || {
+        let content = run_blocking(TOOL, move || {
             std::fs::read_to_string(&path).map_err(|e| ToolError::Execution {
-                tool_name: "skill".to_string(),
+                tool_name: TOOL.to_string(),
                 message: format!("Failed to read skill file: {}", e),
             })
         })

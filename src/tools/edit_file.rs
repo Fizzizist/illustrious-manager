@@ -25,7 +25,7 @@ impl EditFile {
 #[async_trait]
 impl Tool for EditFile {
     fn name(&self) -> &str {
-        "edit_file"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -132,7 +132,7 @@ impl Tool for EditFile {
         let old_string = old_string.to_string();
         let new_string = new_string.to_string();
 
-        run_blocking(self.name(), move || -> Result<ToolResult, ToolError> {
+        run_blocking(TOOL, move || -> Result<ToolResult, ToolError> {
             let content =
                 fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
                     tool_name: TOOL.to_string(),
