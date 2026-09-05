@@ -446,7 +446,8 @@ impl Agent {
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
                 {
-                    persist_partial_and_interrupt("", &history_arc, &session, &event_tx).await;
+                    persist_partial_and_interrupt("", "", "", &history_arc, &session, &event_tx)
+                        .await;
                     break;
                 }
 
@@ -505,33 +506,24 @@ impl Agent {
 
                     match next_event {
                         None if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) => {
+                            if !tool_calls.is_empty() {
+                                // Fully-streamed tool calls survive cancellation:
+                                // fall through to the unified tool-turn path where
+                                // they are persisted alongside partial text/thinking.
+                                break;
+                            }
                             let _ = event_tx.unbounded_send(AgentEvent::Warn(
-                                "stream interrupted by cancellation; any in-flight tool executions will be orphaned".to_string(),
+                                "stream interrupted by cancellation".to_string(),
                             ));
                             persist_partial_and_interrupt(
                                 &text_accumulated,
+                                &thinking_accumulated,
+                                &thinking_signature,
                                 &history_arc,
                                 &session,
                                 &event_tx,
                             )
                             .await;
-                            if !thinking_accumulated.is_empty() {
-                                let thinking_msg = Message {
-                                    role: Role::Assistant,
-                                    content: vec![ContentBlock::Thinking {
-                                        text: thinking_accumulated.clone(),
-                                        signature: thinking_signature.clone(),
-                                    }],
-                                    created_at: now_timestamp(),
-                                };
-                                lock(&history_arc).push(thinking_msg.clone());
-                                let _ = session
-                                    .lock()
-                                    .await
-                                    .conversation()
-                                    .insert_message(&thinking_msg)
-                                    .await;
-                            }
                             break 'outer;
                         }
                         None => break,
@@ -581,25 +573,15 @@ impl Agent {
                             let cancelled = e
                                 .downcast_ref::<crate::backend::error::BackendError>()
                                 .is_some_and(crate::backend::error::BackendError::is_cancelled);
-                            if !cancelled && !text_accumulated.is_empty() {
-                                persist_partial(&text_accumulated, &history_arc, &session).await;
-                            }
-                            if !thinking_accumulated.is_empty() {
-                                let thinking_msg = Message {
-                                    role: Role::Assistant,
-                                    content: vec![ContentBlock::Thinking {
-                                        text: thinking_accumulated.clone(),
-                                        signature: thinking_signature.clone(),
-                                    }],
-                                    created_at: now_timestamp(),
-                                };
-                                lock(&history_arc).push(thinking_msg.clone());
-                                let _ = session
-                                    .lock()
-                                    .await
-                                    .conversation()
-                                    .insert_message(&thinking_msg)
-                                    .await;
+                            if !cancelled {
+                                persist_assistant_thinking_text(
+                                    &text_accumulated,
+                                    &thinking_accumulated,
+                                    &thinking_signature,
+                                    &history_arc,
+                                    &session,
+                                )
+                                .await;
                             }
 
                             let error_msg = format!("{e:#}");
@@ -688,32 +670,12 @@ impl Agent {
                     break;
                 }
 
-                // Check cancellation before executing tool calls.
-                if let Some(ref token) = cancel_token
-                    && token.is_cancelled()
-                {
-                    let _ = event_tx.unbounded_send(AgentEvent::Warn(
-                        "cancellation requested before tool execution; tool calls will be skipped"
-                            .to_string(),
-                    ));
-                    persist_partial_and_interrupt(
-                        &text_accumulated,
-                        &history_arc,
-                        &session,
-                        &event_tx,
-                    )
-                    .await;
-                    break;
-                }
-
-                let text_for_cancel = text_accumulated.clone();
-                let thinking_for_cancel = thinking_accumulated.clone();
-                let signature_for_cancel = thinking_signature.clone();
+                let text_for_interrupt = text_accumulated.clone();
                 let (assistant_content, tool_result_blocks) = execute_tool_calls(
                     tool_calls,
                     text_accumulated,
                     thinking_accumulated,
-                    thinking_signature.clone(),
+                    thinking_signature,
                     &tools,
                     &confirmation_mode,
                     &mut confirmation_rx,
@@ -724,38 +686,11 @@ impl Agent {
                 )
                 .await;
 
-                // If cancellation was triggered during tool execution, persist what we have and stop.
-                if let Some(ref token) = cancel_token
-                    && token.is_cancelled()
-                {
-                    persist_partial_and_interrupt(
-                        &text_for_cancel,
-                        &history_arc,
-                        &session,
-                        &event_tx,
-                    )
-                    .await;
-                    // Also persist thinking if any
-                    if !thinking_for_cancel.is_empty() {
-                        let thinking_msg = Message {
-                            role: Role::Assistant,
-                            content: vec![ContentBlock::Thinking {
-                                text: thinking_for_cancel,
-                                signature: signature_for_cancel,
-                            }],
-                            created_at: now_timestamp(),
-                        };
-                        lock(&history_arc).push(thinking_msg.clone());
-                        let _ = session
-                            .lock()
-                            .await
-                            .conversation()
-                            .insert_message(&thinking_msg)
-                            .await;
-                    }
-                    break;
-                }
-
+                // Unified persist site: the assistant ToolUse message and its
+                // adjacent user ToolResult message are persisted together so no
+                // dangling tool_use can ever reach the wire — including when
+                // cancellation fired before or during execution (the fabricated
+                // "Tool cancelled by user." results ride along).
                 let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
@@ -782,6 +717,17 @@ impl Agent {
                     .insert_message(&tool_result_msg)
                     .await;
 
+                // If cancellation was triggered before or during tool execution, stop
+                // after persisting the complete tool-call pair.
+                if let Some(ref token) = cancel_token
+                    && token.is_cancelled()
+                {
+                    let _ = event_tx.unbounded_send(AgentEvent::Interrupted {
+                        partial_text: text_for_interrupt,
+                    });
+                    break 'outer;
+                }
+
                 // Auto-compact check: runs after every completed iteration,
                 // whether the response included tool calls or not.
                 compact::check_auto_compact(
@@ -797,17 +743,29 @@ impl Agent {
     }
 }
 
-async fn persist_partial(
+async fn persist_assistant_thinking_text(
     text: &str,
+    thinking: &str,
+    thinking_signature: &str,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
 ) {
-    if text.is_empty() {
+    if text.is_empty() && thinking.is_empty() {
         return;
+    }
+    let mut content = vec![];
+    if !thinking.is_empty() {
+        content.push(ContentBlock::Thinking {
+            text: thinking.to_string(),
+            signature: thinking_signature.to_string(),
+        });
+    }
+    if !text.is_empty() {
+        content.push(ContentBlock::Text(text.to_string()));
     }
     let msg = Message {
         role: Role::Assistant,
-        content: vec![ContentBlock::Text(text.to_string())],
+        content,
         created_at: now_timestamp(),
     };
     lock(history).push(msg.clone());
@@ -821,11 +779,13 @@ async fn persist_partial(
 
 async fn persist_partial_and_interrupt(
     text: &str,
+    thinking: &str,
+    thinking_signature: &str,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) {
-    persist_partial(text, history, session).await;
+    persist_assistant_thinking_text(text, thinking, thinking_signature, history, session).await;
     let _ = event_tx.unbounded_send(AgentEvent::Interrupted {
         partial_text: text.to_string(),
     });
@@ -937,7 +897,7 @@ async fn record_backend_error(
                 "stream interrupted by cancellation; any in-flight tool executions will be orphaned"
                     .to_string(),
             ));
-            persist_partial_and_interrupt(partial_text, history, session, event_tx).await;
+            persist_partial_and_interrupt(partial_text, "", "", history, session, event_tx).await;
             true
         }
         BackendErrorDisposition::Fatal => {
@@ -1036,6 +996,7 @@ async fn execute_tool_calls(
 
     enum ToolDecision {
         ParseError(String),
+        Cancelled,
         Declined,
         Approved,
         ChatModeRejected,
@@ -1090,9 +1051,9 @@ async fn execute_tool_calls(
                 }
             };
             if needs_confirmation {
-                // If already cancelled, skip confirmation and decline immediately.
+                // If already cancelled, skip confirmation and cancel immediately.
                 if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
-                    ToolDecision::Declined
+                    ToolDecision::Cancelled
                 } else {
                     let _ = event_tx.unbounded_send(AgentEvent::ToolConfirmationRequired {
                         id: call.id.clone(),
@@ -1100,28 +1061,32 @@ async fn execute_tool_calls(
                         input: input.clone(),
                         index,
                     });
-                    let approved = if let Some(rx) = confirmation_rx.as_mut() {
-                        // Race the confirmation against the cancel token so that Esc
-                        // during a multi-tool confirmation sequence declines all
-                        // remaining tools without requiring another keypress.
+                    // Race the confirmation against the cancel token so that Esc
+                    // during a multi-tool confirmation sequence declines all
+                    // remaining tools without requiring another keypress.
+                    // `None` means the token won the race.
+                    let outcome = if let Some(rx) = confirmation_rx.as_mut() {
                         if let Some(ref token) = cancel_token {
                             tokio::select! {
                                 biased;
-                                _ = token.cancelled() => false,
+                                _ = token.cancelled() => None,
                                 response = rx.next() => {
-                                    matches!(response, Some(ConfirmationResponse::Approved))
+                                    Some(matches!(response, Some(ConfirmationResponse::Approved)))
                                 }
                             }
                         } else {
-                            matches!(rx.next().await, Some(ConfirmationResponse::Approved))
+                            Some(matches!(
+                                rx.next().await,
+                                Some(ConfirmationResponse::Approved)
+                            ))
                         }
                     } else {
-                        false
+                        Some(false)
                     };
-                    if approved {
-                        ToolDecision::Approved
-                    } else {
-                        ToolDecision::Declined
+                    match outcome {
+                        Some(true) => ToolDecision::Approved,
+                        Some(false) => ToolDecision::Declined,
+                        None => ToolDecision::Cancelled,
                     }
                 }
             } else {
@@ -1164,6 +1129,14 @@ async fn execute_tool_calls(
                             "Tool rejected: chat mode restricts to read-only operations"
                                 .to_string(),
                         )],
+                        true,
+                        vec![],
+                    ),
+                    ToolDecision::Cancelled => (
+                        r.index,
+                        r.id.clone(),
+                        r.name.clone(),
+                        vec![ContentBlock::Text("Tool cancelled by user.".to_string())],
                         true,
                         vec![],
                     ),
@@ -3917,6 +3890,63 @@ mod tests {
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
             "ResponseComplete must not appear after cancellation; got: {events:?}"
         );
+
+        // Regression (issue 13): both tools must be persisted as ToolUse +
+        // is_error ToolResult pairs with matching ids — wording is
+        // race-dependent (t1's Esc-Rejected vs t2's token-cancel).
+        for (label, history) in [
+            ("in-memory", agent.history()),
+            (
+                "session",
+                agent.session_history().await.expect("session history"),
+            ),
+        ] {
+            let assistant_tool_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| {
+                    m.role == Role::Assistant
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                })
+                .collect();
+            assert_eq!(
+                assistant_tool_msgs.len(),
+                1,
+                "{label}: expected one assistant message with both ToolUse blocks"
+            );
+            let user_tool_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| {
+                    m.role == Role::User
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                })
+                .collect();
+            assert_eq!(
+                user_tool_msgs.len(),
+                1,
+                "{label}: expected one user message with both ToolResult blocks"
+            );
+            for id in ["t1", "t2"] {
+                assert!(
+                    assistant_tool_msgs[0]
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolUse { id: bid, .. } if bid == id)),
+                    "{label}: expected ToolUse {id}"
+                );
+                assert!(
+                    user_tool_msgs[0].content.iter().any(|b| matches!(
+                        b,
+                        ContentBlock::ToolResult { tool_use_id, is_error: true, .. }
+                            if tool_use_id == id
+                    )),
+                    "{label}: expected is_error ToolResult for {id}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -3986,6 +4016,399 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
             "expected Interrupted; got: {events:?}"
+        );
+
+        // Regression (issue 13): the assistant ToolUse + user ToolResult pair must
+        // be persisted (in memory and in the session DB) even though the tool was
+        // cancelled mid-execution, so a resumed session never dangles a tool_use.
+        for (label, history) in [
+            ("in-memory", agent.history()),
+            (
+                "session",
+                agent.session_history().await.expect("session history"),
+            ),
+        ] {
+            let tool_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| {
+                    m.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. }
+                        )
+                    })
+                })
+                .collect();
+            assert_eq!(
+                tool_msgs.len(),
+                2,
+                "{label}: expected assistant ToolUse message + user ToolResult message"
+            );
+            assert_eq!(tool_msgs[0].role, Role::Assistant, "{label}");
+            assert_eq!(tool_msgs[1].role, Role::User, "{label}");
+            assert!(
+                tool_msgs[0]
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "s1")),
+                "{label}: expected ToolUse s1; got: {:?}",
+                tool_msgs[0].content
+            );
+            assert!(
+                tool_msgs[1].content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::ToolResult { tool_use_id, is_error: true, content }
+                        if tool_use_id == "s1"
+                            && content.iter().any(|c| matches!(
+                                c,
+                                ContentBlock::Text(t) if t == "Tool cancelled by user."
+                            ))
+                )),
+                "{label}: expected cancelled ToolResult for s1; got: {:?}",
+                tool_msgs[1].content
+            );
+        }
+    }
+
+    // ── Issue 13: cancelled tool calls persist ToolUse/ToolResult pairs ──
+
+    /// A backend that emits the given events, then parks until cancelled.
+    struct ParkThenCancelBackend {
+        events: Arc<tokio::sync::Mutex<Vec<Result<StreamEvent>>>>,
+        token: CancellationToken,
+    }
+
+    impl ParkThenCancelBackend {
+        fn new(events: Vec<Result<StreamEvent>>, token: CancellationToken) -> Self {
+            Self {
+                events: Arc::new(tokio::sync::Mutex::new(events)),
+                token,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ParkThenCancelBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let events = std::mem::take(&mut *self.events.lock().await).into_iter();
+            let token = self.token.clone();
+            let s = stream::unfold(
+                (events, token, false),
+                |(mut events, token, done)| async move {
+                    if done {
+                        return None;
+                    }
+                    if let Some(item) = events.next() {
+                        return Some((item, (events, token, false)));
+                    }
+                    token.cancelled().await;
+                    None
+                },
+            );
+            Ok(Box::pin(s))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_stream_after_complete_tool_call_persists_text_and_tool_pair() {
+        let cancel = CancellationToken::new();
+        let backend = ParkThenCancelBackend::new(
+            vec![
+                Ok(StreamEvent::TextDelta("let me check".to_string())),
+                Ok(StreamEvent::ToolUseStart {
+                    id: "m1".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+            ],
+            cancel.clone(),
+        );
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted; got: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "ResponseComplete must not appear on cancellation; got: {events:?}"
+        );
+
+        for (label, history) in [
+            ("in-memory", agent.history()),
+            (
+                "session",
+                agent.session_history().await.expect("session history"),
+            ),
+        ] {
+            let assistant_tool_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| {
+                    m.role == Role::Assistant
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                })
+                .collect();
+            assert_eq!(
+                assistant_tool_msgs.len(),
+                1,
+                "{label}: expected one assistant message with the streamed ToolUse"
+            );
+            let content = &assistant_tool_msgs[0].content;
+            assert!(
+                content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "let me check")),
+                "{label}: partial text must ride along in the assistant message; got: {content:?}"
+            );
+            assert!(
+                content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "m1")),
+                "{label}: expected ToolUse m1; got: {content:?}"
+            );
+            let user_tool_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| {
+                    m.role == Role::User
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                })
+                .collect();
+            assert_eq!(user_tool_msgs.len(), 1, "{label}");
+            assert!(
+                user_tool_msgs[0].content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::ToolResult { tool_use_id, is_error: true, content }
+                        if tool_use_id == "m1"
+                            && content.iter().any(|c| matches!(
+                                c,
+                                ContentBlock::Text(t) if t == "Tool cancelled by user."
+                            ))
+                )),
+                "{label}: expected cancelled ToolResult for m1; got: {:?}",
+                user_tool_msgs[0].content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_with_thinking_text_and_tool_call_persists_one_assistant_message() {
+        let cancel = CancellationToken::new();
+        let backend = ParkThenCancelBackend::new(
+            vec![
+                Ok(StreamEvent::ThinkingDelta("pondering".to_string())),
+                Ok(StreamEvent::ThinkingSignature("sig_1".to_string())),
+                Ok(StreamEvent::TextDelta("executing".to_string())),
+                Ok(StreamEvent::ToolUseStart {
+                    id: "s2".to_string(),
+                    name: "bash".to_string(),
+                }),
+                Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+                Ok(StreamEvent::ToolUseDone),
+            ],
+            cancel.clone(),
+        );
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("bash", "output"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let stream = agent
+            .send("run".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted; got: {events:?}"
+        );
+
+        // Guards the double-persist risk: thinking must live inside the single
+        // assistant message, never as a standalone extra message.
+        for (label, history) in [
+            ("in-memory", agent.history()),
+            (
+                "session",
+                agent.session_history().await.expect("session history"),
+            ),
+        ] {
+            let assistant_msgs: Vec<&Message> = history
+                .iter()
+                .filter(|m| m.role == Role::Assistant)
+                .collect();
+            assert_eq!(
+                assistant_msgs.len(),
+                1,
+                "{label}: exactly one assistant message expected; got {history:?}"
+            );
+            let content = &assistant_msgs[0].content;
+            assert!(
+                matches!(&content[0], ContentBlock::Thinking { text, signature }
+                    if text == "pondering" && signature == "sig_1"),
+                "{label}: thinking must be first block; got: {content:?}"
+            );
+            assert!(
+                content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::Text(t) if t == "executing")),
+                "{label}: expected Text block; got: {content:?}"
+            );
+            assert!(
+                content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolUse { id, .. } if id == "s2")),
+                "{label}: expected ToolUse s2; got: {content:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_confirmation_yields_cancelled_wording_and_rejected_yields_declined() {
+        let make_parked_agent = |id: &str| {
+            let cancel = CancellationToken::new();
+            let backend = ParkThenCancelBackend::new(
+                vec![
+                    Ok(StreamEvent::ToolUseStart {
+                        id: id.to_string(),
+                        name: "write".to_string(),
+                    }),
+                    Ok(StreamEvent::ToolUseDelta(r#"{}"#.to_string())),
+                    Ok(StreamEvent::ToolUseDone),
+                ],
+                cancel.clone(),
+            );
+            async move {
+                let agent = agent_with_mode(
+                    backend,
+                    Some(Box::new(EchoTool::write_tool("write", "done"))),
+                    ConfirmationMode::Always,
+                )
+                .await;
+                (agent, cancel)
+            }
+        };
+
+        // Token fires while the stream is parked (before any confirmation dialog
+        // is emitted): the pre-cancelled confirmation shortcut must yield the
+        // cancelled wording, and no dialog may appear.
+        let (agent, cancel) = make_parked_agent("c1").await;
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        drop(confirm_tx);
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx), Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted on pre-cancel; got: {events:?}"
+        );
+        assert!(
+            agent
+                .history()
+                .iter()
+                .any(|m| m.content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::ToolResult { tool_use_id, is_error: true, content }
+                        if tool_use_id == "c1"
+                            && content.iter().any(|c| matches!(
+                                c,
+                                ContentBlock::Text(t) if t == "Tool cancelled by user."
+                            ))
+                ))),
+            "pre-cancelled confirmation must persist cancelled wording; got: {:?}",
+            agent.history()
+        );
+
+        // Explicit Rejected with token uncanceled: declined wording. A trailing
+        // text response lets the loop complete normally after the decline.
+        let (confirm_tx, confirm_rx) = mpsc::unbounded::<ConfirmationResponse>();
+        let agent = agent_with_mode(
+            SequencedBackend::new(vec![
+                tool_call_response("r1", "write", r#"{}"#),
+                text_response("ok"),
+            ]),
+            Some(Box::new(EchoTool::write_tool("write", "done"))),
+            ConfirmationMode::Always,
+        )
+        .await;
+        confirm_tx
+            .unbounded_send(ConfirmationResponse::Rejected)
+            .ok();
+        drop(confirm_tx);
+        let stream = agent
+            .send("run".to_string(), Some(confirm_rx), None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "declined turn should complete normally; got: {events:?}"
+        );
+        assert!(
+            agent
+                .history()
+                .iter()
+                .any(|m| m.content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::ToolResult { tool_use_id, is_error: true, content }
+                        if tool_use_id == "r1"
+                            && content.iter().any(|c| matches!(
+                                c,
+                                ContentBlock::Text(t) if t == "User declined to execute this tool."
+                            ))
+                ))),
+            "explicit rejection must persist declined wording; got: {:?}",
+            agent.history()
         );
     }
 
