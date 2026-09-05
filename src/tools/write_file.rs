@@ -3,9 +3,11 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::{Tool, ToolError, ToolResult};
+use super::{Tool, ToolError, ToolResult, run_blocking};
 use crate::tools::sandbox::SandboxPolicy;
 use crate::types::ContentBlock;
+
+const TOOL: &str = "write_file";
 
 pub struct WriteFileTool {
     sandbox: SandboxPolicy,
@@ -37,7 +39,7 @@ impl WriteFileTool {
 #[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
-        "write_file"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -96,37 +98,43 @@ impl Tool for WriteFileTool {
                     message: e.to_string(),
                 })?;
 
-        if let Some(parent) = validated.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution {
-                tool_name: self.name().to_string(),
-                message: format!("Failed to create parent directories: {}", e),
-            })?;
-        }
-
-        // Re-validate after directory creation to mitigate TOCTOU: a symlink could
-        // have been inserted into the path between initial validation and create_dir_all.
-        let validated =
-            self.sandbox
-                .validate_write_path(path)
-                .map_err(|e| ToolError::Execution {
-                    tool_name: self.name().to_string(),
-                    message: e.to_string(),
-                })?;
-
-        std::fs::write(&validated, content).map_err(|e| ToolError::Execution {
-            tool_name: self.name().to_string(),
-            message: format!("Failed to write file: {}", e),
-        })?;
-
         let bytes = content.len();
-        Ok(ToolResult {
-            content: vec![ContentBlock::Text(format!(
-                "Wrote {} bytes to {:?}",
-                bytes, validated
-            ))],
-            is_error: false,
-            agent_events: vec![],
+        let content = content.to_string();
+        let sandbox = self.sandbox.clone();
+
+        run_blocking(TOOL, move || {
+            if let Some(parent) = validated.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution {
+                    tool_name: TOOL.to_string(),
+                    message: format!("Failed to create parent directories: {}", e),
+                })?;
+            }
+
+            // Re-validate after directory creation to mitigate TOCTOU: a symlink could
+            // have been inserted into the path between initial validation and create_dir_all.
+            let validated =
+                sandbox
+                    .validate_write_path(&validated)
+                    .map_err(|e| ToolError::Execution {
+                        tool_name: TOOL.to_string(),
+                        message: e.to_string(),
+                    })?;
+
+            std::fs::write(&validated, content).map_err(|e| ToolError::Execution {
+                tool_name: TOOL.to_string(),
+                message: format!("Failed to write file: {}", e),
+            })?;
+
+            Ok(ToolResult {
+                content: vec![ContentBlock::Text(format!(
+                    "Wrote {} bytes to {:?}",
+                    bytes, validated
+                ))],
+                is_error: false,
+                agent_events: vec![],
+            })
         })
+        .await
     }
 }
 
