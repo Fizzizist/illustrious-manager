@@ -1,5 +1,5 @@
 use crate::tools::sandbox::SandboxPolicy;
-use crate::tools::{Tool, ToolError, ToolResult};
+use crate::tools::{Tool, ToolError, ToolResult, run_blocking};
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 use base64::Engine;
@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::path::Path;
 
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const TOOL: &str = "image_viewer";
 
 #[derive(Debug)]
 pub struct ImageViewer {
@@ -118,7 +119,7 @@ fn format_limit_megabytes() -> u128 {
 
 fn size_limit_error(bytes: u64) -> ToolError {
     ToolError::Execution {
-        tool_name: "image_viewer".to_string(),
+        tool_name: TOOL.to_string(),
         message: format!(
             "Image is {bytes} bytes; maximum allowed is {} bytes ({}MB)",
             MAX_IMAGE_BYTES,
@@ -130,7 +131,7 @@ fn size_limit_error(bytes: u64) -> ToolError {
 #[async_trait]
 impl Tool for ImageViewer {
     fn name(&self) -> &str {
-        "image_viewer"
+        TOOL
     }
 
     fn description(&self) -> &str {
@@ -150,11 +151,13 @@ impl Tool for ImageViewer {
                     message: "Missing required 'path' field".to_string(),
                 })?;
 
+        let path_str = path_str.to_string();
+
         let validated = self
             .sandbox
-            .validate_path(Path::new(path_str))
+            .validate_path(Path::new(&path_str))
             .map_err(|e| ToolError::Execution {
-                tool_name: "image_viewer".to_string(),
+                tool_name: TOOL.to_string(),
                 message: e.to_string(),
             })?;
 
@@ -162,66 +165,65 @@ impl Tool for ImageViewer {
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_lowercase);
-        let format = extension
+        let fmt = extension
             .as_deref()
             .and_then(ImageFormat::from_extension)
             .ok_or_else(|| ToolError::Execution {
-                tool_name: "image_viewer".to_string(),
+                tool_name: TOOL.to_string(),
                 message: format!(
                     "Unsupported file extension for path {path_str}; supported: {}",
                     supported_formats_list()
                 ),
             })?;
-        let media_type = format.media_type();
-
-        let file_size = std::fs::metadata(&validated)
-            .map_err(|e| ToolError::Execution {
-                tool_name: "image_viewer".to_string(),
-                message: format!("Failed to stat {path_str}: {e}"),
-            })?
-            .len();
-        if file_size > MAX_IMAGE_BYTES as u64 {
-            return Err(size_limit_error(file_size));
-        }
-
-        let data = std::fs::read(&validated).map_err(|e| ToolError::Execution {
-            tool_name: "image_viewer".to_string(),
-            message: format!("Failed to read {path_str}: {e}"),
-        })?;
-
-        if data.len() > MAX_IMAGE_BYTES {
-            return Err(size_limit_error(data.len() as u64));
-        }
-
-        if !format.has_valid_header(&data) {
-            return Err(ToolError::Execution {
-                tool_name: "image_viewer".to_string(),
-                message: format!(
-                    "File header does not match expected {media_type} signature; the file may be corrupt or misnamed"
-                ),
-            });
-        }
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let media_type = fmt.media_type().to_string();
         let display_name = validated
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or(path_str);
+            .map_or_else(|| path_str.clone(), String::from);
 
-        Ok(ToolResult {
-            content: vec![
-                ContentBlock::Image {
-                    media_type: media_type.to_string(),
-                    data: encoded,
-                },
-                ContentBlock::Text(format!(
+        run_blocking(TOOL, move || -> Result<ToolResult, ToolError> {
+                let file_size =
+                    std::fs::metadata(&validated).map_err(|e| ToolError::Execution {
+                        tool_name: TOOL.to_string(),
+                        message: format!("Failed to stat {path_str}: {e}"),
+                    })?.len();
+                if file_size > MAX_IMAGE_BYTES as u64 {
+                    return Err(size_limit_error(file_size));
+                }
+
+                let data = std::fs::read(&validated).map_err(|e| ToolError::Execution {
+                    tool_name: TOOL.to_string(),
+                    message: format!("Failed to read {path_str}: {e}"),
+                })?;
+
+                if data.len() > MAX_IMAGE_BYTES {
+                    return Err(size_limit_error(data.len() as u64));
+                }
+
+                if !fmt.has_valid_header(&data) {
+                    return Err(ToolError::Execution {
+                        tool_name: TOOL.to_string(),
+                        message: format!(
+                            "File header does not match expected {media_type} signature; the file may be corrupt or misnamed"
+                        ),
+                    });
+                }
+
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                let text = format!(
                     "Image loaded: {display_name} ({media_type}, {} bytes)",
                     data.len()
-                )),
-            ],
-            is_error: false,
-            agent_events: vec![],
-        })
+                );
+                Ok(ToolResult {
+                    content: vec![
+                        ContentBlock::Image { media_type, data: encoded },
+                        ContentBlock::Text(text),
+                    ],
+                    is_error: false,
+                    agent_events: vec![],
+                })
+            })
+            .await
     }
 }
 

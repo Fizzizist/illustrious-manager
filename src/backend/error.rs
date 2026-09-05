@@ -15,6 +15,7 @@ pub enum BackendError {
         output_tokens: u32,
     },
     Refusal,
+    Cancelled,
 }
 
 impl BackendError {
@@ -25,6 +26,7 @@ impl BackendError {
             BackendError::Other(_) => false,
             BackendError::MaxTokensExceeded { .. } => false,
             BackendError::Refusal => false,
+            BackendError::Cancelled => false,
         }
     }
 
@@ -39,6 +41,10 @@ impl BackendError {
 
     pub fn is_refusal(&self) -> bool {
         matches!(self, BackendError::Refusal)
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, BackendError::Cancelled)
     }
 
     /// Build a `Transport` error from `target` (a human description of the
@@ -75,6 +81,7 @@ impl fmt::Display for BackendError {
                 f,
                 "The model refused to generate a response due to content policy. The conversation context may be unsafe to continue with."
             ),
+            BackendError::Cancelled => write!(f, "Request was cancelled before completion."),
         }
     }
 }
@@ -446,6 +453,62 @@ mod tests {
         assert!(
             matches!(recovered, BackendError::Refusal),
             "should recover the Refusal variant"
+        );
+    }
+
+    #[test]
+    fn cancelled_is_not_retryable() {
+        assert!(!BackendError::Cancelled.is_retryable());
+    }
+
+    #[test]
+    fn is_cancelled_true_for_cancelled_variant() {
+        assert!(BackendError::Cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn is_cancelled_false_for_others() {
+        assert!(
+            !BackendError::HttpStatus {
+                code: 503,
+                body: "overloaded".to_string(),
+            }
+            .is_cancelled()
+        );
+        assert!(
+            !BackendError::Transport {
+                message: "connection refused".to_string(),
+            }
+            .is_cancelled()
+        );
+        assert!(!BackendError::Other("something".to_string()).is_cancelled());
+        assert!(
+            !BackendError::MaxTokensExceeded {
+                input_tokens: 1,
+                output_tokens: 2,
+            }
+            .is_cancelled()
+        );
+        assert!(!BackendError::Refusal.is_cancelled());
+    }
+
+    #[test]
+    fn display_format_for_cancelled() {
+        assert_eq!(
+            BackendError::Cancelled.to_string(),
+            "Request was cancelled before completion."
+        );
+    }
+
+    #[test]
+    fn cancelled_downcasts_from_anyhow() {
+        let err: anyhow::Error = BackendError::Cancelled.into();
+        let recovered = err
+            .downcast_ref::<BackendError>()
+            .expect("should downcast to BackendError");
+        assert!(
+            matches!(recovered, BackendError::Cancelled),
+            "should recover the Cancelled variant"
         );
     }
 }

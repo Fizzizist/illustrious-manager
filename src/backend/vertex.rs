@@ -101,7 +101,7 @@ impl VertexBackend {
             "Failed to initialize GCP authentication. Run: gcloud auth application-default login",
         )?;
         Ok(Self {
-            client: Client::new(),
+            client: super::build_http_client()?,
             project,
             region,
             auth_manager,
@@ -112,13 +112,13 @@ impl VertexBackend {
         project: String,
         region: String,
         auth_manager: Arc<dyn gcp_auth::TokenProvider>,
-    ) -> Self {
-        Self {
-            client: Client::new(),
+    ) -> Result<Self> {
+        Ok(Self {
+            client: super::build_http_client()?,
             project,
             region,
             auth_manager,
-        }
+        })
     }
 
     fn endpoint(&self, model: &str) -> String {

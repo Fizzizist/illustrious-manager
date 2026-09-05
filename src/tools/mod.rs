@@ -59,6 +59,20 @@ pub struct ToolResult {
 
 pub use crate::types::ToolDefinition;
 
+/// Runs a synchronous closure on the blocking thread pool so cancellation stays responsive.
+pub async fn run_blocking<T, F>(tool_name: &str, f: F) -> Result<T, ToolError>
+where
+    F: FnOnce() -> Result<T, ToolError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ToolError::Execution {
+            tool_name: tool_name.to_string(),
+            message: format!("blocking task failed: {e}"),
+        })?
+}
+
 /// Trait that all tools must implement
 #[async_trait]
 pub trait Tool: Send + Sync {

@@ -465,6 +465,7 @@ impl Agent {
                         if record_backend_error(
                             &e,
                             &error_msg,
+                            "",
                             &mut bad_request_retries_used,
                             &mut max_token_retries_used,
                             max_token_retries,
@@ -577,7 +578,10 @@ impl Agent {
                         }
                         Some(Ok(StreamEvent::Done)) => break,
                         Some(Err(e)) => {
-                            if !text_accumulated.is_empty() {
+                            let cancelled = e
+                                .downcast_ref::<crate::backend::error::BackendError>()
+                                .is_some_and(crate::backend::error::BackendError::is_cancelled);
+                            if !cancelled && !text_accumulated.is_empty() {
                                 persist_partial(&text_accumulated, &history_arc, &session).await;
                             }
                             if !thinking_accumulated.is_empty() {
@@ -602,6 +606,7 @@ impl Agent {
                             if record_backend_error(
                                 &e,
                                 &error_msg,
+                                &text_accumulated,
                                 &mut bad_request_retries_used,
                                 &mut max_token_retries_used,
                                 max_token_retries,
@@ -857,6 +862,7 @@ enum BackendErrorDisposition {
     RetryStrippingImages,
     Retry,
     Refusal,
+    Cancelled,
     Fatal,
 }
 
@@ -870,6 +876,9 @@ fn backend_error_disposition(
     let Some(be) = e.downcast_ref::<crate::backend::error::BackendError>() else {
         return BackendErrorDisposition::Fatal;
     };
+    if be.is_cancelled() {
+        return BackendErrorDisposition::Cancelled;
+    }
     if *bad_request_retries_used < max_token_retries && be.is_bad_request() {
         *bad_request_retries_used += 1;
         return BackendErrorDisposition::RetryStrippingImages;
@@ -889,6 +898,7 @@ fn backend_error_disposition(
 async fn record_backend_error(
     e: &anyhow::Error,
     error_msg: &str,
+    partial_text: &str,
     bad_request_retries_used: &mut u32,
     max_token_retries_used: &mut u32,
     max_token_retries: u32,
@@ -920,6 +930,14 @@ async fn record_backend_error(
         }
         BackendErrorDisposition::Refusal => {
             let _ = event_tx.unbounded_send(AgentEvent::Error(error_msg.to_string()));
+            true
+        }
+        BackendErrorDisposition::Cancelled => {
+            let _ = event_tx.unbounded_send(AgentEvent::Warn(
+                "stream interrupted by cancellation; any in-flight tool executions will be orphaned"
+                    .to_string(),
+            ));
+            persist_partial_and_interrupt(partial_text, history, session, event_tx).await;
             true
         }
         BackendErrorDisposition::Fatal => {
@@ -3552,6 +3570,275 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_during_request_establishment_emits_interrupted() {
+        use tokio_util::sync::CancellationToken;
+
+        struct BlocksUntilCancelled(CancellationToken);
+
+        #[async_trait]
+        impl LlmBackend for BlocksUntilCancelled {
+            async fn send_message(
+                &self,
+                _: &[Message],
+                _: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                self.0.cancelled().await;
+                Err(BackendError::Cancelled.into())
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let backend = BlocksUntilCancelled(cancel.clone());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("hi".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "interrupt must arrive promptly when the request phase is cancelled; took {elapsed:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected exactly the Interrupted event; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "cancellation must not surface as Error; got: {events:?}"
+        );
+        assert!(
+            !lock(&agent.history).iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.starts_with("[ERROR]")))),
+            "cancellation must not inject [ERROR] into history; history: {:?}",
+            lock(&agent.history)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_retry_backoff_emits_interrupted_not_error() {
+        use tokio_util::sync::CancellationToken;
+
+        let cancel = CancellationToken::new();
+        let inner = AlwaysBackendError::new(BackendError::HttpStatus {
+            code: 503,
+            body: "overloaded".to_string(),
+        });
+        let retry_config = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 10000,
+            max_delay_ms: 30000,
+            max_token_retries: 3,
+        };
+        let backend = RetryingBackend::new(Box::new(inner), retry_config);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("hi".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(9),
+            "cancel during backoff must not wait out the 10s delay; took {elapsed:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted when cancelled during backoff; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "backoff cancellation must not surface as Error; got: {events:?}"
+        );
+        if let Some(idx) = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Interrupted { .. }))
+        {
+            assert!(
+                !events[idx + 1..]
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Retrying(_))),
+                "no Retrying may follow Interrupted; got: {events:?}"
+            );
+        }
+        assert!(
+            !lock(&agent.history).iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.starts_with("[ERROR]")))),
+            "cancellation must not inject [ERROR] into history; history: {:?}",
+            lock(&agent.history)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_backend_error_mid_stream_emits_partial_text() {
+        let backend = SequencedBackend::new(vec![vec![
+            Ok(StreamEvent::TextDelta("partial text".to_string())),
+            Err(anyhow::Error::new(BackendError::Cancelled)),
+        ]]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let interrupted = events
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Interrupted { .. }));
+        assert!(
+            interrupted.is_some(),
+            "expected Interrupted event; got: {events:?}"
+        );
+        if let Some(AgentEvent::Interrupted { partial_text }) = interrupted {
+            assert_eq!(
+                partial_text, "partial text",
+                "Interrupted must carry the accumulated partial text"
+            );
+        }
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::Warn(w) if w.contains("in-flight tool executions"))
+            ),
+            "expected the cancellation Warn alongside Interrupted; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "cancellation must not surface as Error; got: {events:?}"
+        );
+
+        let history = lock(&agent.history).clone();
+        assert!(
+            history.iter().any(|m| {
+                m.role == Role::Assistant
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text(t) if t == "partial text"))
+            }),
+            "partial assistant message should be in history; history: {history:?}"
+        );
+        assert!(
+            !history.iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.starts_with("[ERROR]")))),
+            "cancellation must not inject [ERROR] into history; history: {history:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_blocking_tool_acknowledges_promptly() {
+        use tokio_util::sync::CancellationToken;
+
+        struct BlockingTool {
+            schema: serde_json::Value,
+        }
+
+        impl BlockingTool {
+            fn new() -> Self {
+                Self {
+                    schema: serde_json::json!({"type": "object", "properties": {}}),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl crate::tools::Tool for BlockingTool {
+            fn name(&self) -> &str {
+                "blocking"
+            }
+            fn description(&self) -> &str {
+                "Blocks a worker thread for five seconds"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                &self.schema
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+            ) -> Result<ToolExecResult, ToolError> {
+                let join = tokio::task::spawn_blocking(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                });
+                join.await.map_err(|e| ToolError::Execution {
+                    tool_name: "blocking".to_string(),
+                    message: e.to_string(),
+                })?;
+                Ok(ToolExecResult {
+                    content: vec![ContentBlock::Text("finally".to_string())],
+                    is_error: false,
+                    agent_events: vec![],
+                })
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let backend = SequencedBackend::new(vec![tool_call_response("t1", "blocking", r#"{}"#)]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(BlockingTool::new())),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let cancel_clone = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            cancel_clone.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let stream = agent
+            .send("run the blocker".to_string(), None, Some(cancel))
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "Interrupted must arrive promptly even while a blocking tool occupies a worker; took {elapsed:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "expected Interrupted while blocking tool was in flight; got: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "must not surface as Error; got: {events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn cancel_during_tool_confirmation_emits_interrupted_without_second_confirmation() {
         // Scenario: LLM emits two write-tool calls in one turn (Always mode).
         // User presses Esc during the first confirmation dialog.
@@ -5610,8 +5897,20 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| { matches!(e, AgentEvent::Error(_) | AgentEvent::Interrupted { .. }) }),
-            "should emit Error or Interrupted when cancelled during retry; got {events:?}"
+                .any(|e| matches!(e, AgentEvent::Interrupted { .. })),
+            "should emit Interrupted when cancelled during retry; got {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+            "cancellation must not surface as Error; got {events:?}"
+        );
+        assert!(
+            !lock(&agent.history).iter().any(|m| m
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.starts_with("[ERROR]")))),
+            "cancellation must not inject [ERROR] into history; history: {:?}",
+            lock(&agent.history)
         );
     }
 

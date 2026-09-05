@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use reqwest::Client;
 
 use super::LlmBackend;
 use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig, AuthStyle};
@@ -64,7 +63,7 @@ impl OpenCodeGoBackend {
                     max_tokens_override: config.max_tokens,
                 };
                 ProtocolBackend::Anthropic(AnthropicCompatBackend::new(
-                    Client::new(),
+                    super::build_http_client()?,
                     compat_config,
                 ))
             }

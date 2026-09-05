@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::Client;
 
 use super::LlmBackend;
 use super::error::BackendError;
@@ -220,7 +219,7 @@ impl OpenAiCompatSseParser {
 /// are controlled via [`OpenAiCompatConfig`].
 #[derive(Debug)]
 pub struct OpenAiCompatBackend {
-    client: Client,
+    client: reqwest::Client,
     endpoint: String,
     api_key: Option<String>,
     max_tokens_override: Option<u32>,
@@ -244,7 +243,7 @@ impl OpenAiCompatBackend {
         }
         let endpoint = format!("{}/chat/completions", base);
         Ok(Self {
-            client: Client::new(),
+            client: super::build_http_client()?,
             endpoint,
             api_key: config.api_key,
             max_tokens_override: config.max_tokens,
