@@ -83,6 +83,7 @@ pub struct App {
     pub git_branch: Option<String>,
     pub working_dir: std::path::PathBuf,
     pub chat_mode: crate::types::ChatMode,
+    pub interrupt_requested: bool,
     pending_w: bool,
     pending_g: bool,
     pub compaction_task: Option<tokio::task::JoinHandle<()>>,
@@ -113,6 +114,7 @@ impl App {
         }
         self.pending_g = false;
         self.pending_w = false;
+        self.interrupt_requested = false;
         self.activity_start = match &self.state {
             AppState::Streaming | AppState::RunningBash | AppState::Compacting => {
                 Some(std::time::Instant::now())
@@ -144,6 +146,7 @@ impl App {
             git_branch: None,
             working_dir: std::path::PathBuf::new(),
             chat_mode: crate::types::ChatMode::default(),
+            interrupt_requested: false,
             pending_g: false,
             pending_w: false,
             compaction_task: None,
@@ -366,6 +369,15 @@ impl App {
         }
     }
 
+    fn request_interrupt(&mut self) {
+        // Cancelled streams keep delivering up to a full channel of queued
+        // deltas; the flag makes the TUI drop them until Interrupted arrives.
+        self.interrupt_requested = true;
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+    }
+
     pub fn application_command(&mut self, key: &KeyEvent) -> KeyDisposition {
         match key {
             KeyEvent {
@@ -377,18 +389,14 @@ impl App {
                 code: KeyCode::Esc, ..
             } => match self.state {
                 AppState::Streaming | AppState::RunningBash => {
-                    if let Some(token) = &self.cancel_token {
-                        token.cancel();
-                    }
+                    self.request_interrupt();
                     KeyDisposition::Consumed
                 }
                 AppState::ToolConfirmation { .. } => {
                     if let Some(tx) = &self.confirmation_tx {
                         let _ = tx.unbounded_send(ConfirmationResponse::Rejected);
                     }
-                    if let Some(token) = &self.cancel_token {
-                        token.cancel();
-                    }
+                    self.request_interrupt();
                     KeyDisposition::Consumed
                 }
                 _ => KeyDisposition::PassThrough,
@@ -501,6 +509,30 @@ fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
     thinking.lines().rev().find(|line| !line.trim().is_empty())
 }
 
+fn is_drop_on_interrupt(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TokenReceived(_) | AgentEvent::ThinkingReceived(_)
+    )
+}
+
+fn drain_pending_deltas(
+    app: &App,
+    pending: AgentEvent,
+    rx: &mut mpsc::Receiver<AgentEvent>,
+) -> Option<AgentEvent> {
+    if !app.interrupt_requested {
+        return Some(pending);
+    }
+    let mut pending = Some(pending);
+    loop {
+        let event = pending.take().or_else(|| rx.try_recv().ok())?;
+        if !is_drop_on_interrupt(&event) {
+            return Some(event);
+        }
+    }
+}
+
 fn finish_turn_reset(app: &mut App) {
     app.current_response.clear();
     app.current_thinking.clear();
@@ -570,7 +602,8 @@ pub fn render_app(app: &mut App, frame: &mut ratatui::Frame) {
         AppFocus::Input => false,
         AppFocus::Conversation => true,
     };
-    app.input.render(frame, chunks[1], input_disabled);
+    app.input
+        .render(frame, chunks[1], input_disabled, app.interrupt_requested);
 
     let info = StatusLineInfo {
         model: &app.model,
@@ -599,6 +632,9 @@ pub fn handle_agent_event(
     if let Some(log) = logger {
         log.log_event(&event)?;
         log.flush()?;
+    }
+    if app.interrupt_requested && is_drop_on_interrupt(&event) {
+        return Ok(());
     }
     match event {
         AgentEvent::TokenReceived(text) => {
@@ -829,6 +865,10 @@ async fn run_app(
         terminal.draw(|frame| render_app(&mut app, frame))?;
         tokio::select! {
             Some(agent_event) = event_rx.recv() => {
+                let agent_event = match drain_pending_deltas(&app, agent_event, &mut event_rx) {
+                    Some(event) => event,
+                    None => continue,
+                };
                 if let AgentEvent::CompactionComplete { summary, is_error } = &agent_event {
                     if *is_error {
                         agent.reset_auto_compact_flag();
@@ -2600,23 +2640,19 @@ mod tests {
     }
 
     #[test]
-    fn esc_during_streaming_cancels_token() {
+    fn esc_during_streaming_sets_interrupt_requested() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let token = CancellationToken::new();
         app.cancel_token = Some(token.clone());
         app.set_state(AppState::Streaming);
 
-        assert!(
-            !token.is_cancelled(),
-            "token should not be cancelled before Esc"
-        );
-
         let d = app.application_command(&esc_key());
         assert_eq!(d, KeyDisposition::Consumed);
 
+        assert!(token.is_cancelled());
         assert!(
-            token.is_cancelled(),
-            "token should be cancelled after Esc in Streaming state"
+            app.interrupt_requested,
+            "Esc in Streaming must set interrupt_requested"
         );
     }
 
@@ -2643,7 +2679,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_in_tool_confirmation_sends_rejected_and_cancels() {
+    fn esc_during_tool_confirmation_sets_interrupt_requested() {
         use futures::channel::mpsc as fmpsc;
 
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
@@ -2671,10 +2707,14 @@ mod tests {
             ConfirmationResponse::Rejected,
             "Esc in ToolConfirmation must send Rejected"
         );
+        assert!(
+            app.interrupt_requested,
+            "Esc in ToolConfirmation must set interrupt_requested"
+        );
     }
 
     #[test]
-    fn esc_during_running_bash_cancels_token() {
+    fn esc_during_running_bash_sets_interrupt_requested() {
         let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
         let token = CancellationToken::new();
         app.cancel_token = Some(token.clone());
@@ -2683,6 +2723,10 @@ mod tests {
         let d = app.application_command(&esc_key());
         assert_eq!(d, KeyDisposition::Consumed);
         assert!(token.is_cancelled());
+        assert!(
+            app.interrupt_requested,
+            "Esc in RunningBash must set interrupt_requested"
+        );
     }
 
     // ── ctrl+c quit — universal across all states × focuses ─────────────
@@ -2952,6 +2996,194 @@ mod tests {
             app.cancel_token.is_none(),
             "cancel_token should be cleared after Interrupted"
         );
+    }
+
+    #[test]
+    fn handle_agent_event_interrupted_clears_interrupt_requested() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.interrupt_requested = true;
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::Interrupted {
+                partial_text: "partial".to_string(),
+            },
+            None,
+        )
+        .expect("handle event");
+
+        assert!(
+            !app.interrupt_requested,
+            "Interrupted must clear interrupt_requested"
+        );
+    }
+
+    #[test]
+    fn response_complete_clears_interrupt_requested() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.streaming_timestamp = "[20250101-1200]".to_string();
+        app.interrupt_requested = true;
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ResponseComplete("done".to_string()),
+            None,
+        )
+        .expect("handle event");
+
+        assert!(
+            !app.interrupt_requested,
+            "ResponseComplete (finish_turn_reset) must clear interrupt_requested"
+        );
+    }
+
+    #[test]
+    fn bash_command_complete_clears_interrupt_requested() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::RunningBash);
+        app.interrupt_requested = true;
+
+        handle_agent_event(&mut app, AgentEvent::BashCommandComplete, None).expect("handle event");
+
+        assert!(
+            !app.interrupt_requested,
+            "BashCommandComplete must clear interrupt_requested via set_state(Input)"
+        );
+    }
+
+    #[test]
+    fn deltas_dropped_while_interrupt_requested() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.interrupt_requested = true;
+
+        handle_agent_event(
+            &mut app,
+            AgentEvent::TokenReceived("stale ".to_string()),
+            None,
+        )
+        .expect("handle event");
+        handle_agent_event(
+            &mut app,
+            AgentEvent::ThinkingReceived("stale thinking".to_string()),
+            None,
+        )
+        .expect("handle event");
+
+        assert!(
+            app.current_response.is_empty(),
+            "TokenReceived must be dropped while interrupt is pending"
+        );
+        assert!(
+            app.current_thinking.is_empty(),
+            "ThinkingReceived must be dropped while interrupt is pending"
+        );
+    }
+
+    #[test]
+    fn set_state_clears_interrupt_requested() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.interrupt_requested = true;
+
+        app.set_state(AppState::Input);
+        assert!(!app.interrupt_requested, "Input should clear the flag");
+
+        app.interrupt_requested = true;
+        app.set_state(AppState::Streaming);
+        assert!(!app.interrupt_requested, "Streaming should clear the flag");
+
+        app.interrupt_requested = true;
+        app.set_state(AppState::ToolConfirmation {
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            index: 1,
+        });
+        assert!(
+            !app.interrupt_requested,
+            "ToolConfirmation should clear the flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_deltas_drops_deltas_until_terminal_event() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        app.interrupt_requested = true;
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+
+        tx.send(AgentEvent::TokenReceived("a".to_string()))
+            .await
+            .expect("send a");
+        tx.send(AgentEvent::TokenReceived("b".to_string()))
+            .await
+            .expect("send b");
+        tx.send(AgentEvent::Interrupted {
+            partial_text: "agent partial text".to_string(),
+        })
+        .await
+        .expect("send interrupted");
+        tx.send(AgentEvent::TokenReceived("stays queued".to_string()))
+            .await
+            .expect("send trailing");
+        drop(tx);
+
+        let dispatched = drain_pending_deltas(
+            &app,
+            AgentEvent::TokenReceived("pending".to_string()),
+            &mut rx,
+        )
+        .expect("terminal event should be dispatched");
+        assert!(
+            matches!(dispatched, AgentEvent::Interrupted { .. }),
+            "draining must stop at the first non-delta event"
+        );
+        handle_agent_event(&mut app, dispatched, None).expect("dispatch terminal event");
+        assert!(
+            app.conversation
+                .iter()
+                .any(|e| e.content.contains("agent partial text")),
+            "Interrupted must be processed (conversation gained the entry)"
+        );
+        assert_eq!(app.state, AppState::Input, "state must be reset");
+        assert!(
+            !app.interrupt_requested,
+            "processing Interrupted clears the flag"
+        );
+        assert_eq!(
+            app.current_response, "",
+            "deltas must not reach current_response"
+        );
+
+        let trailing = rx.try_recv().expect("trailing delta should remain queued");
+        assert!(
+            matches!(trailing, AgentEvent::TokenReceived(_)),
+            "events after the terminal event must be left in the channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_pending_deltas_noop_without_interrupt() {
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        app.set_state(AppState::Streaming);
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(100);
+        tx.send(AgentEvent::Interrupted {
+            partial_text: String::new(),
+        })
+        .await
+        .expect("send interrupted");
+        drop(tx);
+
+        let dispatched =
+            drain_pending_deltas(&app, AgentEvent::TokenReceived("x".to_string()), &mut rx)
+                .expect("event must pass through");
+        assert!(
+            matches!(dispatched, AgentEvent::TokenReceived(_)),
+            "without a pending interrupt the pending event is returned untouched"
+        );
+        assert_eq!(app.conversation.len(), 0, "channel must not be touched");
+        assert!(rx.try_recv().is_ok(), "queued event must stay queued");
     }
 
     #[test]

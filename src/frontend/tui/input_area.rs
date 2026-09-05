@@ -161,8 +161,14 @@ impl InputArea {
             .clamp(MIN_HEIGHT, max_height)
     }
 
-    pub fn render(&mut self, frame: &mut ratatui::Frame, area: Rect, disabled: bool) {
-        let block = self.build_block(area, disabled);
+    pub fn render(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        area: Rect,
+        disabled: bool,
+        interrupt_requested: bool,
+    ) {
+        let block = self.build_block(area, disabled, interrupt_requested);
         let inner = block.inner(area);
 
         if inner.width == 0 || inner.height == 0 {
@@ -240,7 +246,12 @@ impl InputArea {
         }
     }
 
-    fn build_block(&self, _area: Rect, disabled: bool) -> Block<'static> {
+    fn build_block(
+        &self,
+        _area: Rect,
+        disabled: bool,
+        interrupt_requested: bool,
+    ) -> Block<'static> {
         let title = match &self.mode {
             AppMode::Editing => match self.editor.vim_mode() {
                 VimMode::Normal => NORMAL_TITLE,
@@ -250,9 +261,23 @@ impl InputArea {
                 VimMode::VisualBlock => VISUAL_BLOCK_TITLE,
             }
             .to_string(),
-            AppMode::Streaming => elapsed_title(self.elapsed, "Streaming... (Esc to interrupt)"),
+            AppMode::Streaming => elapsed_title(
+                self.elapsed,
+                if interrupt_requested {
+                    "Cancelling... (Esc to interrupt)"
+                } else {
+                    "Streaming... (Esc to interrupt)"
+                },
+            ),
             AppMode::Compacting => elapsed_title(self.elapsed, "Compacting..."),
-            AppMode::RunningBash => elapsed_title(self.elapsed, "Running bash... (Esc to cancel)"),
+            AppMode::RunningBash => elapsed_title(
+                self.elapsed,
+                if interrupt_requested {
+                    "Cancelling... (Esc to cancel)"
+                } else {
+                    "Running bash... (Esc to cancel)"
+                },
+            ),
             AppMode::SessionPicker => SESSIONS_TITLE.to_string(),
             AppMode::TasksPicker => TASKS_TITLE.to_string(),
             AppMode::ToolConfirmation { name, .. } => {
@@ -553,7 +578,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -575,7 +600,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 20, height);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -593,7 +618,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -633,7 +658,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -651,11 +676,29 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
         insta::assert_snapshot!("render_streaming_with_elapsed", terminal.backend());
+    }
+
+    #[test]
+    fn render_cancelling() {
+        let mut input = InputArea::new();
+        input.set_mode(AppMode::Streaming);
+        input.set_elapsed_title(std::time::Duration::from_secs(55));
+
+        let backend = ratatui::backend::TestBackend::new(60, 10);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
+                input.render(frame, area, true, true);
+            })
+            .expect("draw");
+
+        insta::assert_snapshot!("render_cancelling", terminal.backend());
     }
 
     #[test]
@@ -669,7 +712,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -687,7 +730,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -708,7 +751,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 60, height);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -727,7 +770,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -784,7 +827,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -870,7 +913,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -887,7 +930,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -970,7 +1013,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -989,7 +1032,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -1006,7 +1049,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
@@ -1129,7 +1172,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
-                input.render(frame, area, true);
+                input.render(frame, area, true, false);
             })
             .expect("draw");
 
