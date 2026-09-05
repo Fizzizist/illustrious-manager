@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use reqwest::Client;
 
 use super::LlmBackend;
 use super::error::BackendError;
@@ -121,7 +120,7 @@ impl OllamaParser {
 
 #[derive(Debug)]
 pub struct OllamaBackend {
-    client: Client,
+    client: reqwest::Client,
     api_key: String,
     endpoint: String,
 }
@@ -135,7 +134,7 @@ impl OllamaBackend {
             .into());
         }
         Ok(Self {
-            client: Client::new(),
+            client: super::build_http_client()?,
             api_key: config.api_key.clone(),
             endpoint: config.base_url.clone(),
         })
