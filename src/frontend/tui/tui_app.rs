@@ -509,9 +509,6 @@ fn extract_last_thinking_line(thinking: &str) -> Option<&str> {
     thinking.lines().rev().find(|line| !line.trim().is_empty())
 }
 
-/// Deltas dropped while an interrupt is pending: by the time they are seen,
-/// the terminal event (`Interrupted` carries the agent's own accumulated
-/// partial text) supersedes them.
 fn is_drop_on_interrupt(event: &AgentEvent) -> bool {
     matches!(
         event,
@@ -519,12 +516,6 @@ fn is_drop_on_interrupt(event: &AgentEvent) -> bool {
     )
 }
 
-/// While an interrupt is pending, coalesce the stream backlog: drop `pending`
-/// and every queued delta, returning the first non-delta event for normal
-/// dispatch by the caller — the terminal event (`Interrupted` carries the
-/// agent's own accumulated partial text) supersedes dropped deltas. Returns
-/// `None` when only deltas remained (nothing left to dispatch), or
-/// immediately with `pending` when no interrupt is pending.
 fn drain_pending_deltas(
     app: &App,
     pending: AgentEvent,
