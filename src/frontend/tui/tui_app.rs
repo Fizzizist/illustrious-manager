@@ -1914,6 +1914,44 @@ mod tests {
     }
 
     #[test]
+    fn load_history_renders_cancelled_tool_pair_as_tool_use_and_error() {
+        use crate::types::{ContentBlock, Message, Role};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        let messages = vec![
+            Message::text(Role::User, "run the thing".to_string()),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "s1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "sleep"}),
+                }],
+                created_at: 0.0,
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "s1".to_string(),
+                    content: vec![ContentBlock::Text("Tool cancelled by user.".to_string())],
+                    is_error: true,
+                }],
+                created_at: 0.0,
+            },
+        ];
+
+        app.load_history(&messages);
+
+        assert_eq!(app.conversation.len(), 3);
+        assert_eq!(app.conversation[0].role, ConversationRole::User);
+        assert_eq!(app.conversation[1].role, ConversationRole::ToolUse);
+        assert!(app.conversation[1].content.contains("bash"));
+        assert_eq!(app.conversation[2].role, ConversationRole::Error);
+        assert_eq!(app.conversation[2].content, "Tool cancelled by user.");
+    }
+
+    #[test]
     fn load_history_with_multiple_tool_calls_in_one_turn_renders_indexed_labels() {
         use crate::types::{ContentBlock, Message, Role};
 

@@ -8,30 +8,69 @@ pub struct ConversationRepo<'a> {
     session: &'a Session,
 }
 
+/// Multi-row INSERT chunk size: 3 host parameters per row must stay under
+/// SQLite's default host-parameter limit (999).
+const INSERT_CHUNK_ROWS: usize = 250;
+
 impl<'a> ConversationRepo<'a> {
     pub(super) fn new(session: &'a Session) -> Self {
         Self { session }
     }
 
     pub async fn insert_message(&self, message: &Message) -> Result<()> {
-        let content_json = serde_json::to_string(&message.content)
-            .context("Failed to serialize message content")?;
-        let role_str = match message.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-        };
+        self.insert_rows(std::slice::from_ref(message)).await
+    }
+
+    pub async fn insert_messages(&self, messages: &[Message]) -> Result<()> {
         self.session
             .conn
-            .execute(
-                "INSERT INTO conversation (role, content, active, created_at) VALUES (?1, ?2, 1, ?3)",
-                [
-                    turso::Value::Text(role_str.to_string()),
-                    turso::Value::Text(content_json),
-                    turso::Value::Real(message.created_at),
-                ],
-            )
+            .execute("BEGIN TRANSACTION", ())
             .await
-            .context("Failed to insert message into session")?;
+            .context("Failed to begin message-insert transaction")?;
+
+        if let Err(e) = self.insert_rows(messages).await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
+        }
+
+        self.session
+            .conn
+            .execute("COMMIT", ())
+            .await
+            .context("Failed to commit message-insert transaction")?;
+
+        Ok(())
+    }
+
+    async fn insert_rows(&self, messages: &[Message]) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let mut rows = Vec::with_capacity(messages.len() * 3);
+        for msg in messages {
+            let content_json = serde_json::to_string(&msg.content)
+                .context("Failed to serialize message content")?;
+            rows.push(turso::Value::Text(match msg.role {
+                Role::User => "user".to_string(),
+                Role::Assistant => "assistant".to_string(),
+            }));
+            rows.push(turso::Value::Text(content_json));
+            rows.push(turso::Value::Real(msg.created_at));
+        }
+
+        for chunk_rows in rows.chunks(INSERT_CHUNK_ROWS * 3) {
+            let placeholders = vec!["(?, ?, 1, ?)".to_string(); chunk_rows.len() / 3].join(", ");
+            let sql = format!(
+                "INSERT INTO conversation (role, content, active, created_at) VALUES {placeholders}"
+            );
+            self.session
+                .conn
+                .execute(&sql, turso::params_from_iter(chunk_rows.to_vec()))
+                .await
+                .context("Failed to insert messages into session")?;
+        }
+
         Ok(())
     }
 
@@ -151,11 +190,9 @@ impl<'a> ConversationRepo<'a> {
             return Err(e);
         }
 
-        for msg in messages {
-            if let Err(e) = self.insert_message(msg).await {
-                let _ = self.session.conn.execute("ROLLBACK", ()).await;
-                return Err(e);
-            }
+        if let Err(e) = self.insert_rows(messages).await {
+            let _ = self.session.conn.execute("ROLLBACK", ()).await;
+            return Err(e);
         }
 
         self.session
@@ -297,6 +334,58 @@ mod tests {
         match row.get_value(0).expect("get active value") {
             turso::Value::Integer(n) => assert_eq!(n, 1, "active column should be 1"),
             other => panic!("expected integer, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_messages_persists_all_in_order() {
+        let (_dir, session) = create_test_session().await;
+
+        let messages = vec![
+            Message::text(Role::Assistant, "assistant half".to_string()),
+            Message::text(Role::User, "user half".to_string()),
+        ];
+        session
+            .conversation()
+            .insert_messages(&messages)
+            .await
+            .expect("insert messages");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, Role::Assistant);
+        assert_eq!(history[1].role, Role::User);
+    }
+
+    #[tokio::test]
+    async fn insert_messages_exceeding_chunk_size_persists_all() {
+        let (_dir, session) = create_test_session().await;
+
+        let messages: Vec<Message> = (0..super::INSERT_CHUNK_ROWS + 3)
+            .map(|i| Message::text(Role::User, format!("message {i}")).with_created_at(i as f64))
+            .collect();
+        session
+            .conversation()
+            .insert_messages(&messages)
+            .await
+            .expect("insert messages");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), super::INSERT_CHUNK_ROWS + 3);
+        for (i, msg) in history.iter().enumerate() {
+            assert_eq!(
+                msg.content,
+                vec![ContentBlock::Text(format!("message {i}"))],
+                "order must be preserved across the chunk boundary at {i}"
+            );
         }
     }
 
