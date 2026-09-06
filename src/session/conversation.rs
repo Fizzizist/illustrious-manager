@@ -60,8 +60,6 @@ impl<'a> ConversationRepo<'a> {
         }
 
         for chunk_rows in rows.chunks(INSERT_CHUNK_ROWS * 3) {
-            // Plain `?` placeholders auto-number per occurrence; explicit `?N`
-            // would re-bind the same three values in every row.
             let placeholders = vec!["(?, ?, 1, ?)".to_string(); chunk_rows.len() / 3].join(", ");
             let sql = format!(
                 "INSERT INTO conversation (role, content, active, created_at) VALUES {placeholders}"
