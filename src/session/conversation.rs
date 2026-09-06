@@ -35,6 +35,32 @@ impl<'a> ConversationRepo<'a> {
         Ok(())
     }
 
+    /// Insert multiple messages atomically: a crash partway through leaves none
+    /// of them behind, keeping paired rows (e.g. `tool_use`/`tool_result`)
+    /// from dangling independently in the database.
+    pub async fn insert_messages(&self, messages: &[Message]) -> Result<()> {
+        self.session
+            .conn
+            .execute("BEGIN TRANSACTION", ())
+            .await
+            .context("Failed to begin message-insert transaction")?;
+
+        for msg in messages {
+            if let Err(e) = self.insert_message(msg).await {
+                let _ = self.session.conn.execute("ROLLBACK", ()).await;
+                return Err(e);
+            }
+        }
+
+        self.session
+            .conn
+            .execute("COMMIT", ())
+            .await
+            .context("Failed to commit message-insert transaction")?;
+
+        Ok(())
+    }
+
     pub async fn is_empty(&self) -> Result<bool> {
         let mut rows = self
             .session
@@ -298,6 +324,30 @@ mod tests {
             turso::Value::Integer(n) => assert_eq!(n, 1, "active column should be 1"),
             other => panic!("expected integer, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn insert_messages_persists_all_in_order() {
+        let (_dir, session) = create_test_session().await;
+
+        let messages = vec![
+            Message::text(Role::Assistant, "assistant half".to_string()),
+            Message::text(Role::User, "user half".to_string()),
+        ];
+        session
+            .conversation()
+            .insert_messages(&messages)
+            .await
+            .expect("insert messages");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].role, Role::Assistant);
+        assert_eq!(history[1].role, Role::User);
     }
 
     #[tokio::test]
