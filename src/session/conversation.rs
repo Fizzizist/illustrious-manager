@@ -35,9 +35,6 @@ impl<'a> ConversationRepo<'a> {
         Ok(())
     }
 
-    /// Insert multiple messages atomically: a crash partway through leaves none
-    /// of them behind, keeping paired rows (e.g. `tool_use`/`tool_result`)
-    /// from dangling independently in the database.
     pub async fn insert_messages(&self, messages: &[Message]) -> Result<()> {
         self.session
             .conn

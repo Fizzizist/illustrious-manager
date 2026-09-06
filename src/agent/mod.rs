@@ -445,8 +445,6 @@ impl Agent {
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
                 {
-                    // Nothing has streamed yet, so there is no partial message
-                    // to persist; frontends still need the terminal event.
                     let _ = event_tx.unbounded_send(AgentEvent::Interrupted {
                         partial_text: String::new(),
                     });
@@ -509,9 +507,6 @@ impl Agent {
                     match next_event {
                         None if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) => {
                             if !tool_calls.is_empty() {
-                                // Fully-streamed tool calls survive cancellation:
-                                // fall through to the unified tool-turn path where
-                                // they are persisted alongside partial text/thinking.
                                 break;
                             }
                             let _ = event_tx.unbounded_send(AgentEvent::Warn(
@@ -636,8 +631,6 @@ impl Agent {
                         continue 'outer;
                     }
 
-                    // The helper skips persisting when both are empty: a
-                    // fully-empty response leaves history untouched.
                     persist_assistant_partial(
                         &text_accumulated,
                         &thinking_accumulated,
@@ -677,12 +670,6 @@ impl Agent {
                 )
                 .await;
 
-                // Unified persist site: the assistant ToolUse message and its
-                // adjacent user ToolResult message are persisted atomically in
-                // one transaction so no dangling tool_use can ever reach the
-                // wire, including when cancellation fired before or during
-                // execution (the fabricated "Tool cancelled by user." results
-                // ride along).
                 let assistant_msg = Message {
                     role: Role::Assistant,
                     content: assistant_content,
@@ -702,8 +689,6 @@ impl Agent {
                     .insert_messages(&[assistant_msg, tool_result_msg])
                     .await;
 
-                // If cancellation was triggered before or during tool execution, stop
-                // after persisting the complete tool-call pair.
                 if let Some(ref token) = cancel_token
                     && token.is_cancelled()
                 {
