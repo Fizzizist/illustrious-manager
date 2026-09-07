@@ -51,6 +51,9 @@ struct Cli {
     #[arg(long)]
     model: Option<String>,
 
+    #[arg(long, conflicts_with = "model")]
+    role: Option<String>,
+
     #[arg(long)]
     single_shot: bool,
 
@@ -151,14 +154,16 @@ async fn main() -> Result<()> {
     let factory = Arc::new(BackendFactory::new(app_config.clone()));
     let app_config_arc = Arc::new(app_config.clone());
 
+    let startup_selection = factory
+        .for_role(cli.role.as_deref().unwrap_or("default"))
+        .await?;
+
     let skills = discover_skills_from_env();
 
     let session = Session::new(cli.session_id.clone(), app_config.sessions_dir.clone()).await?;
     let session_arc = Arc::new(tokio::sync::Mutex::new(session));
 
     let chat_mode = crate::types::ChatMode::new(cli.chat);
-
-    let default_selection = factory.for_role("default").await?;
 
     let mut registry = build_tool_registry(
         Arc::clone(&session_arc),
@@ -178,7 +183,7 @@ async fn main() -> Result<()> {
 
     let agent = Arc::new(
         spawn_agent(
-            default_selection,
+            startup_selection,
             &app_config.tools,
             &app_config.retry,
             session_arc,
@@ -676,5 +681,39 @@ mod tests {
     fn chat_flag_defaults_to_false() {
         let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
         assert!(!cli.chat);
+    }
+
+    #[test]
+    fn role_flag_defaults_to_none() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).unwrap();
+        assert!(cli.role.is_none());
+    }
+
+    #[test]
+    fn role_flag_is_parsed() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--role", "fast"]).unwrap();
+        assert_eq!(cli.role, Some("fast".to_string()));
+    }
+
+    #[test]
+    fn role_flag_conflicts_with_model_flag() {
+        let err = Cli::try_parse_from([
+            "illustrious-manager",
+            "--role",
+            "fast",
+            "--model",
+            "claude-sonnet-4-20250514",
+        ])
+        .err()
+        .expect("--role and --model must conflict");
+        let err = err.to_string();
+        assert!(
+            err.contains("--role"),
+            "conflict error should mention --role: {err}"
+        );
+        assert!(
+            err.contains("--model"),
+            "conflict error should mention --model: {err}"
+        );
     }
 }

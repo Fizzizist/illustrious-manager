@@ -558,10 +558,10 @@ pub fn load_config(custom_path: Option<&Path>) -> Result<AppConfig> {
 impl AppConfig {
     /// Resolve a named role to its concrete backend and model names.
     pub fn resolve_role(&self, role: &str) -> Result<ResolvedRole> {
-        let role_def = self
-            .models
-            .get(role)
-            .ok_or_else(|| anyhow::anyhow!("Undefined model role '{role}'"))?;
+        let role_def = self.models.get(role).ok_or_else(|| {
+            let available = self.models.keys().cloned().collect::<Vec<_>>().join(", ");
+            anyhow::anyhow!("Undefined model role '{role}'. Available roles: {available}")
+        })?;
         Ok(ResolvedRole {
             backend_name: role_def.backend.clone(),
             model: role_def.model.clone(),
@@ -1639,7 +1639,15 @@ mod tests {
         };
         let result = config.resolve_role("nonexistent");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nonexistent"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent"),
+            "error should name the requested role: {err}"
+        );
+        assert!(
+            err.contains("Available roles:"),
+            "error should list available roles: {err}"
+        );
     }
 
     #[test]

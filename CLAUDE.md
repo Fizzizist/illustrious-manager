@@ -40,6 +40,7 @@ cargo run -- --single-shot "prompt"  # Run in single-shot mode
 cargo run -- --debug                 # Run with file logging (illustrious-manager_<ts>.log)
 cargo run -- --config <path>         # Use a custom config file
 cargo run -- --session-id <uuid>     # Resume a previous session by UUIDv7
+cargo run -- --role <name>           # Start on a named role from [models] (conflicts with --model)
 cargo test                           # Run all tests
 cargo test <test_name>               # Run a single test
 cargo insta review                   # Review/accept snapshot test changes
@@ -140,6 +141,8 @@ model = "gpt-oss:120b"
 ```
 
 CLI flags (`--project`, `--region`, `--model`, `--session-id`) override config file values.
+
+The `--role <name>` flag selects the startup backend/model from a named role in `[models]`, applying to both REPL and single-shot modes. It conflicts with `--model` (enforced by clap before config load). Role resolution happens before the session DB is created — both at process startup and in the sub-agent spawner — so a rejected role (undefined role, unconfigured backend) never leaves an orphaned empty database. An unknown role exits non-zero with an error naming the role and listing available roles (single source of truth: `AppConfig::resolve_role`, shared with the TUI `/role` command and the sub-agent spawner).
 
 ## Authentication
 
