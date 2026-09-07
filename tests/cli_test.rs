@@ -77,19 +77,3 @@ fn unknown_role_fails_without_creating_session_db() {
         "no session DB may be created for a rejected role"
     );
 }
-
-#[test]
-fn role_conflicts_with_model_flag() {
-    let sandbox = Sandbox::new();
-    let output = sandbox.run(&["--role", "fast", "--model", "claude-sonnet-4-20250514"]);
-
-    assert!(
-        !output.status.success(),
-        "--role with --model must exit non-zero"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--role") && stderr.contains("--model"),
-        "usage error should name both flags: {stderr}"
-    );
-}

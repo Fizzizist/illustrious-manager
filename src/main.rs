@@ -51,7 +51,6 @@ struct Cli {
     #[arg(long)]
     model: Option<String>,
 
-    /// Named model role from [models] config. Defaults to 'default'.
     #[arg(long, conflicts_with = "model")]
     role: Option<String>,
 
@@ -698,22 +697,22 @@ mod tests {
 
     #[test]
     fn role_flag_conflicts_with_model_flag() {
-        let err = match Cli::try_parse_from([
+        let err = Cli::try_parse_from([
             "illustrious-manager",
             "--role",
             "fast",
             "--model",
             "claude-sonnet-4-20250514",
-        ]) {
-            Err(err) => err,
-            Ok(_) => panic!("--role and --model must conflict"),
-        };
+        ])
+        .err()
+        .expect("--role and --model must conflict");
+        let err = err.to_string();
         assert!(
-            err.to_string().contains("--role"),
+            err.contains("--role"),
             "conflict error should mention --role: {err}"
         );
         assert!(
-            err.to_string().contains("--model"),
+            err.contains("--model"),
             "conflict error should mention --model: {err}"
         );
     }

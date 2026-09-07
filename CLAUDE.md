@@ -142,7 +142,7 @@ model = "gpt-oss:120b"
 
 CLI flags (`--project`, `--region`, `--model`, `--session-id`) override config file values.
 
-The `--role <name>` flag selects the startup backend/model from a named role in `[models]`, applying to both REPL and single-shot modes. It conflicts with `--model` (enforced by clap before config load). Role resolution happens before the session DB is created, so a rejected role (undefined role, unconfigured backend) never leaves an orphaned empty database. An unknown role exits non-zero with an error naming the role and listing available roles (single source of truth: `AppConfig::resolve_role`, shared with the TUI `/role` command and the sub-agent spawner).
+The `--role <name>` flag selects the startup backend/model from a named role in `[models]`, applying to both REPL and single-shot modes. It conflicts with `--model` (enforced by clap before config load). Role resolution happens before the session DB is created — both at process startup and in the sub-agent spawner — so a rejected role (undefined role, unconfigured backend) never leaves an orphaned empty database. An unknown role exits non-zero with an error naming the role and listing available roles (single source of truth: `AppConfig::resolve_role`, shared with the TUI `/role` command and the sub-agent spawner).
 
 ## Authentication
 

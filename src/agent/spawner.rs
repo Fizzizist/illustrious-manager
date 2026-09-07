@@ -140,19 +140,6 @@ impl AgentSpawner {
         tool_allowlist: Option<&[String]>,
         prompt: String,
     ) -> HeadlessOutcome {
-        let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
-            Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
-            Err(e) => {
-                return HeadlessOutcome {
-                    text: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    is_error: true,
-                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
-                };
-            }
-        };
-
         let tool_config = ToolsConfig {
             confirmation,
             ..self.app_config.tools.clone()
@@ -167,6 +154,19 @@ impl AgentSpawner {
                     output_tokens: 0,
                     is_error: true,
                     error_message: Some(format!("Failed to resolve role '{role}': {e}")),
+                };
+            }
+        };
+
+        let session = match Session::new(None, self.app_config.sessions_dir.clone()).await {
+            Ok(s) => Arc::new(tokio::sync::Mutex::new(s)),
+            Err(e) => {
+                return HeadlessOutcome {
+                    text: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    is_error: true,
+                    error_message: Some(format!("Failed to create sub-agent session: {e}")),
                 };
             }
         };
@@ -393,6 +393,77 @@ mod tests {
         assert_eq!(
             text, "partialrecovered",
             "text should accumulate across retry boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_undefined_role_without_creating_session_db() {
+        use std::collections::BTreeMap;
+
+        use crate::config::{AppConfig, CompactionConfig, OllamaConfig, RetryConfig, VertexConfig};
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let mut config = AppConfig {
+            backend: "ollama".to_string(),
+            sessions_dir: temp.path().to_path_buf(),
+            vertex: VertexConfig {
+                project: "test-project".to_string(),
+                region: "us-east5".to_string(),
+                model: "claude-sonnet-4-20250514".to_string(),
+                max_tokens: None,
+            },
+            zai: None,
+            ollama: Some(OllamaConfig {
+                api_key: "test-key".to_string(),
+                model: "gpt-oss:120b".to_string(),
+                base_url: "http://127.0.0.1:1/api/chat".to_string(),
+                max_tokens: None,
+            }),
+            openai_compat: None,
+            opencode_go: None,
+            anthropic: None,
+            tools: ToolsConfig::default(),
+            models: BTreeMap::new(),
+            thinking: None,
+            compaction: CompactionConfig::default(),
+            retry: RetryConfig::default(),
+        };
+        config.normalize_back_compat();
+
+        let spawner = AgentSpawner {
+            factory: Arc::new(BackendFactory::new(config.clone())),
+            app_config: Arc::new(config),
+            registry_builder: Box::new(|_| Ok(ToolRegistry::new())),
+            parent_confirmation: ConfirmationMode::Never,
+            skills: std::collections::HashMap::new(),
+            chat_mode: ChatMode::new(false),
+        };
+
+        let outcome = spawner
+            .spawn(
+                "nonexistent",
+                ConfirmationMode::Never,
+                None,
+                "hello".to_string(),
+            )
+            .await;
+
+        assert!(outcome.is_error, "undefined role must be an error");
+        let error = outcome.error_message.expect("error message");
+        assert!(
+            error.contains("nonexistent"),
+            "error should name the role: {error}"
+        );
+        assert!(
+            error.contains("Available roles: default"),
+            "error should list available roles: {error}"
+        );
+        let leftover = std::fs::read_dir(temp.path())
+            .expect("read sessions dir")
+            .count();
+        assert_eq!(
+            leftover, 0,
+            "rejected role must fail before creating a session DB"
         );
     }
 }
