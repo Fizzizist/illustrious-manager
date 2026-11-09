@@ -1,9 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{Tool, ToolError, ToolResult, run_blocking};
+use crate::tools::path_lock::PathLocks;
 use crate::tools::sandbox::SandboxPolicy;
 use crate::types::ContentBlock;
 
@@ -11,13 +13,15 @@ const TOOL: &str = "write_file";
 
 pub struct WriteFileTool {
     sandbox: SandboxPolicy,
+    locks: Arc<PathLocks>,
     schema: Value,
 }
 
 impl WriteFileTool {
-    pub fn new(sandbox: SandboxPolicy) -> Self {
+    pub fn new(sandbox: SandboxPolicy, locks: Arc<PathLocks>) -> Self {
         Self {
             sandbox,
+            locks,
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -98,11 +102,14 @@ impl Tool for WriteFileTool {
                     message: e.to_string(),
                 })?;
 
+        let guard = self.locks.lock(&validated).await;
+
         let bytes = content.len();
         let content = content.to_string();
         let sandbox = self.sandbox.clone();
 
         run_blocking(TOOL, move || {
+            let _guard = guard;
             if let Some(parent) = validated.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution {
                     tool_name: TOOL.to_string(),

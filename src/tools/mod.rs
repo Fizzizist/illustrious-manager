@@ -4,6 +4,7 @@ pub mod agent;
 pub mod bash;
 pub mod edit_file;
 pub mod image_viewer;
+pub mod path_lock;
 pub mod sandbox;
 pub mod search;
 pub mod skill;

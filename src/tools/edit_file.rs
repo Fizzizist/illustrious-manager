@@ -1,9 +1,11 @@
+use crate::tools::path_lock::PathLocks;
 use crate::tools::sandbox::SandboxPolicy;
 use crate::tools::{Tool, ToolError, ToolResult, run_blocking};
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 
 const TOOL: &str = "edit_file";
 
@@ -14,11 +16,12 @@ const TOOL: &str = "edit_file";
 #[derive(Debug)]
 pub struct EditFile {
     sandbox: SandboxPolicy,
+    locks: Arc<PathLocks>,
 }
 
 impl EditFile {
-    pub fn new(sandbox: SandboxPolicy) -> Self {
-        Self { sandbox }
+    pub fn new(sandbox: SandboxPolicy, locks: Arc<PathLocks>) -> Self {
+        Self { sandbox, locks }
     }
 }
 
@@ -120,19 +123,30 @@ impl Tool for EditFile {
             });
         }
 
-        let path = Path::new(path_str);
-        let validated_path =
-            self.sandbox
-                .validate_path(path)
-                .map_err(|e| ToolError::Execution {
-                    tool_name: self.name().to_string(),
-                    message: format!("Path validation failed: {}", e),
-                })?;
+        let lock_key = self
+            .sandbox
+            .validate_write_path(Path::new(path_str))
+            .map_err(|e| ToolError::Execution {
+                tool_name: self.name().to_string(),
+                message: format!("Path validation failed: {}", e),
+            })?;
+        let guard = self.locks.lock(&lock_key).await;
 
+        let path = path_str.to_string();
+        let sandbox = self.sandbox.clone();
         let old_string = old_string.to_string();
         let new_string = new_string.to_string();
 
         run_blocking(TOOL, move || -> Result<ToolResult, ToolError> {
+            let _guard = guard;
+            let validated_path =
+                sandbox
+                    .validate_path(Path::new(&path))
+                    .map_err(|e| ToolError::Execution {
+                        tool_name: TOOL.to_string(),
+                        message: format!("Path validation failed: {}", e),
+                    })?;
+
             let content =
                 fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
                     tool_name: TOOL.to_string(),
