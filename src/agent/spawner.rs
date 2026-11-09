@@ -279,11 +279,13 @@ mod tests {
         registry
             .register(Box::new(crate::tools::edit_file::EditFile::new(
                 crate::tools::sandbox::SandboxPolicy::new(std::path::Path::new("/tmp")),
+                std::sync::Arc::default(),
             )))
             .expect("register edit_file");
         registry
             .register(Box::new(crate::tools::write_file::WriteFileTool::new(
                 crate::tools::sandbox::SandboxPolicy::new(std::path::Path::new("/tmp")),
+                std::sync::Arc::default(),
             )))
             .expect("register write_file");
         registry
