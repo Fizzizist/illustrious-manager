@@ -1,9 +1,11 @@
+use crate::tools::path_lock::PathLocks;
 use crate::tools::sandbox::SandboxPolicy;
 use crate::tools::{Tool, ToolError, ToolResult, run_blocking};
 use crate::types::ContentBlock;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
 
 const TOOL: &str = "edit_file";
 
@@ -14,11 +16,12 @@ const TOOL: &str = "edit_file";
 #[derive(Debug)]
 pub struct EditFile {
     sandbox: SandboxPolicy,
+    locks: Arc<PathLocks>,
 }
 
 impl EditFile {
-    pub fn new(sandbox: SandboxPolicy) -> Self {
-        Self { sandbox }
+    pub fn new(sandbox: SandboxPolicy, locks: Arc<PathLocks>) -> Self {
+        Self { sandbox, locks }
     }
 }
 
@@ -120,19 +123,30 @@ impl Tool for EditFile {
             });
         }
 
-        let path = Path::new(path_str);
-        let validated_path =
-            self.sandbox
-                .validate_path(path)
-                .map_err(|e| ToolError::Execution {
-                    tool_name: self.name().to_string(),
-                    message: format!("Path validation failed: {}", e),
-                })?;
+        let lock_key = self
+            .sandbox
+            .validate_write_path(Path::new(path_str))
+            .map_err(|e| ToolError::Execution {
+                tool_name: self.name().to_string(),
+                message: format!("Path validation failed: {}", e),
+            })?;
+        let guard = self.locks.lock(&lock_key).await;
 
+        let path = path_str.to_string();
+        let sandbox = self.sandbox.clone();
         let old_string = old_string.to_string();
         let new_string = new_string.to_string();
 
         run_blocking(TOOL, move || -> Result<ToolResult, ToolError> {
+            let _guard = guard;
+            let validated_path =
+                sandbox
+                    .validate_path(Path::new(&path))
+                    .map_err(|e| ToolError::Execution {
+                        tool_name: TOOL.to_string(),
+                        message: format!("Path validation failed: {}", e),
+                    })?;
+
             let content =
                 fs::read_to_string(&validated_path).map_err(|e| ToolError::Execution {
                     tool_name: TOOL.to_string(),
@@ -192,7 +206,7 @@ mod tests {
     async fn successful_replacement_writes_correct_content() {
         let (_temp_dir, file_path) = create_test_file("hello world\nfoo bar\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -211,7 +225,7 @@ mod tests {
     async fn old_string_not_found_returns_error() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -230,7 +244,7 @@ mod tests {
     async fn old_string_matches_multiple_locations_returns_error() {
         let (_temp_dir, file_path) = create_test_file("hello world\nhello there\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -253,7 +267,7 @@ mod tests {
         let outside_file = temp_dir.path().parent().unwrap().join("outside.txt");
         fs::write(&outside_file, "content").expect("Failed to write outside file");
 
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": outside_file.to_str().unwrap(),
@@ -272,7 +286,7 @@ mod tests {
     async fn file_doesnt_exist_returns_error() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": "nonexistent.txt",
@@ -291,7 +305,7 @@ mod tests {
     async fn empty_old_string_returns_error() {
         let (_temp_dir, file_path) = create_test_file("content\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -307,7 +321,7 @@ mod tests {
     async fn new_string_can_be_empty() {
         let (_temp_dir, file_path) = create_test_file("hello world\nfoo bar\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -326,7 +340,7 @@ mod tests {
     async fn markdown_input_formats_as_diff() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": "test.txt",
@@ -349,7 +363,7 @@ mod tests {
         fs::write(&file_path, "hello tmp\n").expect("Failed to write test file");
 
         let sandbox = SandboxPolicy::new(sandbox_dir.path()).with_extra_root(extra_dir.path());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.to_str().expect("temp path should be valid UTF-8"),
@@ -368,7 +382,7 @@ mod tests {
     async fn markdown_output_returns_result_text() {
         let (_temp_dir, file_path) = create_test_file("hello world\n");
         let sandbox = SandboxPolicy::new(file_path.parent().unwrap());
-        let tool = EditFile::new(sandbox);
+        let tool = EditFile::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.file_name().unwrap().to_str().unwrap(),
@@ -380,6 +394,199 @@ mod tests {
         assert!(
             md.contains("Successfully replaced"),
             "should contain success message"
+        );
+    }
+
+    const CONCURRENT_EDITS: usize = 24;
+
+    fn numbered_lines(n: usize) -> String {
+        (0..n).map(|i| format!("line{i}=old\n")).collect()
+    }
+
+    fn edit_line_input(path: &str, i: usize) -> Value {
+        serde_json::json!({
+            "path": path,
+            "old_string": format!("line{i}=old"),
+            "new_string": format!("line{i}=new"),
+        })
+    }
+
+    fn assert_all_lines_edited(file_path: &Path, n: usize) {
+        let content = fs::read_to_string(file_path).expect("Failed to read file");
+        let expected: String = (0..n).map(|i| format!("line{i}=new\n")).collect();
+        assert_eq!(content, expected, "every concurrent edit must be applied");
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_to_same_file_all_apply() {
+        let (_temp_dir, file_path) = create_test_file(&numbered_lines(CONCURRENT_EDITS));
+        let tool = EditFile::new(
+            SandboxPolicy::new(file_path.parent().expect("file has parent")),
+            std::sync::Arc::default(),
+        );
+
+        let results = futures::future::join_all(
+            (0..CONCURRENT_EDITS).map(|i| tool.execute(edit_line_input("test.txt", i))),
+        )
+        .await;
+
+        for (i, result) in results.iter().enumerate() {
+            let result = result
+                .as_ref()
+                .unwrap_or_else(|e| panic!("edit {i} failed: {e}"));
+            assert!(!result.is_error, "edit {i} reported an error");
+        }
+        assert_all_lines_edited(&file_path, CONCURRENT_EDITS);
+    }
+
+    #[tokio::test]
+    async fn edits_via_aliased_paths_serialise() {
+        let (temp_dir, file_path) = create_test_file(&numbered_lines(CONCURRENT_EDITS));
+        let absolute = file_path
+            .to_str()
+            .expect("temp path should be valid UTF-8")
+            .to_string();
+        #[allow(unused_mut)]
+        let mut aliases = vec!["test.txt".to_string(), absolute];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file_path, temp_dir.path().join("link.txt"))
+                .expect("Failed to create symlink");
+            aliases.push("link.txt".to_string());
+        }
+        let tool = EditFile::new(
+            SandboxPolicy::new(temp_dir.path()),
+            std::sync::Arc::default(),
+        );
+
+        let results = futures::future::join_all(
+            (0..CONCURRENT_EDITS)
+                .map(|i| tool.execute(edit_line_input(&aliases[i % aliases.len()], i))),
+        )
+        .await;
+
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                result.as_ref().is_ok_and(|r| !r.is_error),
+                "edit {i} via {} failed: {result:?}",
+                aliases[i % aliases.len()]
+            );
+        }
+        assert_all_lines_edited(&file_path, CONCURRENT_EDITS);
+    }
+
+    #[tokio::test]
+    async fn separate_tool_instances_sharing_locks_serialise() {
+        let (temp_dir, file_path) = create_test_file(&numbered_lines(CONCURRENT_EDITS));
+        let locks = std::sync::Arc::new(crate::tools::path_lock::PathLocks::new());
+        let parent = EditFile::new(SandboxPolicy::new(temp_dir.path()), locks.clone());
+        let sub_agent = EditFile::new(SandboxPolicy::new(temp_dir.path()), locks);
+
+        let results = futures::future::join_all((0..CONCURRENT_EDITS).map(|i| {
+            let tool = if i % 2 == 0 { &parent } else { &sub_agent };
+            tool.execute(edit_line_input("test.txt", i))
+        }))
+        .await;
+
+        for (i, result) in results.iter().enumerate() {
+            assert!(
+                result.as_ref().is_ok_and(|r| !r.is_error),
+                "edit {i} failed: {result:?}"
+            );
+        }
+        assert_all_lines_edited(&file_path, CONCURRENT_EDITS);
+    }
+
+    #[tokio::test]
+    async fn edit_waits_while_path_lock_held() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let file_a = temp_dir.path().join("a.txt");
+        let file_b = temp_dir.path().join("b.txt");
+        fs::write(&file_a, "alpha\n").expect("Failed to write a.txt");
+        fs::write(&file_b, "bravo\n").expect("Failed to write b.txt");
+        let locks = std::sync::Arc::new(crate::tools::path_lock::PathLocks::new());
+        let tool = EditFile::new(SandboxPolicy::new(temp_dir.path()), locks.clone());
+
+        let held = locks
+            .lock(&fs::canonicalize(&file_a).expect("canonicalize a.txt"))
+            .await;
+
+        let edit_a = tool.execute(serde_json::json!({
+            "path": "a.txt",
+            "old_string": "alpha",
+            "new_string": "ALPHA",
+        }));
+        tokio::pin!(edit_a);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut edit_a)
+                .await
+                .is_err(),
+            "edit to a locked file must wait for the lock"
+        );
+        assert_eq!(
+            fs::read_to_string(&file_a).expect("read a.txt"),
+            "alpha\n",
+            "locked file must be untouched while the lock is held"
+        );
+
+        let edit_b = tool.execute(serde_json::json!({
+            "path": "b.txt",
+            "old_string": "bravo",
+            "new_string": "BRAVO",
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(5), edit_b)
+            .await
+            .expect("edit to an unlocked file must not wait")
+            .expect("edit to b.txt should succeed");
+        assert_eq!(fs::read_to_string(&file_b).expect("read b.txt"), "BRAVO\n");
+
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), edit_a)
+            .await
+            .expect("edit must finish once the lock is released")
+            .expect("edit to a.txt should succeed");
+        assert_eq!(fs::read_to_string(&file_a).expect("read a.txt"), "ALPHA\n");
+    }
+
+    #[tokio::test]
+    async fn dropped_edit_future_does_not_lose_other_edits() {
+        let (temp_dir, file_path) = create_test_file(&numbered_lines(CONCURRENT_EDITS));
+        let locks = std::sync::Arc::new(crate::tools::path_lock::PathLocks::new());
+        let tool = EditFile::new(SandboxPolicy::new(temp_dir.path()), locks.clone());
+
+        let outcomes = futures::future::join_all((0..CONCURRENT_EDITS).map(|i| {
+            let exec = tool.execute(edit_line_input("test.txt", i));
+            async move {
+                if i % 3 == 0 {
+                    tokio::time::timeout(std::time::Duration::ZERO, exec)
+                        .await
+                        .ok()
+                } else {
+                    Some(exec.await)
+                }
+            }
+        }))
+        .await;
+
+        let _quiesced = locks
+            .lock(&fs::canonicalize(&file_path).expect("canonicalize test.txt"))
+            .await;
+        let content = fs::read_to_string(&file_path).expect("Failed to read file");
+        let mut reported_success = 0;
+        for (i, outcome) in outcomes.iter().enumerate() {
+            if let Some(Ok(result)) = outcome
+                && !result.is_error
+            {
+                reported_success += 1;
+                assert!(
+                    content.contains(&format!("line{i}=new\n")),
+                    "edit {i} reported success but its change was lost"
+                );
+            }
+        }
+        assert!(
+            reported_success >= CONCURRENT_EDITS * 2 / 3,
+            "every edit that was not dropped must succeed; got {reported_success}"
         );
     }
 }

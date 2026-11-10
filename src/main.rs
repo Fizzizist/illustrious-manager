@@ -28,6 +28,7 @@ use tools::agent::AgentTool;
 use tools::bash::BashTool;
 use tools::edit_file::EditFile;
 use tools::image_viewer::ImageViewer;
+use tools::path_lock::PathLocks;
 use tools::sandbox::SandboxPolicy;
 use tools::search::SearchTool;
 use tools::skill::{SkillTool, discover_skills_from_env};
@@ -165,12 +166,15 @@ async fn main() -> Result<()> {
 
     let chat_mode = crate::types::ChatMode::new(cli.chat);
 
+    let path_locks = Arc::new(PathLocks::new());
+
     let mut registry = build_tool_registry(
         Arc::clone(&session_arc),
         &app_config.tools,
         &skills,
         None,
         chat_mode.clone(),
+        Arc::clone(&path_locks),
     )?;
 
     let spawner = build_agent_spawner_and_register(
@@ -179,6 +183,7 @@ async fn main() -> Result<()> {
         &app_config_arc,
         &skills,
         chat_mode.clone(),
+        path_locks,
     )?;
 
     let agent = Arc::new(
@@ -298,6 +303,7 @@ fn build_tool_registry(
     skills: &HashMap<String, PathBuf>,
     agent_tool: Option<AgentTool>,
     chat_mode: crate::types::ChatMode,
+    path_locks: Arc<PathLocks>,
 ) -> Result<ToolRegistry> {
     let sandbox_policy = SandboxPolicy::new(Path::new(&tools_config.sandbox_root));
     let sandbox_policy = extend_sandbox_with_tmp(sandbox_policy);
@@ -310,8 +316,14 @@ fn build_tool_registry(
         Box::new(|_| true),
         chat_mode.clone(),
     )))?;
-    reg.register(Box::new(EditFile::new(sandbox_policy.clone())))?;
-    reg.register(Box::new(WriteFileTool::new(sandbox_policy.clone())))?;
+    reg.register(Box::new(EditFile::new(
+        sandbox_policy.clone(),
+        Arc::clone(&path_locks),
+    )))?;
+    reg.register(Box::new(WriteFileTool::new(
+        sandbox_policy.clone(),
+        path_locks,
+    )))?;
     reg.register(Box::new(SearchTool::new(PathBuf::from(
         &tools_config.sandbox_root,
     ))))?;
@@ -338,6 +350,7 @@ fn build_agent_spawner_and_register(
     app_config: &Arc<config::AppConfig>,
     skills: &HashMap<String, PathBuf>,
     chat_mode: crate::types::ChatMode,
+    path_locks: Arc<PathLocks>,
 ) -> Result<Arc<agent::AgentSpawner>> {
     let factory_clone = Arc::clone(factory);
     let app_config_clone = Arc::clone(app_config);
@@ -365,6 +378,7 @@ fn build_agent_spawner_and_register(
                     &skills_clone,
                     agent_tool,
                     chat_mode_clone.clone(),
+                    Arc::clone(&path_locks),
                 )
             }
         }),

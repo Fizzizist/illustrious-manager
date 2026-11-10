@@ -1,9 +1,11 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{Tool, ToolError, ToolResult, run_blocking};
+use crate::tools::path_lock::PathLocks;
 use crate::tools::sandbox::SandboxPolicy;
 use crate::types::ContentBlock;
 
@@ -11,13 +13,15 @@ const TOOL: &str = "write_file";
 
 pub struct WriteFileTool {
     sandbox: SandboxPolicy,
+    locks: Arc<PathLocks>,
     schema: Value,
 }
 
 impl WriteFileTool {
-    pub fn new(sandbox: SandboxPolicy) -> Self {
+    pub fn new(sandbox: SandboxPolicy, locks: Arc<PathLocks>) -> Self {
         Self {
             sandbox,
+            locks,
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -98,11 +102,14 @@ impl Tool for WriteFileTool {
                     message: e.to_string(),
                 })?;
 
+        let guard = self.locks.lock(&validated).await;
+
         let bytes = content.len();
         let content = content.to_string();
         let sandbox = self.sandbox.clone();
 
         run_blocking(TOOL, move || {
+            let _guard = guard;
             if let Some(parent) = validated.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ToolError::Execution {
                     tool_name: TOOL.to_string(),
@@ -149,7 +156,7 @@ mod tests {
     async fn write_file_creates_new_file_with_correct_content() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let file_path = temp_dir.path().join("hello.txt");
         let input = serde_json::json!({
@@ -171,7 +178,7 @@ mod tests {
         fs::write(&file_path, "old content").expect("Failed to create file");
 
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": file_path.to_str().expect("temp path should be valid UTF-8"),
@@ -188,7 +195,7 @@ mod tests {
     async fn write_file_creates_parent_directories() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let file_path = temp_dir
             .path()
@@ -212,7 +219,7 @@ mod tests {
     async fn write_file_outside_sandbox_is_rejected() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let parent = temp_dir
             .path()
@@ -251,7 +258,7 @@ mod tests {
                 .expect("Failed to create symlink");
         }
 
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
         let target = symlink_dir.join("escaped.txt");
         let input = serde_json::json!({
             "path": target.to_str().expect("temp path should be valid UTF-8"),
@@ -270,7 +277,7 @@ mod tests {
     async fn write_file_result_reports_bytes_written() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let file_path = temp_dir.path().join("count.txt");
         let content = "12345";
@@ -294,7 +301,7 @@ mod tests {
     async fn markdown_input_formats_path_and_content() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let input = serde_json::json!({
             "path": "hello.rs",
@@ -312,7 +319,7 @@ mod tests {
         let sandbox_dir = TempDir::new().expect("Failed to create sandbox dir");
         let extra_dir = tempfile::tempdir_in("/tmp").expect("Failed to create extra root dir");
         let sandbox = SandboxPolicy::new(sandbox_dir.path()).with_extra_root(extra_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let file_path = extra_dir.path().join("tmp_write.txt");
         let input = serde_json::json!({
@@ -331,7 +338,7 @@ mod tests {
     async fn markdown_output_returns_result_text() {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let sandbox = SandboxPolicy::new(temp_dir.path());
-        let tool = WriteFileTool::new(sandbox);
+        let tool = WriteFileTool::new(sandbox, std::sync::Arc::default());
 
         let file_path = temp_dir.path().join("out.txt");
         let input = serde_json::json!({
@@ -341,5 +348,84 @@ mod tests {
         let result = tool.execute(input).await.expect("Write should succeed");
         let md = tool.markdown_output(&result);
         assert!(md.contains("Wrote"), "should contain wrote message");
+    }
+
+    const MIXED_BATCH_ROUNDS: usize = 20;
+
+    fn shared_write_and_edit(
+        sandbox: SandboxPolicy,
+    ) -> (WriteFileTool, crate::tools::edit_file::EditFile) {
+        let locks = std::sync::Arc::new(crate::tools::path_lock::PathLocks::new());
+        (
+            WriteFileTool::new(sandbox.clone(), locks.clone()),
+            crate::tools::edit_file::EditFile::new(sandbox, locks),
+        )
+    }
+
+    #[tokio::test]
+    async fn write_then_edit_on_new_file_applies_in_order() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (write, edit) = shared_write_and_edit(SandboxPolicy::new(temp_dir.path()));
+
+        for round in 0..MIXED_BATCH_ROUNDS {
+            let name = format!("new{round}.txt");
+            let results = futures::future::join_all([
+                write.execute(serde_json::json!({ "path": name, "content": "alpha\n" })),
+                edit.execute(serde_json::json!({
+                    "path": name,
+                    "old_string": "alpha",
+                    "new_string": "beta",
+                })),
+            ])
+            .await;
+
+            for (call, result) in ["write", "edit"].iter().zip(&results) {
+                assert!(
+                    result.as_ref().is_ok_and(|r| !r.is_error),
+                    "round {round}: {call} failed: {result:?}"
+                );
+            }
+            let written =
+                fs::read_to_string(temp_dir.path().join(&name)).expect("File should exist");
+            assert_eq!(
+                written, "beta\n",
+                "round {round}: edit must apply after write"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_then_write_final_content_is_write() {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let (write, edit) = shared_write_and_edit(SandboxPolicy::new(temp_dir.path()));
+
+        for round in 0..MIXED_BATCH_ROUNDS {
+            let name = format!("existing{round}.txt");
+            let slow_to_edit = format!("alpha\n{}", "x".repeat(1 << 20));
+            fs::write(temp_dir.path().join(&name), slow_to_edit).expect("Failed to create file");
+
+            let results = futures::future::join_all([
+                edit.execute(serde_json::json!({
+                    "path": name,
+                    "old_string": "alpha",
+                    "new_string": "beta",
+                })),
+                write.execute(serde_json::json!({ "path": name, "content": "gamma\n" })),
+            ])
+            .await;
+
+            for (call, result) in ["edit", "write"].iter().zip(&results) {
+                assert!(
+                    result.as_ref().is_ok_and(|r| !r.is_error),
+                    "round {round}: {call} failed: {result:?}"
+                );
+            }
+            let written =
+                fs::read_to_string(temp_dir.path().join(&name)).expect("File should exist");
+            assert_eq!(
+                written, "gamma\n",
+                "round {round}: write must land after edit"
+            );
+        }
     }
 }

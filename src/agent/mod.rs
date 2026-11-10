@@ -2695,6 +2695,74 @@ mod tests {
         }
     }
 
+    fn edit_file_calls_response(inputs: Vec<serde_json::Value>) -> Vec<Result<StreamEvent>> {
+        let mut events = Vec::with_capacity(inputs.len() * 3 + 1);
+        for (i, input) in inputs.into_iter().enumerate() {
+            events.push(Ok(StreamEvent::ToolUseStart {
+                id: format!("edit{i}"),
+                name: "edit_file".to_string(),
+            }));
+            events.push(Ok(StreamEvent::ToolUseDelta(input.to_string())));
+            events.push(Ok(StreamEvent::ToolUseDone));
+        }
+        events.push(Ok(StreamEvent::Done));
+        events
+    }
+
+    #[tokio::test]
+    async fn one_turn_chained_edits_apply_in_input_order() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let n = 40;
+        std::fs::write(dir.path().join("chain.txt"), "<v0>\n").expect("write chain");
+
+        let inputs = (0..n)
+            .map(|k| {
+                serde_json::json!({
+                    "path": "chain.txt",
+                    "old_string": format!("<v{k}>"),
+                    "new_string": format!("<v{}>", k + 1),
+                })
+            })
+            .collect();
+        let backend = SequencedBackend::new(vec![
+            edit_file_calls_response(inputs),
+            text_response("done"),
+        ]);
+        let tool = crate::tools::edit_file::EditFile::new(
+            crate::tools::sandbox::SandboxPolicy::new(dir.path()),
+            std::sync::Arc::default(),
+        );
+        let agent = agent_with_mode(backend, Some(Box::new(tool)), ConfirmationMode::Never).await;
+        let events = collect_events(
+            agent
+                .send("edit".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        let results: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolResult {
+                    index,
+                    content,
+                    is_error,
+                    ..
+                } => Some((*index, content, *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), n, "expected one result per call");
+        for (index, content, is_error) in &results {
+            assert!(!is_error, "edit_file call {index} failed: {content}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("chain.txt")).expect("read chain"),
+            format!("<v{n}>\n")
+        );
+    }
+
     #[tokio::test]
     async fn parallel_tool_calls_failure_isolation_all_results_emitted() {
         struct FailOnSecond {
