@@ -1466,7 +1466,7 @@ mod tests {
             },
         );
         let headers = backend
-            .build_request_headers()
+            .build_request_headers("")
             .expect("should build headers");
         let auth_header = headers
             .get(reqwest::header::AUTHORIZATION)
@@ -1493,7 +1493,7 @@ mod tests {
             },
         );
         let headers = backend
-            .build_request_headers()
+            .build_request_headers("")
             .expect("should build headers");
         let key_header = headers
             .get("x-api-key")
@@ -1520,7 +1520,7 @@ mod tests {
             },
         );
         let headers = backend
-            .build_request_headers()
+            .build_request_headers("")
             .expect("should build headers");
         let version_header = headers.get("anthropic-version").expect(
             "anthropic-version header should be present when include_model_in_body is true",
@@ -1542,7 +1542,7 @@ mod tests {
                 max_tokens_override: None,
             },
         );
-        let result = backend.build_request_headers();
+        let result = backend.build_request_headers("");
         assert!(result.is_err(), "newline in auth token should reject");
     }
 
@@ -1560,7 +1560,7 @@ mod tests {
                 max_tokens_override: None,
             },
         );
-        let result = backend.build_request_headers();
+        let result = backend.build_request_headers("");
         assert!(result.is_err(), "carriage return in API key should reject");
     }
 
@@ -1584,5 +1584,77 @@ mod tests {
             }
             other => panic!("expected Usage event, got {:?}", other),
         }
+    }
+
+    fn compat_config_with_session_header(header: Option<&str>) -> AnthropicCompatConfig {
+        AnthropicCompatConfig {
+            endpoint: "https://test.example.com".to_string(),
+            auth_token: None,
+            auth_style: AuthStyle::Bearer,
+            anthropic_version: "2023-06-01".to_string(),
+            include_model_in_body: true,
+            anthropic_beta: None,
+            max_tokens_override: None,
+            session_header_name: header.map(|h| h.to_string()),
+        }
+    }
+
+    #[test]
+    fn build_request_headers_emits_named_session_header_when_id_present() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            compat_config_with_session_header(Some("x-opencode-session")),
+        );
+        let headers = backend
+            .build_request_headers("sess-123")
+            .expect("should build headers");
+        let session_header = headers
+            .get("x-opencode-session")
+            .expect("session header should be present when name is configured and id non-empty");
+        assert_eq!(
+            session_header.to_str().expect("header is ASCII"),
+            "sess-123"
+        );
+    }
+
+    #[test]
+    fn build_request_headers_omits_session_header_when_name_unset() {
+        let backend =
+            AnthropicCompatBackend::new(Client::new(), compat_config_with_session_header(None));
+        let headers = backend
+            .build_request_headers("sess-123")
+            .expect("should build headers");
+        assert!(
+            headers.get("x-opencode-session").is_none(),
+            "plain anthropic/vertex configs must never emit a session header"
+        );
+    }
+
+    #[test]
+    fn build_request_headers_omits_session_header_when_id_empty() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            compat_config_with_session_header(Some("x-opencode-session")),
+        );
+        let headers = backend
+            .build_request_headers("")
+            .expect("should build headers");
+        assert!(
+            headers.get("x-opencode-session").is_none(),
+            "empty session id is the absent-sentinel; header must be omitted"
+        );
+    }
+
+    #[test]
+    fn build_request_headers_rejects_control_char_in_session_id() {
+        let backend = AnthropicCompatBackend::new(
+            Client::new(),
+            compat_config_with_session_header(Some("x-opencode-session")),
+        );
+        let result = backend.build_request_headers("bad\nid");
+        assert!(
+            result.is_err(),
+            "control characters in session id must reject, not panic"
+        );
     }
 }

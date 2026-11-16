@@ -260,7 +260,11 @@ pub async fn spawn_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ChatMode;
+    use crate::backend::LlmBackend;
+    use crate::types::{BoxStream, ChatMode, Message, StreamEvent};
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use futures::StreamExt;
 
     #[test]
     fn spawner_chat_mode_filters_write_tools_from_registry() {
@@ -466,6 +470,100 @@ mod tests {
         assert_eq!(
             leftover, 0,
             "rejected role must fail before creating a session DB"
+        );
+    }
+
+    /// Captures the `RequestConfig` seen by the backend per `send_message` call.
+    #[derive(Clone)]
+    struct RecordingBackend {
+        seen_configs: Arc<TokioMutex<Vec<RequestConfig>>>,
+    }
+
+    impl RecordingBackend {
+        fn new() -> Self {
+            Self {
+                seen_configs: Arc::new(TokioMutex::new(Vec::new())),
+            }
+        }
+
+        async fn seen_session_ids(&self) -> Vec<String> {
+            self.seen_configs
+                .lock()
+                .await
+                .iter()
+                .map(|c| c.session_id.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RecordingBackend {
+        async fn send_message(
+            &self,
+            _messages: &[Message],
+            config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            self.seen_configs.lock().await.push(config.clone());
+            Ok(Box::pin(futures::stream::iter(vec![
+                Ok(StreamEvent::TextDelta("ok".to_string())),
+                Ok(StreamEvent::Done),
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_send_stamps_each_agents_own_session_id() {
+        let recording = RecordingBackend::new();
+        let tool_config = ToolsConfig::default();
+        let retry_config = crate::config::RetryConfig::default();
+
+        let mut agents = Vec::new();
+        let mut session_ids = Vec::new();
+        for _ in 0..2 {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            let session = Session::new(None, dir.keep()).await.expect("session");
+            session_ids.push(session.id.clone());
+            let agent = spawn_agent(
+                crate::backend::BackendSelection {
+                    backend: Box::new(recording.clone()),
+                    model: "test".to_string(),
+                    max_tokens: 100,
+                },
+                &tool_config,
+                &retry_config,
+                Arc::new(TokioMutex::new(session)),
+                ToolRegistry::new(),
+            )
+            .await
+            .expect("spawn_agent should succeed");
+            agents.push(agent);
+        }
+
+        for agent in &agents {
+            let mut stream = agent
+                .send("hi".to_string(), None, None)
+                .await
+                .expect("send should succeed");
+            while stream.next().await.is_some() {}
+        }
+
+        let seen = recording.seen_session_ids().await;
+        assert_eq!(
+            seen.len(),
+            2,
+            "each spawned agent must have sent exactly once"
+        );
+        assert_eq!(
+            seen[0], session_ids[0],
+            "first agent must stamp its own session id"
+        );
+        assert_eq!(
+            seen[1], session_ids[1],
+            "second agent must stamp its own session id"
+        );
+        assert_ne!(
+            seen[0], seen[1],
+            "two spawned agents must capture distinct session ids"
         );
     }
 }

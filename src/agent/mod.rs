@@ -2418,6 +2418,140 @@ mod tests {
         assert_eq!(agent.session_id().await, id_b);
     }
 
+    /// Captures the `RequestConfig` seen by the backend per `send_message` call.
+    /// `SequencedBackend` discards config, so a capture mock is required here.
+    #[derive(Clone)]
+    struct RecordingBackend {
+        seen_configs: Arc<tokio::sync::Mutex<Vec<RequestConfig>>>,
+    }
+
+    impl RecordingBackend {
+        fn new() -> Self {
+            Self {
+                seen_configs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        async fn seen_session_ids(&self) -> Vec<String> {
+            self.seen_configs
+                .lock()
+                .await
+                .iter()
+                .map(|c| c.session_id.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for RecordingBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            config: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            self.seen_configs.lock().await.push(config.clone());
+            Ok(Box::pin(stream::iter(text_response("ok"))))
+        }
+    }
+
+    async fn collect_send_events(stream: BoxStream<AgentEvent>) {
+        let mut stream = stream;
+        while stream.next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn send_stamps_current_session_id_into_request_config() {
+        let recording = RecordingBackend::new();
+        let agent = agent_with_mode(recording.clone(), None, ConfirmationMode::Never).await;
+
+        let expected = agent.session_id().await;
+        collect_send_events(
+            agent
+                .send("hi".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert_eq!(
+            recording.seen_session_ids().await,
+            vec![expected],
+            "send() must stamp the agent's current session id into the request config"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_restamps_session_id_after_load_session() {
+        let recording = RecordingBackend::new();
+        let session_a = test_session().await;
+        let id_a = session_a.id.clone();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_b = Session::new(None, dir.keep()).await.expect("session b");
+        let id_b = session_b.id.clone();
+
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let agent = Agent::new(
+            Box::new(recording.clone()),
+            config,
+            Arc::new(TokioMutex::new(session_a)),
+        )
+        .await;
+
+        collect_send_events(
+            agent
+                .send("first".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+        agent.load_session(session_b).await;
+        collect_send_events(
+            agent
+                .send("second".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert_ne!(id_a, id_b);
+        assert_eq!(
+            recording.seen_session_ids().await,
+            vec![id_a, id_b],
+            "session id must follow load_session per turn; stale ids must never hit the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_backend_preserves_session_id_stamping() {
+        let recording = RecordingBackend::new();
+        let agent =
+            agent_with_mode(SequencedBackend::new(vec![]), None, ConfirmationMode::Never).await;
+        let expected = agent.session_id().await;
+
+        agent.set_backend(
+            Arc::new(recording.clone()),
+            "role-switched-model".to_string(),
+            4096,
+        );
+        collect_send_events(
+            agent
+                .send("after role switch".to_string(), None, None)
+                .await
+                .expect("send should succeed"),
+        )
+        .await;
+
+        assert_eq!(
+            recording.seen_session_ids().await,
+            vec![expected],
+            "role switch (set_backend) must not change the session id on the next send"
+        );
+    }
+
     #[tokio::test]
     async fn cleanup_empty_session_deletes_db_when_no_messages() {
         let dir = tempfile::TempDir::new().expect("temp dir");

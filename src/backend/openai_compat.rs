@@ -943,7 +943,7 @@ mod tests {
             reasoning: ReasoningStyle::None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be present when api_key is Some"
@@ -960,7 +960,7 @@ mod tests {
             reasoning: ReasoningStyle::None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             !headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be absent when api_key is None"
@@ -977,7 +977,7 @@ mod tests {
             reasoning: ReasoningStyle::None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             !headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be absent when api_key is empty"
@@ -1512,6 +1512,61 @@ mod tests {
                 .as_str()
                 .expect("url")
                 .starts_with("data:image/jpeg;base64,")
+        );
+    }
+
+    fn backend_with_session_header(header: Option<&str>) -> OpenAiCompatBackend {
+        OpenAiCompatBackend::new(OpenAiCompatConfig {
+            base_url: "https://example.com/v1".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: String::new(),
+            max_tokens: None,
+            reasoning: ReasoningStyle::None,
+            session_header_name: header.map(|h| h.to_string()),
+        })
+        .expect("test config is always valid")
+    }
+
+    #[test]
+    fn build_headers_emits_named_session_header_when_id_present() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let headers = b.build_headers("sess-123").expect("headers built");
+        let session_header = headers
+            .get("x-opencode-session")
+            .expect("session header should be present when name is configured and id non-empty");
+        assert_eq!(
+            session_header.to_str().expect("header is ASCII"),
+            "sess-123"
+        );
+    }
+
+    #[test]
+    fn build_headers_omits_session_header_when_name_unset() {
+        let b = backend_with_session_header(None);
+        let headers = b.build_headers("sess-123").expect("headers built");
+        assert!(
+            !headers.contains_key("x-opencode-session"),
+            "plain openai_compat configs must never emit a session header"
+        );
+    }
+
+    #[test]
+    fn build_headers_omits_session_header_when_id_empty() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let headers = b.build_headers("").expect("headers built");
+        assert!(
+            !headers.contains_key("x-opencode-session"),
+            "empty session id is the absent-sentinel; header must be omitted"
+        );
+    }
+
+    #[test]
+    fn build_headers_rejects_control_char_in_session_id() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let result = b.build_headers("bad\nid");
+        assert!(
+            result.is_err(),
+            "control characters in session id must reject, not panic"
         );
     }
 }
