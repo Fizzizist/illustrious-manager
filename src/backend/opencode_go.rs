@@ -9,6 +9,7 @@ use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
+const SESSION_HEADER: &str = "x-opencode-session";
 
 #[derive(Debug)]
 enum ProtocolBackend {
@@ -61,6 +62,7 @@ impl OpenCodeGoBackend {
                     include_model_in_body: true,
                     anthropic_beta: Some(ANTHROPIC_BETA.to_string()),
                     max_tokens_override: config.max_tokens,
+                    session_header_name: Some(SESSION_HEADER.to_string()),
                 };
                 ProtocolBackend::Anthropic(AnthropicCompatBackend::new(
                     super::build_http_client()?,
@@ -74,6 +76,7 @@ impl OpenCodeGoBackend {
                     model: String::new(),
                     max_tokens: config.max_tokens,
                     reasoning,
+                    session_header_name: Some(SESSION_HEADER.to_string()),
                 };
                 ProtocolBackend::OpenAi(OpenAiCompatBackend::new(oc_config)?)
             }

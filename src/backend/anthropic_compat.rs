@@ -26,6 +26,7 @@ pub struct AnthropicCompatConfig {
     pub include_model_in_body: bool,
     pub anthropic_beta: Option<String>,
     pub max_tokens_override: Option<u32>,
+    pub session_header_name: Option<String>,
 }
 
 /// Stateful SSE parser that tracks which block indices are tool_use blocks.
@@ -299,7 +300,7 @@ impl AnthropicCompatBackend {
         Ok(body)
     }
 
-    fn build_request_headers(&self) -> Result<reqwest::header::HeaderMap> {
+    fn build_request_headers(&self, session_id: &str) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
 
         headers.insert(
@@ -358,6 +359,21 @@ impl AnthropicCompatBackend {
             );
         }
 
+        if let Some(ref name) = self.config.session_header_name
+            && !session_id.is_empty()
+        {
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| {
+                    format!("session_header_name is not a valid HTTP header name: {name:?}")
+                })?;
+            let value = HeaderValue::from_str(session_id).with_context(|| {
+                format!(
+                    "session id contains characters invalid for an HTTP header value: {session_id:?}"
+                )
+            })?;
+            headers.insert(header_name, value);
+        }
+
         Ok(headers)
     }
 }
@@ -370,7 +386,7 @@ impl LlmBackend for AnthropicCompatBackend {
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config)?;
-        let headers = self.build_request_headers()?;
+        let headers = self.build_request_headers(&config.session_id)?;
 
         let response = self
             .client
@@ -448,6 +464,7 @@ mod tests {
                 include_model_in_body: false,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         )
     }
@@ -463,6 +480,7 @@ mod tests {
                 include_model_in_body: false,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         )
     }
@@ -473,9 +491,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 32768,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -490,9 +506,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -515,14 +529,13 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let config = RequestConfig {
             model: "qwen3-coder-plus".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -545,8 +558,7 @@ mod tests {
                 description: "Run a bash command".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {"command": {"type": "string"}}}),
             }],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -568,8 +580,7 @@ mod tests {
                 description: "Run a bash command".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -584,9 +595,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -934,9 +943,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[message], &config)
@@ -964,9 +971,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&messages, &config)
@@ -1002,9 +1007,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&messages, &config)
@@ -1027,13 +1030,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1049,13 +1051,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1070,13 +1071,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 16384 },
                 enabled: true,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1090,9 +1090,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1109,13 +1107,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: false,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1132,13 +1129,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1152,13 +1148,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
                 enabled: true,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1172,13 +1167,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1192,13 +1186,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Adaptive,
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1212,13 +1205,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Omitted),
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1234,13 +1226,12 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 mode: crate::types::ThinkingMode::Budget { tokens: 8192 },
                 enabled: true,
                 display: Some(crate::types::ThinkingDisplay::Summarized),
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&[], &config)
@@ -1321,9 +1312,7 @@ mod tests {
         let config = RequestConfig {
             model: "claude-test".to_string(),
             max_tokens: 8192,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend
             .build_request_body(&messages, &config)
@@ -1463,6 +1452,7 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let headers = backend
@@ -1490,6 +1480,7 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let headers = backend
@@ -1517,6 +1508,7 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let headers = backend
@@ -1540,6 +1532,7 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let result = backend.build_request_headers("");
@@ -1558,6 +1551,7 @@ mod tests {
                 include_model_in_body: true,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let result = backend.build_request_headers("");

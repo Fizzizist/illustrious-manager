@@ -635,9 +635,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "test".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -679,9 +677,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "test".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -722,9 +718,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "test".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -765,9 +759,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "claude-original".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -808,9 +800,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "claude-original".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -874,9 +864,7 @@ mod tests {
                     crate::types::RequestConfig {
                         model: "test".to_string(),
                         max_tokens: 1024,
-                        tools: vec![],
-                        thinking: None,
-                        cancel_token: None,
+                        ..Default::default()
                     },
                     session,
                 )
@@ -926,9 +914,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session_arc,
             )
@@ -969,9 +955,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1042,9 +1026,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "claude-sonnet-4-20250514".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1087,9 +1069,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1133,9 +1113,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test-model".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1242,9 +1220,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "original-model".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1320,9 +1296,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1369,9 +1343,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1423,9 +1395,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test-model".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1473,9 +1443,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1583,9 +1551,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -1629,9 +1595,7 @@ mod tests {
                 crate::types::RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )

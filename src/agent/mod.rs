@@ -428,9 +428,11 @@ impl Agent {
         } else {
             config.tools.clone()
         };
+        let session_id = self.session_id().await;
         let config = RequestConfig {
             tools: request_tools,
             cancel_token: cancel_token.clone(),
+            session_id,
             ..config
         };
 
@@ -1398,9 +1400,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         if let Some(t) = tool {
@@ -1516,9 +1516,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1562,9 +1560,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1609,9 +1605,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1660,9 +1654,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -1718,9 +1710,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2096,9 +2086,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2169,9 +2157,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2218,9 +2204,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -2257,9 +2241,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -2297,9 +2279,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2347,9 +2327,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
 
         let mut skills = std::collections::HashMap::new();
@@ -2402,9 +2380,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2564,9 +2540,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2595,9 +2569,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(
             Box::new(SequencedBackend::new(vec![])),
@@ -2736,9 +2708,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -2967,9 +2937,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -3111,9 +3079,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -3241,9 +3207,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "hi".to_string()).await;
@@ -3268,9 +3232,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -3313,9 +3275,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "fail".to_string()).await;
@@ -3348,9 +3308,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "test".to_string()).await;
@@ -3382,9 +3340,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let outcome = run_headless(&agent, "test".to_string()).await;
@@ -3436,9 +3392,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -4888,9 +4842,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let session = test_session_arc().await;
         let agent = Agent::new(Box::new(backend), config, session).await;
@@ -5007,9 +4959,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5050,9 +5000,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5087,9 +5035,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5146,9 +5092,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5210,9 +5154,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5273,9 +5215,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5325,9 +5265,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -5368,9 +5306,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5432,9 +5368,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = ToolsConfig {
             confirmation: ConfirmationMode::Never,
@@ -5597,9 +5531,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let mut registry = ToolRegistry::new();
         registry
@@ -5690,9 +5622,7 @@ mod tests {
         let config = RequestConfig {
             model: "model-one".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
         assert_eq!(agent.model(), "model-one");
@@ -5728,9 +5658,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         let initial_len = agent.history().len();
@@ -5773,9 +5701,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let session_arc = test_session_arc().await;
         let agent = Agent::new(Box::new(backend), config, Arc::clone(&session_arc)).await;
@@ -5802,9 +5728,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = crate::config::ToolsConfig {
             confirmation: crate::config::ConfirmationMode::Never,
@@ -5859,9 +5783,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -5925,9 +5847,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -5981,9 +5901,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let tool_config = crate::config::ToolsConfig {
             confirmation: crate::config::ConfirmationMode::Never,
@@ -6052,9 +5970,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         assert!(!agent.is_chat_mode());
@@ -6066,9 +5982,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
         agent.set_chat_mode(true);
@@ -6130,9 +6044,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -6193,9 +6105,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -6256,9 +6166,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -6322,9 +6230,7 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend), config, test_session_arc().await)
             .await
@@ -6886,9 +6792,7 @@ mod tests {
             RequestConfig {
                 model: "test".to_string(),
                 max_tokens: 100,
-                tools: vec![],
-                thinking: None,
-                cancel_token: None,
+                ..Default::default()
             },
             test_session_arc().await,
         )
@@ -7546,9 +7450,7 @@ mod tests {
         let config = RequestConfig {
             model: "model-a".to_string(),
             max_tokens: 100,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let agent = Agent::new(Box::new(backend1), config, test_session_arc().await).await;
 

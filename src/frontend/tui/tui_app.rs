@@ -1288,9 +1288,7 @@ mod tests {
                 RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -2248,9 +2246,7 @@ mod tests {
                 RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 initial_session,
             )
@@ -2339,9 +2335,7 @@ mod tests {
                 RequestConfig {
                     model: "test".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 initial_session,
             )
@@ -2600,9 +2594,7 @@ mod tests {
                 RequestConfig {
                     model: "claude-original".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )
@@ -2646,9 +2638,7 @@ mod tests {
                 RequestConfig {
                     model: "claude-original".to_string(),
                     max_tokens: 1024,
-                    tools: vec![],
-                    thinking: None,
-                    cancel_token: None,
+                    ..Default::default()
                 },
                 session,
             )

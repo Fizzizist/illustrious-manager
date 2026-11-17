@@ -22,6 +22,7 @@ pub mod zai;
 /// deliberately no total/read timeout so long thinking streams are not killed.
 pub fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .user_agent(concat!("illustrious-manager/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
         .build()?)
 }
@@ -240,6 +241,7 @@ impl BackendFactory {
                     model: resolved.model.clone(),
                     max_tokens: oc_toml.max_tokens,
                     reasoning,
+                    session_header_name: None,
                 };
                 let backend = openai_compat::OpenAiCompatBackend::new(oc_config)?;
                 Ok(BackendSelection {
@@ -347,9 +349,7 @@ mod tests {
         let config = RequestConfig {
             model: "test-model".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
 
         let mut stream = backend
@@ -642,9 +642,7 @@ mod tests {
         RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         }
     }
 
@@ -1012,6 +1010,7 @@ mod tests {
                 include_model_in_body: false,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let token = CancellationToken::new();
