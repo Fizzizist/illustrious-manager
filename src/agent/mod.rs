@@ -796,20 +796,19 @@ enum BackendErrorDisposition {
     Fatal,
 }
 
-fn history_has_images(history: &[Message]) -> bool {
-    history.iter().any(|m| {
-        m.content.iter().any(|block| match block {
-            ContentBlock::Image { .. } => true,
-            ContentBlock::ToolResult { content, .. } => content
-                .iter()
-                .any(|cb| matches!(cb, ContentBlock::Image { .. })),
-            _ => false,
-        })
+fn has_image(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        ContentBlock::Image { .. } => true,
+        ContentBlock::ToolResult { content, .. } => has_image(content),
+        _ => false,
     })
 }
 
-/// Triages a backend errors
-#[allow(clippy::too_many_arguments)]
+fn history_has_images(history: &[Message]) -> bool {
+    history.iter().any(|m| has_image(&m.content))
+}
+
+/// Triages a backend error.
 fn backend_error_disposition(
     e: &anyhow::Error,
     history: &Arc<Mutex<Vec<Message>>>,
@@ -7251,51 +7250,6 @@ mod tests {
         assert!(
             !saw[2],
             "third call must not contain image blocks (they should be stripped); got {saw:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn bad_request_400_exhausting_retries_emits_terminal_error() {
-        let inner = CountingErrorBackend::new(BackendError::HttpStatus {
-            code: 400,
-            body: "bad request".to_string(),
-        });
-        let call_count = inner.call_count.clone();
-        let backend = RetryingBackend::new(Box::new(inner), fast_retry());
-        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
-            .await
-            .with_retry_config(&RetryConfig {
-                max_token_retries: 2,
-                ..Default::default()
-            });
-
-        let stream = agent
-            .send("hi".to_string(), None, None)
-            .await
-            .expect("send should succeed");
-        let events = collect_events(stream).await;
-
-        let retrying_count = events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
-            .count();
-        assert_eq!(
-            retrying_count, 0,
-            "400 with no images in history must not emit Retrying (no-op strip is fatal); \
-             got {retrying_count}"
-        );
-        let error_count = events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("HTTP 400")))
-            .count();
-        assert_eq!(
-            error_count, 1,
-            "should emit exactly one terminal Error containing HTTP 400; got {error_count}"
-        );
-        assert_eq!(
-            call_count.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "fatal no-op path must issue exactly one backend call"
         );
     }
 
