@@ -177,7 +177,14 @@ impl OpenAiCompatSseParser {
                         {
                             self.event_buffer.push(StreamEvent::ToolUseDone);
                         }
-                        let id = format!("tool_{}", index);
+                        let id = match tool_call
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            Some(s) => s.to_string(),
+                            None => format!("tool_{}", index),
+                        };
                         self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),

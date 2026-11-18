@@ -796,9 +796,23 @@ enum BackendErrorDisposition {
     Fatal,
 }
 
+fn history_has_images(history: &[Message]) -> bool {
+    history.iter().any(|m| {
+        m.content.iter().any(|block| match block {
+            ContentBlock::Image { .. } => true,
+            ContentBlock::ToolResult { content, .. } => content
+                .iter()
+                .any(|cb| matches!(cb, ContentBlock::Image { .. })),
+            _ => false,
+        })
+    })
+}
+
 /// Triages a backend errors
+#[allow(clippy::too_many_arguments)]
 fn backend_error_disposition(
     e: &anyhow::Error,
+    history: &Arc<Mutex<Vec<Message>>>,
     bad_request_retries_used: &mut u32,
     max_token_retries_used: &mut u32,
     max_token_retries: u32,
@@ -809,7 +823,10 @@ fn backend_error_disposition(
     if be.is_cancelled() {
         return BackendErrorDisposition::Cancelled;
     }
-    if *bad_request_retries_used < max_token_retries && be.is_bad_request() {
+    if be.is_bad_request()
+        && *bad_request_retries_used < max_token_retries
+        && history_has_images(&lock(history))
+    {
         *bad_request_retries_used += 1;
         return BackendErrorDisposition::RetryStrippingImages;
     }
@@ -839,6 +856,7 @@ async fn record_backend_error(
 ) -> bool {
     match backend_error_disposition(
         e,
+        history,
         bad_request_retries_used,
         max_token_retries_used,
         max_token_retries,
