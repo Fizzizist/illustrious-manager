@@ -416,19 +416,19 @@ impl Agent {
         let max_tool_result_bytes = self.max_tool_result_bytes;
         let context_prefix_len = Arc::clone(&self.context_prefix_len);
 
-        self.session
-            .lock()
-            .await
+        let session_guard = self.session.lock().await;
+        session_guard
             .conversation()
             .insert_message(&user_msg)
             .await?;
+        let session_id = session_guard.id.clone();
+        drop(session_guard);
 
         let request_tools = if self.chat_mode.is_on() {
             self.tools.read_only_definitions()
         } else {
             config.tools.clone()
         };
-        let session_id = self.session_id().await;
         let config = RequestConfig {
             tools: request_tools,
             cancel_token: cancel_token.clone(),
