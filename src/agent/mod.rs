@@ -2519,6 +2519,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_keeps_session_id_when_session_switch_waits_behind_user_persist() {
+        let recording = RecordingBackend::new();
+        let session_a = test_session().await;
+        let id_a = session_a.id.clone();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let session_b = Session::new(None, dir.keep()).await.expect("session b");
+        let id_b = session_b.id.clone();
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let agent = Arc::new(
+            Agent::new(
+                Box::new(recording.clone()),
+                config,
+                Arc::new(TokioMutex::new(session_a)),
+            )
+            .await,
+        );
+
+        let session_guard = agent.session.lock().await;
+        let send_agent = Arc::clone(&agent);
+        let send_task = tokio::spawn(async move {
+            let events = send_agent
+                .send("belongs to session A".to_string(), None, None)
+                .await
+                .expect("send should succeed");
+            collect_send_events(events).await;
+        });
+        tokio::task::yield_now().await;
+
+        let switch_agent = Arc::clone(&agent);
+        let switch_task = tokio::spawn(async move {
+            switch_agent.load_session(session_b).await;
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        drop(session_guard);
+
+        send_task.await.expect("send task");
+        switch_task.await.expect("session switch task");
+
+        assert_ne!(id_a, id_b);
+        assert_eq!(
+            recording.seen_session_ids().await,
+            vec![id_a],
+            "the request must use the session that received its user message, even if a switch is queued concurrently"
+        );
+    }
+
+    #[tokio::test]
     async fn set_backend_preserves_session_id_stamping() {
         let recording = RecordingBackend::new();
         let agent =
