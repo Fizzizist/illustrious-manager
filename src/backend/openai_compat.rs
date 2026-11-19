@@ -177,7 +177,14 @@ impl OpenAiCompatSseParser {
                         {
                             self.event_buffer.push(StreamEvent::ToolUseDone);
                         }
-                        let id = format!("tool_{}", index);
+                        let id = match tool_call
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                        {
+                            Some(s) => s.to_string(),
+                            None => format!("tool_{}", index),
+                        };
                         self.event_buffer.push(StreamEvent::ToolUseStart {
                             id,
                             name: name.to_string(),
@@ -659,6 +666,63 @@ mod tests {
         assert_eq!(args["command"], "ls");
     }
 
+    #[test]
+    fn two_index_zero_turns_produce_distinct_wire_ids() {
+        let b = make_backend(ReasoningStyle::None);
+
+        let turns_with = |id_a: &str, id_b: &str| -> Vec<Message> {
+            vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: id_a.to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    }],
+                    created_at: 0.0,
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: id_b.to_string(),
+                        name: "bash".to_string(),
+                        input: serde_json::json!({"command": "cat"}),
+                    }],
+                    created_at: 0.0,
+                },
+            ]
+        };
+
+        let wire_tool_call_ids = |messages: &[Message]| -> Vec<String> {
+            let body = b.build_request_body(messages, &simple_config());
+            let msgs = body["messages"].as_array().expect("messages");
+            msgs.iter()
+                .map(|m| {
+                    m["tool_calls"][0]["id"]
+                        .as_str()
+                        .expect("tool call id")
+                        .to_string()
+                })
+                .collect()
+        };
+
+        let distinct = wire_tool_call_ids(&turns_with("call_first_111", "call_second_222"));
+        assert!(
+            distinct[0] != distinct[1],
+            "distinct provider ids must stay distinct on the wire; got {distinct:?}"
+        );
+        assert_eq!(distinct[0], "call_first_111");
+        assert_eq!(distinct[1], "call_second_222");
+
+        // Old parser produced tool_0/tool_0 across index-0 turns; the wire
+        // round-trips the collision verbatim.
+        let duplicated = wire_tool_call_ids(&turns_with("tool_0", "tool_0"));
+        assert!(
+            duplicated[0] == duplicated[1],
+            "synthetic duplicate ids must round-trip verbatim on the wire; got {duplicated:?}"
+        );
+    }
+
     // --- tools field ---
 
     #[test]
@@ -769,8 +833,40 @@ mod tests {
     fn parser_tool_use_start() {
         let mut p = OpenAiCompatSseParser::new(0);
         let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#;
-        let event = p.parse(data).unwrap();
-        assert!(matches!(event, Some(StreamEvent::ToolUseStart { name, .. }) if name == "bash"));
+        let event = p.parse(data).expect("parse tool_use_start delta");
+        assert!(
+            matches!(event, Some(StreamEvent::ToolUseStart { id, name }) if id == "tool_0" && name == "bash"),
+        );
+    }
+
+    #[test]
+    fn parser_provider_tool_call_id_is_used() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","function":{"name":"bash","arguments":""}}]}}]}"#;
+        let event = p.parse(data).expect("parse tool_use_start delta");
+        assert!(
+            matches!(event, Some(StreamEvent::ToolUseStart { id, name }) if id == "call_abc123" && name == "bash"),
+        );
+    }
+
+    #[test]
+    fn parser_missing_id_generates_fallback() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash","arguments":""}}]}}]}"#;
+        let event = p.parse(data).expect("parse tool_use_start delta");
+        assert!(
+            matches!(event, Some(StreamEvent::ToolUseStart { id, name }) if id == "tool_0" && name == "bash"),
+        );
+    }
+
+    #[test]
+    fn parser_empty_id_generates_fallback() {
+        let mut p = OpenAiCompatSseParser::new(0);
+        let data = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"bash","arguments":""}}]}}]}"#;
+        let event = p.parse(data).expect("parse tool_use_start delta");
+        assert!(
+            matches!(event, Some(StreamEvent::ToolUseStart { id, name }) if id == "tool_0" && name == "bash"),
+        );
     }
 
     #[test]
