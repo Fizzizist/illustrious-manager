@@ -798,9 +798,22 @@ enum BackendErrorDisposition {
     Fatal,
 }
 
-/// Triages a backend errors
+fn has_image(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        ContentBlock::Image { .. } => true,
+        ContentBlock::ToolResult { content, .. } => has_image(content),
+        _ => false,
+    })
+}
+
+fn history_has_images(history: &[Message]) -> bool {
+    history.iter().any(|m| has_image(&m.content))
+}
+
+/// Triages a backend error.
 fn backend_error_disposition(
     e: &anyhow::Error,
+    history: &Arc<Mutex<Vec<Message>>>,
     bad_request_retries_used: &mut u32,
     max_token_retries_used: &mut u32,
     max_token_retries: u32,
@@ -811,7 +824,10 @@ fn backend_error_disposition(
     if be.is_cancelled() {
         return BackendErrorDisposition::Cancelled;
     }
-    if *bad_request_retries_used < max_token_retries && be.is_bad_request() {
+    if be.is_bad_request()
+        && *bad_request_retries_used < max_token_retries
+        && history_has_images(&lock(history))
+    {
         *bad_request_retries_used += 1;
         return BackendErrorDisposition::RetryStrippingImages;
     }
@@ -841,6 +857,7 @@ async fn record_backend_error(
 ) -> bool {
     match backend_error_disposition(
         e,
+        history,
         bad_request_retries_used,
         max_token_retries_used,
         max_token_retries,
@@ -6336,6 +6353,33 @@ mod tests {
         }
     }
 
+    struct CountingErrorBackend {
+        error: BackendError,
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl CountingErrorBackend {
+        fn new(error: BackendError) -> Self {
+            Self {
+                error,
+                call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for CountingErrorBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.error.clone().into())
+        }
+    }
+
     #[tokio::test]
     async fn agent_retries_on_5xx_and_succeeds() {
         let inner = RetryableThenSuccessBackend::new(vec![
@@ -7248,8 +7292,192 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bad_request_400_exhausting_retries_emits_terminal_error() {
-        let inner = AlwaysBackendError::new(BackendError::HttpStatus {
+    async fn bad_request_400_with_no_images_emits_error_without_retrying() {
+        let inner = CountingErrorBackend::new(BackendError::HttpStatus {
+            code: 400,
+            body: "bad request".to_string(),
+        });
+        let call_count = inner.call_count.clone();
+        let backend = RetryingBackend::new(Box::new(inner), fast_retry());
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 2,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
+        assert_eq!(
+            retrying_count, 0,
+            "400 with no images must not emit Retrying; got {retrying_count}"
+        );
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(msg) if msg.starts_with("HTTP 400")))
+            .count();
+        assert_eq!(
+            error_count, 1,
+            "should emit exactly one Error starting with HTTP 400; got {error_count}"
+        );
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "400 with no images must not re-send the byte-identical request; got {} calls",
+            call_count.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_request_400_after_images_stripped_on_second_pass_goes_fatal() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Scripted backend: call 1 → tool_use; every later call → 400 (the
+        // second 400 arrives with images already stripped, so the no-op strip
+        // path must be fatal rather than burning more retries).
+        struct ScriptedImageBackend {
+            first_response: Vec<StreamEvent>,
+            later_error: BackendError,
+            call_count: Arc<AtomicUsize>,
+            saw_images: Arc<Mutex<Vec<bool>>>,
+        }
+
+        #[async_trait]
+        impl LlmBackend for ScriptedImageBackend {
+            async fn send_message(
+                &self,
+                messages: &[Message],
+                _: &RequestConfig,
+            ) -> Result<BoxStream<Result<StreamEvent>>> {
+                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let has_images = messages.iter().any(|m| {
+                    m.content.iter().any(|b| match b {
+                        ContentBlock::Image { .. } => true,
+                        ContentBlock::ToolResult { content, .. } => content
+                            .iter()
+                            .any(|cb| matches!(cb, ContentBlock::Image { .. })),
+                        _ => false,
+                    })
+                });
+                self.saw_images.lock().expect("lock").push(has_images);
+                if idx == 0 {
+                    let events: Vec<Result<StreamEvent>> = self
+                        .first_response
+                        .iter()
+                        .map(|ev| Ok(ev.clone()))
+                        .collect();
+                    return Ok(Box::pin(stream::iter(events)));
+                }
+                Err(self.later_error.clone().into())
+            }
+        }
+        struct ImageTool;
+        #[async_trait]
+        impl crate::tools::Tool for ImageTool {
+            fn name(&self) -> &str {
+                "image_viewer"
+            }
+            fn description(&self) -> &str {
+                "view images"
+            }
+            fn input_schema(&self) -> &serde_json::Value {
+                use std::sync::LazyLock;
+                static SCHEMA: LazyLock<serde_json::Value> =
+                    LazyLock::new(|| serde_json::json!({"type": "object"}));
+                &SCHEMA
+            }
+            async fn execute(
+                &self,
+                _: serde_json::Value,
+            ) -> Result<crate::tools::ToolResult, crate::tools::ToolError> {
+                Ok(crate::tools::ToolResult {
+                    content: vec![
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: "iVBOR".to_string(),
+                        },
+                        ContentBlock::Text("an image".to_string()),
+                    ],
+                    is_error: false,
+                    agent_events: vec![],
+                })
+            }
+        }
+
+        let backend = ScriptedImageBackend {
+            first_response: vec![
+                StreamEvent::ToolUseStart {
+                    id: "tu1".to_string(),
+                    name: "image_viewer".to_string(),
+                },
+                StreamEvent::ToolUseDelta(r#"{"path":"test.png"}"#.to_string()),
+                StreamEvent::ToolUseDone,
+                StreamEvent::Done,
+            ],
+            later_error: BackendError::HttpStatus {
+                code: 400,
+                body: "bad request".to_string(),
+            },
+            call_count: Arc::new(AtomicUsize::new(0)),
+            saw_images: Arc::new(Mutex::new(vec![])),
+        };
+        let saw_images = backend.saw_images.clone();
+        let call_count = backend.call_count.clone();
+
+        let agent = agent_with_mode(backend, Some(Box::new(ImageTool)), ConfirmationMode::Never)
+            .await
+            .with_retry_config(&RetryConfig {
+                max_token_retries: 3,
+                ..Default::default()
+            });
+
+        let stream = agent
+            .send("view test.png".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let retrying_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
+        assert_eq!(
+            retrying_count, 1,
+            "exactly one strip-retry while images were present; got {retrying_count}"
+        );
+        let error_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(msg) if msg.contains("HTTP 400")))
+            .count();
+        assert_eq!(
+            error_count, 1,
+            "second image-free 400 must be terminal; got {error_count}"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            3,
+            "tool-call turn + strip-retry 400 + fatal 400 = 3 calls; got {}",
+            call_count.load(Ordering::SeqCst)
+        );
+        let saw = saw_images.lock().expect("lock");
+        assert_eq!(
+            *saw,
+            vec![false, true, false],
+            "call 1 pre-image, call 2 images present (stripped after), call 3 image-free fatal"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_image_400_history_unchanged_on_fatal() {
+        let inner = CountingErrorBackend::new(BackendError::HttpStatus {
             code: 400,
             body: "bad request".to_string(),
         });
@@ -7272,12 +7500,49 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::Retrying(_)))
             .count();
         assert_eq!(
-            retrying_count, 2,
-            "should retry exactly max_token_retries times (2), got {retrying_count}"
+            retrying_count, 0,
+            "fatal no-op path must not emit Retrying; got {retrying_count}"
+        );
+
+        let history = agent.history();
+        assert_eq!(
+            history.len(),
+            2,
+            "history must be exactly [user hi, user [ERROR]]; got {history:?}"
+        );
+        assert_eq!(
+            history[0].role,
+            Role::User,
+            "first message is the user turn"
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
-            "should emit terminal Error after exhausting 400 retries; got {events:?}"
+            history[0]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t == "hi")),
+            "first message must be the user prompt"
+        );
+        assert_eq!(
+            history[1].role,
+            Role::User,
+            "injected error message must be a user message"
+        );
+        assert!(
+            history[1]
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text(t) if t.starts_with("[ERROR] HTTP 400"))),
+            "last message must be the injected [ERROR] HTTP 400; got {:?}",
+            history[1]
+        );
+
+        let persisted = agent
+            .session_history()
+            .await
+            .expect("load persisted history");
+        assert_eq!(
+            persisted, history,
+            "persisted DB history must equal in-memory history (no silent re-persist divergence)"
         );
     }
 
