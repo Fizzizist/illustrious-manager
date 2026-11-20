@@ -58,9 +58,7 @@ async fn test_agent_single_message() {
     let config = RequestConfig {
         model: "test-model".to_string(),
         max_tokens: 1024,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -103,9 +101,7 @@ async fn test_agent_history_accumulates() {
     let config = RequestConfig {
         model: "test-model".to_string(),
         max_tokens: 1024,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
 
@@ -144,9 +140,7 @@ async fn test_agent_backend_error_emits_error_event() {
     let config = RequestConfig {
         model: "test-model".to_string(),
         max_tokens: 1024,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(Box::new(ErrorBackend), config, test_session_arc().await).await;
 
@@ -180,9 +174,7 @@ async fn cleanup_empty_session_integration_deletes_db_on_exit_with_no_messages()
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),
@@ -212,9 +204,7 @@ async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),
@@ -246,9 +236,7 @@ async fn agent_checkpoint_session_persists_messages_to_main_db() {
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(
         Box::new(MockBackend::new(vec![])),

@@ -47,6 +47,9 @@ pub struct OpenAiCompatConfig {
     pub max_tokens: Option<u32>,
     /// How (if at all) extended-thinking is communicated to the provider.
     pub reasoning: ReasoningStyle,
+    /// Provider-specific header name for session tracking; when `None` no
+    /// session header is ever emitted.
+    pub session_header_name: Option<String>,
 }
 
 /// Stateful SSE parser for OpenAI-compatible streaming responses.
@@ -231,6 +234,7 @@ pub struct OpenAiCompatBackend {
     api_key: Option<String>,
     max_tokens_override: Option<u32>,
     reasoning: ReasoningStyle,
+    session_header_name: Option<String>,
 }
 
 impl OpenAiCompatBackend {
@@ -255,6 +259,7 @@ impl OpenAiCompatBackend {
             api_key: config.api_key,
             max_tokens_override: config.max_tokens,
             reasoning: config.reasoning,
+            session_header_name: config.session_header_name,
         })
     }
 
@@ -265,7 +270,7 @@ impl OpenAiCompatBackend {
 
     /// Build request headers.  The `Authorization` header is included only
     /// when an API key is present and non-empty.
-    pub fn build_headers(&self) -> Result<reqwest::header::HeaderMap> {
+    pub fn build_headers(&self, session_id: &str) -> Result<reqwest::header::HeaderMap> {
         use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 
         let mut headers = HeaderMap::new();
@@ -276,6 +281,15 @@ impl OpenAiCompatBackend {
             let value = HeaderValue::from_str(&format!("Bearer {key}"))
                 .context("Failed to build Authorization header value")?;
             headers.insert(AUTHORIZATION, value);
+        }
+        if let Some(ref name) = self.session_header_name
+            && !session_id.is_empty()
+        {
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .context("Failed to build session header name")?;
+            let value = HeaderValue::from_str(session_id)
+                .context("Failed to build session header value")?;
+            headers.insert(header_name, value);
         }
         Ok(headers)
     }
@@ -494,7 +508,7 @@ impl LlmBackend for OpenAiCompatBackend {
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config);
 
-        let headers = self.build_headers()?;
+        let headers = self.build_headers(&config.session_id)?;
         let response = self
             .client
             .post(&self.endpoint)
@@ -536,6 +550,7 @@ mod tests {
 
     fn make_backend(reasoning: ReasoningStyle) -> OpenAiCompatBackend {
         OpenAiCompatBackend::new(OpenAiCompatConfig {
+            session_header_name: None,
             base_url: "https://api.example.com/v1".to_string(),
             api_key: Some("test-key".to_string()),
             model: String::new(),
@@ -549,9 +564,7 @@ mod tests {
         RequestConfig {
             model: "test-model".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         }
     }
 
@@ -579,6 +592,7 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
         assert_eq!(b.endpoint(), "https://api.example.com/v1/chat/completions");
@@ -603,6 +617,7 @@ mod tests {
             model: String::new(),
             max_tokens: Some(8192),
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
         let body = b.build_request_body(&[user_text("hi")], &simple_config());
@@ -736,8 +751,7 @@ mod tests {
                 description: "run bash".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[], &config);
         assert!(body["tools"].as_array().is_some());
@@ -760,13 +774,12 @@ mod tests {
         let config = RequestConfig {
             model: "m".to_string(),
             max_tokens: 1024,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[], &config);
         assert_eq!(body["enable_thinking"], true);
@@ -785,13 +798,12 @@ mod tests {
         let config = RequestConfig {
             model: "m".to_string(),
             max_tokens: 1024,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[], &config);
         assert!(body.get("enable_thinking").is_none());
@@ -993,6 +1005,7 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         });
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1010,6 +1023,7 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
         assert_eq!(b.endpoint(), "https://example.com/v1/chat/completions");
@@ -1023,6 +1037,7 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         });
         assert!(result.is_ok(), "None api_key should be accepted");
     }
@@ -1037,9 +1052,10 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be present when api_key is Some"
@@ -1054,9 +1070,10 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             !headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be absent when api_key is None"
@@ -1071,9 +1088,10 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
-        let headers = b.build_headers().expect("headers built");
+        let headers = b.build_headers("").expect("headers built");
         assert!(
             !headers.contains_key(reqwest::header::AUTHORIZATION),
             "Authorization header must be absent when api_key is empty"
@@ -1090,14 +1108,13 @@ mod tests {
             model: String::new(),
             max_tokens: Some(16384),
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -1114,14 +1131,13 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         })
         .expect("valid config");
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -1138,13 +1154,12 @@ mod tests {
         let config = RequestConfig {
             model: "qwen".to_string(),
             max_tokens: 4096,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -1163,13 +1178,12 @@ mod tests {
         let config = RequestConfig {
             model: "zai".to_string(),
             max_tokens: 4096,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert_eq!(
@@ -1188,13 +1202,12 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 4096,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert!(
@@ -1213,13 +1226,12 @@ mod tests {
         let config = RequestConfig {
             model: "test".to_string(),
             max_tokens: 4096,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig {
                 enabled: true,
                 mode: crate::types::ThinkingMode::Adaptive,
                 display: None,
             }),
-            cancel_token: None,
+            ..Default::default()
         };
         let body = b.build_request_body(&[user_text("hi")], &config);
         assert!(
@@ -1357,6 +1369,7 @@ mod tests {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::None,
+            session_header_name: None,
         });
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1608,6 +1621,61 @@ mod tests {
                 .as_str()
                 .expect("url")
                 .starts_with("data:image/jpeg;base64,")
+        );
+    }
+
+    fn backend_with_session_header(header: Option<&str>) -> OpenAiCompatBackend {
+        OpenAiCompatBackend::new(OpenAiCompatConfig {
+            base_url: "https://example.com/v1".to_string(),
+            api_key: Some("test-key".to_string()),
+            model: String::new(),
+            max_tokens: None,
+            reasoning: ReasoningStyle::None,
+            session_header_name: header.map(|h| h.to_string()),
+        })
+        .expect("test config is always valid")
+    }
+
+    #[test]
+    fn build_headers_emits_named_session_header_when_id_present() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let headers = b.build_headers("sess-123").expect("headers built");
+        let session_header = headers
+            .get("x-opencode-session")
+            .expect("session header should be present when name is configured and id non-empty");
+        assert_eq!(
+            session_header.to_str().expect("header is ASCII"),
+            "sess-123"
+        );
+    }
+
+    #[test]
+    fn build_headers_omits_session_header_when_name_unset() {
+        let b = backend_with_session_header(None);
+        let headers = b.build_headers("sess-123").expect("headers built");
+        assert!(
+            !headers.contains_key("x-opencode-session"),
+            "plain openai_compat configs must never emit a session header"
+        );
+    }
+
+    #[test]
+    fn build_headers_omits_session_header_when_id_empty() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let headers = b.build_headers("").expect("headers built");
+        assert!(
+            !headers.contains_key("x-opencode-session"),
+            "empty session id is the absent-sentinel; header must be omitted"
+        );
+    }
+
+    #[test]
+    fn build_headers_rejects_control_char_in_session_id() {
+        let b = backend_with_session_header(Some("x-opencode-session"));
+        let result = b.build_headers("bad\nid");
+        assert!(
+            result.is_err(),
+            "control characters in session id must reject, not panic"
         );
     }
 }

@@ -196,9 +196,7 @@ async fn user_message_appears_immediately() {
     let config = RequestConfig {
         model: "test-model".to_string(),
         max_tokens: 1024,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
 
     let call_count = Arc::new(AtomicUsize::new(0));

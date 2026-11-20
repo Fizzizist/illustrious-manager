@@ -367,13 +367,14 @@ impl Message {
 }
 
 /// Per-request configuration for LLM calls
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RequestConfig {
     pub model: String,
     pub max_tokens: u32,
     pub tools: Vec<ToolDefinition>,
     pub thinking: Option<ThinkingConfig>,
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    pub session_id: String,
 }
 
 /// Events emitted by the LLM backend during streaming

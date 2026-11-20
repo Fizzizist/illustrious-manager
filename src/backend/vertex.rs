@@ -167,6 +167,7 @@ impl LlmBackend for VertexBackend {
             include_model_in_body: false,
             anthropic_beta,
             max_tokens_override: None,
+            session_header_name: None,
         };
 
         let backend = AnthropicCompatBackend::new(self.client.clone(), compat_config);

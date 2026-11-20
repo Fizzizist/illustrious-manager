@@ -25,6 +25,7 @@ impl ZaiBackend {
             model: String::new(),
             max_tokens: None,
             reasoning: ReasoningStyle::ZaiEnableThinking,
+            session_header_name: None,
         })?))
     }
 }

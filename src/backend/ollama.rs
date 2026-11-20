@@ -538,9 +538,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -578,8 +576,7 @@ mod tests {
                     "required": ["command"]
                 }),
             }],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -609,9 +606,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -645,8 +640,7 @@ mod tests {
                 description: "Run bash".to_string(),
                 input_schema: serde_json::json!({"type": "object", "properties": {}}),
             }],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let body = backend.build_request_body(&[], &config);
         assert!(
@@ -667,9 +661,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::Assistant,
@@ -710,9 +702,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -744,9 +734,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![
             Message {
@@ -907,9 +895,8 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
             thinking: Some(crate::types::ThinkingConfig::default()),
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -933,9 +920,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -1038,9 +1023,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,
@@ -1079,9 +1062,7 @@ mod tests {
         let config = RequestConfig {
             model: "gpt-oss:120b".to_string(),
             max_tokens: 4096,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         let messages = vec![Message {
             role: Role::User,

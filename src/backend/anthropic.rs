@@ -43,6 +43,7 @@ impl AnthropicBackend {
             include_model_in_body: true,
             anthropic_beta: None,
             max_tokens_override: config.max_tokens,
+            session_header_name: None,
         };
 
         Ok(Self(AnthropicCompatBackend::new(

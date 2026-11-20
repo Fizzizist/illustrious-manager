@@ -63,9 +63,7 @@ async fn context_files_from_pwd_are_loaded_into_agent() {
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);
@@ -98,9 +96,7 @@ async fn context_files_from_home_are_loaded_into_agent() {
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);
@@ -142,9 +138,7 @@ async fn multiple_context_files_from_both_locations_are_all_loaded() {
     let config = RequestConfig {
         model: "test".to_string(),
         max_tokens: 100,
-        tools: vec![],
-        thinking: None,
-        cancel_token: None,
+        ..Default::default()
     };
     let agent = Agent::new(backend, config, test_session_arc().await).await;
     agent.load_context_files(files);

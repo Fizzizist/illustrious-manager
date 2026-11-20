@@ -894,9 +894,7 @@ mod tests {
         let config = crate::types::RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
         Arc::new(Agent::new(Box::new(backend), config, session).await)
     }

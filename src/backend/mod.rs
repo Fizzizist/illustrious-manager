@@ -22,6 +22,7 @@ pub mod zai;
 /// deliberately no total/read timeout so long thinking streams are not killed.
 pub fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .user_agent(concat!("illustrious-manager/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(30))
         .build()?)
 }
@@ -240,6 +241,7 @@ impl BackendFactory {
                     model: resolved.model.clone(),
                     max_tokens: oc_toml.max_tokens,
                     reasoning,
+                    session_header_name: None,
                 };
                 let backend = openai_compat::OpenAiCompatBackend::new(oc_config)?;
                 Ok(BackendSelection {
@@ -347,9 +349,7 @@ mod tests {
         let config = RequestConfig {
             model: "test-model".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         };
 
         let mut stream = backend
@@ -642,9 +642,7 @@ mod tests {
         RequestConfig {
             model: "test".to_string(),
             max_tokens: 1024,
-            tools: vec![],
-            thinking: None,
-            cancel_token: None,
+            ..Default::default()
         }
     }
 
@@ -790,6 +788,56 @@ mod tests {
     #[test]
     fn build_http_client_succeeds() {
         super::build_http_client().expect("http client should build");
+    }
+
+    #[tokio::test]
+    async fn build_http_client_sets_illustrious_manager_user_agent_on_the_wire() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let capture = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("listener should accept a connection");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::io::AsyncReadExt::read(&mut socket, &mut buf),
+                )
+                .await
+                .expect("bounded read must not hang")
+                .expect("read should succeed");
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") || head.len() >= 64 * 1024 {
+                    break;
+                }
+            }
+            String::from_utf8_lossy(&head).to_string()
+        });
+
+        let client = super::build_http_client().expect("http client should build");
+        // The capture server drops the socket without responding, so the
+        // send error is expected and ignored.
+        let _ = client
+            .post(format!("http://127.0.0.1:{port}/"))
+            .json(&serde_json::json!({"probe": true}))
+            .send()
+            .await;
+
+        let head = capture.await.expect("capture task should not panic");
+        assert!(
+            head.to_lowercase()
+                .contains("user-agent: illustrious-manager/"),
+            "every production backend's client must identify itself; captured head:\n{head}"
+        );
     }
 
     #[tokio::test]
@@ -962,6 +1010,7 @@ mod tests {
                 include_model_in_body: false,
                 anthropic_beta: None,
                 max_tokens_override: None,
+                session_header_name: None,
             },
         );
         let token = CancellationToken::new();

@@ -9,6 +9,7 @@ use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "interleaved-thinking-2025-05-14";
+const SESSION_HEADER: &str = "x-opencode-session";
 
 #[derive(Debug)]
 enum ProtocolBackend {
@@ -61,6 +62,7 @@ impl OpenCodeGoBackend {
                     include_model_in_body: true,
                     anthropic_beta: Some(ANTHROPIC_BETA.to_string()),
                     max_tokens_override: config.max_tokens,
+                    session_header_name: Some(SESSION_HEADER.to_string()),
                 };
                 ProtocolBackend::Anthropic(AnthropicCompatBackend::new(
                     super::build_http_client()?,
@@ -74,6 +76,7 @@ impl OpenCodeGoBackend {
                     model: String::new(),
                     max_tokens: config.max_tokens,
                     reasoning,
+                    session_header_name: Some(SESSION_HEADER.to_string()),
                 };
                 ProtocolBackend::OpenAi(OpenAiCompatBackend::new(oc_config)?)
             }
@@ -164,5 +167,96 @@ mod tests {
         let backend =
             OpenCodeGoBackend::new(&config, "grok-code".to_string()).expect("valid config");
         assert!(matches!(backend.backend, ProtocolBackend::OpenAi(_)));
+    }
+
+    fn wire_config(port: u16, model: &str) -> OpenCodeGoConfig {
+        OpenCodeGoConfig {
+            api_key: "test-key".to_string(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            model: model.to_string(),
+            openai_models: vec!["grok-code".to_string()],
+            anthropic_models: vec!["minimax-m1".to_string()],
+            max_tokens: None,
+            reasoning: ReasoningStyleConfig::Default,
+        }
+    }
+
+    fn session_stamped_config(model: &str, session_id: &str) -> RequestConfig {
+        RequestConfig {
+            model: model.to_string(),
+            max_tokens: 1024,
+            session_id: session_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Accept one connection and read until the end of the request head
+    /// (`\r\n\r\n`), bounded so a malformed capture cannot hang the test.
+    /// Returns the captured request head.
+    async fn capture_request_head(listener: tokio::net::TcpListener) -> String {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .expect("listener should accept a connection");
+
+        let mut head = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::io::AsyncReadExt::read(&mut socket, &mut buf),
+            )
+            .await
+            .expect("bounded read must not hang")
+            .expect("read should succeed");
+            if n == 0 {
+                break;
+            }
+            head.extend_from_slice(&buf[..n]);
+            if head.windows(4).any(|w| w == b"\r\n\r\n") || head.len() >= 64 * 1024 {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&head).to_string()
+    }
+
+    async fn assert_wire_headers(model: &str, session_id: &str) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let backend = OpenCodeGoBackend::new(&wire_config(port, model), model.to_string())
+            .expect("backend should construct");
+
+        let capture = tokio::spawn(capture_request_head(listener));
+
+        // The capture server drops the socket without responding, so a send
+        // error is expected and ignored (cancel_blackhole precedent).
+        let _ = backend
+            .send_message(&[], &session_stamped_config(model, session_id))
+            .await;
+
+        let head = capture.await.expect("capture task should not panic");
+
+        let lower = head.to_lowercase();
+        assert!(
+            lower.contains(&format!("x-opencode-session: {session_id}")),
+            "opencode_go ({model}) must send the session header; captured head:\n{head}"
+        );
+        assert!(
+            lower.contains("user-agent: illustrious-manager/"),
+            "opencode_go ({model}) must send the User-Agent; captured head:\n{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_protocol_wire_request_carries_session_and_user_agent() {
+        assert_wire_headers("grok-code", "sess-openai-42").await;
+    }
+
+    #[tokio::test]
+    async fn anthropic_protocol_wire_request_carries_session_and_user_agent() {
+        assert_wire_headers("minimax-m1", "sess-anthropic-42").await;
     }
 }
