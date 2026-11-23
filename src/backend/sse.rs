@@ -15,6 +15,15 @@ pub fn extract_sse_data(event_text: &str) -> Option<&str> {
     None
 }
 
+fn find_frame_end(buffer: &str) -> Option<(usize, usize)> {
+    let lf = buffer.find("\n\n").map(|pos| (pos, 2));
+    let crlf = buffer.find("\r\n\r\n").map(|pos| (pos, 4));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
 pub fn create_sse_event_stream<S, B, E, P>(
     byte_stream: S,
     parser: P,
@@ -34,10 +43,9 @@ where
                     return Some((Ok(event), (byte_stream, buffer, parser, event_queue)));
                 }
 
-                // LF new SSE frames
-                if let Some(pos) = buffer.find("\n\n") {
+                if let Some((pos, delimiter_len)) = find_frame_end(&buffer) {
                     let event_text = buffer[..pos].to_string();
-                    buffer = buffer[pos + 2..].to_string();
+                    buffer = buffer[pos + delimiter_len..].to_string();
 
                     if let Some(data) = extract_sse_data(&event_text) {
                         match parser(data) {

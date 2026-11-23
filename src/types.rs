@@ -78,6 +78,8 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Opaque provider signature (Gemini `thoughtSignature`) that must be echoed back.
+        signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -136,13 +138,22 @@ impl Serialize for ContentBlock {
                 )?;
                 map.end()
             }
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                signature,
+            } => {
                 use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map =
+                    serializer.serialize_map(Some(4 + usize::from(signature.is_some())))?;
                 map.serialize_entry("type", "tool_use")?;
                 map.serialize_entry("id", id)?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("input", input)?;
+                if let Some(signature) = signature {
+                    map.serialize_entry("signature", signature)?;
+                }
                 map.end()
             }
             ContentBlock::ToolResult {
@@ -237,7 +248,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let mut content: Option<ToolResultContent> = None;
                 let mut is_error = None;
                 let mut text = None;
-                let mut signature = None;
+                let mut signature: Option<String> = None;
                 let mut data = None;
                 let mut image_source: Option<ImageSource> = None;
 
@@ -301,6 +312,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         id: id.ok_or_else(|| de::Error::missing_field("id"))?,
                         name: name.ok_or_else(|| de::Error::missing_field("name"))?,
                         input: input.ok_or_else(|| de::Error::missing_field("input"))?,
+                        signature,
                     }),
                     Some("tool_result") => Ok(ContentBlock::ToolResult {
                         tool_use_id: tool_use_id
@@ -389,6 +401,8 @@ pub enum StreamEvent {
         id: String,
         name: String,
     },
+    /// Signature for the most recent tool use, emitted right after `ToolUseStart`.
+    ToolUseSignature(String),
     ToolUseDelta(String),
     ToolUseDone,
     /// Token usage and stop reason reported by the backend at the end of a response.

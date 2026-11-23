@@ -188,13 +188,18 @@ impl BackendFactory {
                     .get_or_init(project.clone(), region.clone())
                     .await?;
                 let backend = vertex::VertexBackend::with_auth(project, region, auth)?;
+                let default_max_tokens = if vertex::is_gemini_model(&resolved.model) {
+                    defaults::VERTEX_GEMINI
+                } else {
+                    defaults::VERTEX
+                };
                 Ok(BackendSelection {
                     backend: Box::new(RetryingBackend::new(
                         Box::new(backend),
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
-                    max_tokens: self.config.vertex.max_tokens.unwrap_or(defaults::VERTEX),
+                    max_tokens: self.config.vertex.max_tokens.unwrap_or(default_max_tokens),
                 })
             }
             "zai" => {

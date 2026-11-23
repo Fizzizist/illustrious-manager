@@ -403,7 +403,9 @@ impl OpenAiCompatBackend {
                         for block in &m.content {
                             match block {
                                 ContentBlock::Text(text) => text_parts.push(text.clone()),
-                                ContentBlock::ToolUse { id, name, input } => {
+                                ContentBlock::ToolUse {
+                                    id, name, input, ..
+                                } => {
                                     let arguments = serde_json::to_string(input)
                                         .unwrap_or_else(|_| "{}".to_string());
                                     tool_calls.push(serde_json::json!({

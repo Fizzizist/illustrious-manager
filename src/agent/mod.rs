@@ -29,6 +29,7 @@ struct PendingToolCall {
     id: String,
     name: String,
     input_json: String,
+    signature: Option<String>,
 }
 
 pub struct Agent {
@@ -287,6 +288,7 @@ impl Agent {
                 id: tool_use_id.clone(),
                 name: "bash".to_string(),
                 input,
+                signature: None,
             }],
             created_at: now_timestamp(),
         };
@@ -542,8 +544,15 @@ impl Agent {
                                 id,
                                 name,
                                 input_json: String::new(),
+                                signature: None,
                             });
                         }
+                        Some(Ok(StreamEvent::ToolUseSignature(sig))) => match current_tool {
+                            Some(ref mut t) => t.signature = Some(sig),
+                            None => crate::logging::log_warn(
+                                "Ignoring tool use signature with no open tool call",
+                            ),
+                        },
                         Some(Ok(StreamEvent::ToolUseDelta(chunk))) => {
                             if let Some(ref mut t) = current_tool {
                                 t.input_json.push_str(&chunk);
@@ -1018,6 +1027,7 @@ async fn execute_tool_calls(
             id: call.id.clone(),
             name: call.name.clone(),
             input: input.clone(),
+            signature: call.signature.clone(),
         });
         let _ = event_tx.unbounded_send(AgentEvent::ToolUseReceived {
             id: call.id.clone(),

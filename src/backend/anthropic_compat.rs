@@ -225,7 +225,11 @@ impl AnthropicCompatBackend {
             .iter()
             .filter_map(|m| {
                 let mut warnings = Vec::new();
-                let content = filter_content_blocks(&m.content, &mut warnings);
+                let content: Vec<serde_json::Value> =
+                    filter_content_blocks(&m.content, &mut warnings)
+                        .into_iter()
+                        .map(wire_block)
+                        .collect();
                 for w in warnings {
                     crate::logging::log_warn(&w);
                 }
@@ -441,6 +445,45 @@ fn filter_content_blocks<'a>(
             true
         })
         .collect()
+}
+
+/// Anthropic wire representation of a block. Independent of the storage serde
+/// format so provider-specific storage fields never leak onto the wire.
+fn wire_block(block: &crate::types::ContentBlock) -> serde_json::Value {
+    use crate::types::ContentBlock;
+    match block {
+        ContentBlock::Text(text) => serde_json::json!({"type": "text", "text": text}),
+        ContentBlock::Image { media_type, data } => serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }),
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        }),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content.iter().map(wire_block).collect::<Vec<_>>(),
+            "is_error": is_error,
+        }),
+        ContentBlock::Thinking { text, signature } => serde_json::json!({
+            "type": "thinking",
+            "thinking": text,
+            "signature": signature,
+        }),
+        ContentBlock::RedactedThinking { data } => {
+            serde_json::json!({"type": "redacted_thinking", "data": data})
+        }
+    }
 }
 
 /// Convenience wrapper for single-event parsing without state.

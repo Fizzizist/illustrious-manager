@@ -8,6 +8,7 @@ use tokio::sync::OnceCell;
 
 use super::LlmBackend;
 use super::anthropic_compat::{AnthropicCompatBackend, AnthropicCompatConfig};
+use super::gemini_compat::{GeminiCompatBackend, GeminiCompatConfig};
 use crate::types::{BoxStream, Message, RequestConfig, StreamEvent};
 
 pub use super::anthropic_compat::AnthropicCompatSseParser as VertexSseParser;
@@ -83,11 +84,16 @@ impl VertexAuthCache {
     }
 }
 
-/// Vertex AI backend for Claude models.
+/// Models routed to the Google publisher; everything else is treated as Claude.
+pub fn is_gemini_model(model: &str) -> bool {
+    model.starts_with("gemini-")
+}
+
+/// Vertex AI backend for Claude and Gemini models.
 ///
 /// Partial shim: resolves GCP auth tokens and constructs the Vertex-specific
 /// endpoint, then delegates HTTP request sending and SSE parsing to
-/// [`AnthropicCompatBackend`].
+/// [`AnthropicCompatBackend`] (Claude) or [`GeminiCompatBackend`] (Gemini).
 pub struct VertexBackend {
     client: Client,
     project: String,
@@ -127,11 +133,15 @@ impl VertexBackend {
         } else {
             format!("{}-aiplatform.googleapis.com", self.region)
         };
+        let (publisher, method) = if is_gemini_model(model) {
+            ("google", "streamGenerateContent?alt=sse")
+        } else {
+            ("anthropic", "streamRawPredict")
+        };
         format!(
-            "https://{host}/v1/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
+            "https://{host}/v1/projects/{project}/locations/{region}/publishers/{publisher}/models/{model}:{method}",
             region = self.region,
             project = self.project,
-            model = model,
         )
     }
 }
@@ -152,6 +162,19 @@ impl LlmBackend for VertexBackend {
         let token_str = token.as_str().to_owned();
 
         let endpoint = self.endpoint(&config.model);
+
+        if is_gemini_model(&config.model) {
+            let backend = GeminiCompatBackend::new(
+                self.client.clone(),
+                GeminiCompatConfig {
+                    endpoint,
+                    auth_token: Some(token_str),
+                    session_header_name: None,
+                },
+            );
+            return backend.send_message(messages, config).await;
+        }
+
         let thinking_enabled = config.thinking.as_ref().is_some_and(|tc| tc.enabled);
         let anthropic_beta = if thinking_enabled {
             Some("interleaved-thinking-2025-05-14".to_string())

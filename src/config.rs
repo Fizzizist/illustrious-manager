@@ -165,7 +165,7 @@ backend = "vertex"
 [vertex]
 # Required: your GCP project ID
 project = ""
-# Vertex AI region
+# Vertex AI region (Gemini models require "global")
 region = "us-east5"
 # Model to use
 model = "claude-sonnet-4-20250514"

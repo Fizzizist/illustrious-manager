@@ -1,3 +1,374 @@
+use std::collections::HashMap;
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use reqwest::Client;
+use reqwest::header::HeaderValue;
+use serde_json::{Value, json};
+
+use super::LlmBackend;
+use super::error::BackendError;
+use super::sse::create_sse_event_stream;
+use crate::types::{
+    BoxStream, ContentBlock, Message, RequestConfig, Role, StreamEvent, ThinkingDisplay,
+};
+
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+const REFUSAL_FINISH_REASONS: &[&str] = &[
+    "SAFETY",
+    "RECITATION",
+    "BLOCKLIST",
+    "PROHIBITED_CONTENT",
+    "SPII",
+    "MODEL_ARMOR",
+    "IMAGE_SAFETY",
+    "IMAGE_PROHIBITED_CONTENT",
+    "IMAGE_RECITATION",
+];
+
+#[derive(Debug, Clone)]
+pub struct GeminiCompatConfig {
+    pub endpoint: String,
+    pub auth_token: Option<String>,
+    pub session_header_name: Option<String>,
+}
+
+/// Gemini `generateContent` protocol client (streaming SSE).
+pub struct GeminiCompatBackend {
+    client: Client,
+    config: GeminiCompatConfig,
+}
+
+impl GeminiCompatBackend {
+    pub fn new(client: Client, config: GeminiCompatConfig) -> Self {
+        Self { client, config }
+    }
+
+    fn build_request_body(&self, messages: &[Message], config: &RequestConfig) -> Result<Value> {
+        let mut generation_config = json!({ "maxOutputTokens": config.max_tokens });
+        if let Some(thinking) = &config.thinking {
+            let include_thoughts =
+                thinking.enabled && thinking.display != Some(ThinkingDisplay::Omitted);
+            generation_config["thinkingConfig"] = json!({ "includeThoughts": include_thoughts });
+        }
+
+        let mut body = json!({
+            "contents": build_contents(messages),
+            "generationConfig": generation_config,
+        });
+
+        if !config.tools.is_empty() {
+            let declarations: Vec<Value> = config
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parametersJsonSchema": tool.input_schema,
+                    })
+                })
+                .collect();
+            body["tools"] = json!([{ "functionDeclarations": declarations }]);
+        }
+
+        Ok(body)
+    }
+
+    fn build_request_headers(&self, session_id: &str) -> Result<reqwest::header::HeaderMap> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+
+        if let Some(token) = &self.config.auth_token {
+            let value = HeaderValue::from_str(&format!("Bearer {token}")).with_context(|| {
+                format!(
+                    "auth token contains characters invalid for an HTTP header value: {token:?}"
+                )
+            })?;
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
+
+        if let Some(name) = &self.config.session_header_name
+            && !session_id.is_empty()
+        {
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .with_context(|| {
+                    format!("session_header_name is not a valid HTTP header name: {name:?}")
+                })?;
+            let value = HeaderValue::from_str(session_id).with_context(|| {
+                format!(
+                    "session id contains characters invalid for an HTTP header value: {session_id:?}"
+                )
+            })?;
+            headers.insert(header_name, value);
+        }
+
+        Ok(headers)
+    }
+}
+
+fn build_contents(messages: &[Message]) -> Vec<Value> {
+    let tool_names: HashMap<&str, &str> = messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+
+    let mut contents: Vec<(&'static str, Vec<Value>)> = Vec::new();
+    for message in messages {
+        let role = match message.role {
+            Role::User => "user",
+            Role::Assistant => "model",
+        };
+        let parts = build_parts(&message.content, &tool_names);
+        if parts.is_empty() {
+            continue;
+        }
+        match contents.last_mut() {
+            Some((last_role, last_parts)) if *last_role == role => last_parts.extend(parts),
+            _ => contents.push((role, parts)),
+        }
+    }
+
+    contents
+        .into_iter()
+        .map(|(role, parts)| json!({ "role": role, "parts": parts }))
+        .collect()
+}
+
+fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec<Value> {
+    let step_has_signature = blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse {
+                signature: Some(_),
+                ..
+            }
+        )
+    });
+    let mut needs_skip_signature = !step_has_signature;
+
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text(text) => parts.push(json!({ "text": text })),
+            ContentBlock::Image { media_type, data } => parts.push(inline_data(media_type, data)),
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                signature,
+            } => {
+                let args = if input.is_null() {
+                    json!({})
+                } else {
+                    input.clone()
+                };
+                let mut part = json!({ "functionCall": { "name": name, "args": args, "id": id } });
+                if let Some(signature) = signature {
+                    part["thoughtSignature"] = json!(signature);
+                } else if needs_skip_signature {
+                    part["thoughtSignature"] = json!(SKIP_THOUGHT_SIGNATURE);
+                }
+                needs_skip_signature = false;
+                parts.push(part);
+            }
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let name = tool_names
+                    .get(tool_use_id.as_str())
+                    .copied()
+                    .unwrap_or("unknown");
+                parts.push(function_response(name, tool_use_id, content, *is_error));
+            }
+            ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
+        }
+    }
+    parts
+}
+
+fn inline_data(media_type: &str, data: &str) -> Value {
+    json!({ "inlineData": { "mimeType": media_type, "data": data } })
+}
+
+fn function_response(name: &str, id: &str, content: &[ContentBlock], is_error: bool) -> Value {
+    let text = content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let images: Vec<Value> = content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Image { media_type, data } => Some(inline_data(media_type, data)),
+            _ => None,
+        })
+        .collect();
+
+    let key = if is_error { "error" } else { "output" };
+    let mut response = json!({ "name": name, "id": id, "response": { key: text } });
+    if !images.is_empty() {
+        response["parts"] = json!(images);
+    }
+    json!({ "functionResponse": response })
+}
+
+#[async_trait]
+impl LlmBackend for GeminiCompatBackend {
+    async fn send_message(
+        &self,
+        messages: &[Message],
+        config: &RequestConfig,
+    ) -> Result<BoxStream<Result<StreamEvent>>> {
+        let body = self.build_request_body(messages, config)?;
+        let headers = self.build_request_headers(&config.session_id)?;
+
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BackendError::transport("Gemini API", &e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<failed to read response body>"));
+            return Err(BackendError::HttpStatus {
+                code: status.as_u16(),
+                body,
+            }
+            .into());
+        }
+
+        let mut parser = GeminiSseParser::new();
+        Ok(create_sse_event_stream(
+            response.bytes_stream(),
+            move |data| parser.parse(data),
+        ))
+    }
+}
+
+/// Stateless-per-chunk parser for Gemini streaming responses.
+#[derive(Debug, Default)]
+pub struct GeminiSseParser;
+
+impl GeminiSseParser {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn parse(&mut self, data: &str) -> Result<Vec<StreamEvent>> {
+        let chunk: Value =
+            serde_json::from_str(data).context("Failed to parse Gemini stream chunk")?;
+        let candidate = chunk["candidates"].get(0);
+
+        if candidate.is_none()
+            && let Some(reason) = chunk["promptFeedback"]["blockReason"].as_str()
+        {
+            crate::logging::log_warn(&format!("Gemini blocked the prompt: {reason}"));
+            return Err(BackendError::Refusal.into());
+        }
+        let Some(candidate) = candidate else {
+            return Ok(Vec::new());
+        };
+
+        let mut events = Vec::new();
+        for part in candidate["content"]["parts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            push_part_events(part, &mut events);
+        }
+
+        let Some(reason) = candidate["finishReason"].as_str() else {
+            return Ok(events);
+        };
+        let (input_tokens, output_tokens) = token_counts(&chunk["usageMetadata"]);
+        match reason {
+            "STOP" => {
+                events.push(StreamEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    stop_reason: reason.to_string(),
+                });
+                events.push(StreamEvent::Done);
+                Ok(events)
+            }
+            "MAX_TOKENS" => Err(BackendError::MaxTokensExceeded {
+                input_tokens,
+                output_tokens,
+            }
+            .into()),
+            r if REFUSAL_FINISH_REASONS.contains(&r) => {
+                if let Some(message) = candidate["finishMessage"].as_str() {
+                    crate::logging::log_warn(&format!("Gemini refused ({r}): {message}"));
+                }
+                Err(BackendError::Refusal.into())
+            }
+            other => {
+                let detail = candidate["finishMessage"]
+                    .as_str()
+                    .map(|m| format!(": {m}"))
+                    .unwrap_or_default();
+                Err(BackendError::Other(format!("Gemini finished with {other}{detail}")).into())
+            }
+        }
+    }
+}
+
+fn push_part_events(part: &Value, events: &mut Vec<StreamEvent>) {
+    if let Some(call) = part.get("functionCall") {
+        let id = call["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call_{}", uuid::Uuid::now_v7().simple()));
+        let name = call["name"].as_str().unwrap_or_default().to_string();
+        events.push(StreamEvent::ToolUseStart { id, name });
+        if let Some(signature) = part["thoughtSignature"].as_str() {
+            events.push(StreamEvent::ToolUseSignature(signature.to_string()));
+        }
+        let args = call.get("args").filter(|a| !a.is_null()).cloned();
+        events.push(StreamEvent::ToolUseDelta(
+            args.unwrap_or_else(|| json!({})).to_string(),
+        ));
+        events.push(StreamEvent::ToolUseDone);
+    } else if let Some(text) = part["text"].as_str().filter(|t| !t.is_empty()) {
+        if part["thought"].as_bool().unwrap_or(false) {
+            events.push(StreamEvent::ThinkingDelta(text.to_string()));
+        } else {
+            events.push(StreamEvent::TextDelta(text.to_string()));
+        }
+    }
+}
+
+fn token_counts(usage: &Value) -> (u32, u32) {
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+    (
+        count("promptTokenCount"),
+        count("candidatesTokenCount").saturating_add(count("thoughtsTokenCount")),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
