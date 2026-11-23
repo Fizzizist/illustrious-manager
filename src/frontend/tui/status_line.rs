@@ -512,6 +512,7 @@ mod tests {
                 id: "t1".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                signature: None,
             }],
             created_at: 0.0,
         }];

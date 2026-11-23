@@ -174,3 +174,62 @@ impl LlmBackend for VertexBackend {
         backend.send_message(messages, config).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeTokenProvider;
+
+    #[async_trait]
+    impl gcp_auth::TokenProvider for FakeTokenProvider {
+        async fn token(&self, _scopes: &[&str]) -> Result<Arc<gcp_auth::Token>, gcp_auth::Error> {
+            unimplemented!("fake provider")
+        }
+        async fn project_id(&self) -> Result<Arc<str>, gcp_auth::Error> {
+            unimplemented!("fake provider")
+        }
+    }
+
+    fn backend(region: &str) -> VertexBackend {
+        VertexBackend::with_auth(
+            "proj".to_string(),
+            region.to_string(),
+            Arc::new(FakeTokenProvider),
+        )
+        .expect("backend should build")
+    }
+
+    #[test]
+    fn endpoint_selects_publisher_and_host_per_model() {
+        let cases = [
+            (
+                "global",
+                "gemini-3-flash-preview",
+                "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?alt=sse",
+            ),
+            (
+                "us-central1",
+                "gemini-3-flash-preview",
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/proj/locations/us-central1/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?alt=sse",
+            ),
+            (
+                "global",
+                "claude-sonnet-4-20250514",
+                "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/publishers/anthropic/models/claude-sonnet-4-20250514:streamRawPredict",
+            ),
+            (
+                "us-east5",
+                "claude-sonnet-4-20250514",
+                "https://us-east5-aiplatform.googleapis.com/v1/projects/proj/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-20250514:streamRawPredict",
+            ),
+        ];
+        for (region, model, expected) in cases {
+            assert_eq!(
+                backend(region).endpoint(model),
+                expected,
+                "region={region} model={model}"
+            );
+        }
+    }
+}

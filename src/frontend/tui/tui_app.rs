@@ -1880,6 +1880,7 @@ mod tests {
                         id: "t1".to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "ls"}),
+                        signature: None,
                     },
                 ],
                 created_at: 0.0,
@@ -1925,6 +1926,7 @@ mod tests {
                     id: "s1".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "sleep"}),
+                    signature: None,
                 }],
                 created_at: 0.0,
             },
@@ -1962,16 +1964,19 @@ mod tests {
                         id: "t1".to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "ls"}),
+                        signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "t2".to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "pwd"}),
+                        signature: None,
                     },
                     ContentBlock::ToolUse {
                         id: "t3".to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "whoami"}),
+                        signature: None,
                     },
                 ],
                 created_at: 0.0,
@@ -2452,6 +2457,7 @@ mod tests {
                     "old_string": "let x = 1;",
                     "new_string": "let x = 42;"
                 }),
+                signature: None,
             }],
             created_at: 0.0,
         }];

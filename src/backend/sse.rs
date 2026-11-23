@@ -125,4 +125,37 @@ mod tests {
         let event = "data: first\ndata: second";
         assert_eq!(extract_sse_data(event), Some("first"));
     }
+
+    fn echo_stream(chunks: Vec<&'static str>) -> BoxStream<Result<StreamEvent>> {
+        let byte_stream = futures::stream::iter(chunks.into_iter().map(Ok::<_, std::io::Error>));
+        create_sse_event_stream(byte_stream, |data| {
+            Ok(vec![StreamEvent::TextDelta(data.to_string())])
+        })
+    }
+
+    async fn collect_texts(stream: BoxStream<Result<StreamEvent>>) -> Vec<String> {
+        stream
+            .map(|event| match event.expect("event should be Ok") {
+                StreamEvent::TextDelta(t) => t,
+                other => panic!("expected TextDelta, got {other:?}"),
+            })
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn crlf_delimited_frames_yield_one_event_each() {
+        let stream = echo_stream(vec![
+            "data: one\r\n\r\ndata: two\r\n\r\ndata: three\r\n\r\n",
+        ]);
+        let texts = collect_texts(stream).await;
+        assert_eq!(texts, vec!["one", "two", "three"]);
+    }
+
+    #[tokio::test]
+    async fn crlf_delimiter_split_across_chunks_still_parses() {
+        let stream = echo_stream(vec!["data: one\r\n", "\r", "\ndata: two\r\n\r\n"]);
+        let texts = collect_texts(stream).await;
+        assert_eq!(texts, vec!["one", "two"]);
+    }
 }

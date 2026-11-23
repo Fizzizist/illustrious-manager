@@ -581,12 +581,14 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: input.clone(),
+            signature: None,
         };
         assert!(matches!(block, ContentBlock::ToolUse { .. }));
         if let ContentBlock::ToolUse {
             id,
             name,
             input: block_input,
+            ..
         } = block
         {
             assert_eq!(id, "tool-123");
@@ -652,6 +654,7 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            signature: None,
         };
         let json = serde_json::to_string(&block).expect("ContentBlock should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
@@ -729,6 +732,7 @@ mod tests {
                     id: "tool-1".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
+                    signature: None,
                 },
             ],
             created_at: 0.0,
@@ -842,6 +846,50 @@ mod tests {
             assert_eq!(event_input, input);
             assert_eq!(index, 1);
         }
+    }
+
+    #[test]
+    fn tool_use_signature_roundtrips_through_serde() {
+        let original = ContentBlock::ToolUse {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            signature: Some("CiQB+/sig==".to_string()),
+        };
+        let value = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(value["signature"], "CiQB+/sig==");
+        let deserialized: ContentBlock = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn tool_use_without_signature_keeps_legacy_json_shape() {
+        let unsigned = ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            signature: None,
+        };
+        let value = serde_json::to_value(&unsigned).expect("serialize");
+        assert!(
+            value.get("signature").is_none(),
+            "unsigned tool_use must not carry a signature key; got {value}"
+        );
+
+        let legacy = r#"{"type":"tool_use","id":"t1","name":"bash","input":{}}"#;
+        let signed = r#"{"type":"tool_use","id":"t2","name":"bash","input":{},"signature":"s"}"#;
+        let legacy_block: ContentBlock = serde_json::from_str(legacy).expect("legacy");
+        let signed_block: ContentBlock = serde_json::from_str(signed).expect("signed");
+        assert!(matches!(
+            legacy_block,
+            ContentBlock::ToolUse {
+                signature: None,
+                ..
+            }
+        ));
+        assert!(
+            matches!(signed_block, ContentBlock::ToolUse { signature: Some(ref s), .. } if s == "s")
+        );
     }
 
     // ── Thinking types ────────────────────────────────────────────────────

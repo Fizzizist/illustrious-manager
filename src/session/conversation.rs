@@ -362,6 +362,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_messages_preserves_tool_use_signature() {
+        let (_dir, session) = create_test_session().await;
+
+        let assistant = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                    signature: Some("CiQB+/sig==".to_string()),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_2".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "pwd"}),
+                    signature: None,
+                },
+            ],
+            created_at: 0.0,
+        };
+        session
+            .conversation()
+            .insert_messages(std::slice::from_ref(&assistant))
+            .await
+            .expect("insert messages");
+
+        let history = session
+            .conversation()
+            .load_history()
+            .await
+            .expect("load history");
+        assert_eq!(history, vec![assistant]);
+    }
+
+    #[tokio::test]
     async fn insert_messages_exceeding_chunk_size_persists_all() {
         let (_dir, session) = create_test_session().await;
 
