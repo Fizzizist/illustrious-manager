@@ -84,7 +84,7 @@ backend = "vertex"                    # "vertex", "zai", "ollama", "openai_compa
 
 [vertex]
 project = ""                          # GCP project ID (required)
-region = "us-east5"
+region = "us-east5"                   # Gemini models require "global"
 model = "claude-sonnet-4-20250514"
 # max_tokens = 8192                   # optional override
 

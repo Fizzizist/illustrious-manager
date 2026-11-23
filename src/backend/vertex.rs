@@ -169,7 +169,6 @@ impl LlmBackend for VertexBackend {
                 GeminiCompatConfig {
                     endpoint,
                     auth_token: Some(token_str),
-                    session_header_name: None,
                 },
             );
             return backend.send_message(messages, config).await;

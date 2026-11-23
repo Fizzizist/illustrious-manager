@@ -102,7 +102,7 @@ impl ContentBlock {
     }
 }
 
-/// Helper for serializing `ContentBlock::Image` in the Anthropic wire format:
+/// Helper for serializing `ContentBlock::Image` in the session storage format:
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ImageSource {
     #[serde(rename = "type")]
@@ -930,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_serializes_to_anthropic_format() {
+    fn thinking_serializes_to_storage_format() {
         let block = ContentBlock::Thinking {
             text: "reasoning text".to_string(),
             signature: "sig123".to_string(),
@@ -943,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_serializes_to_anthropic_format() {
+    fn redacted_thinking_serializes_to_storage_format() {
         let block = ContentBlock::RedactedThinking {
             data: "encrypted".to_string(),
         };
@@ -954,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_deserializes_from_anthropic_json() {
+    fn thinking_deserializes_from_storage_json() {
         let json = r#"{"type":"thinking","thinking":"reasoning text","signature":"sig123"}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {
@@ -967,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_deserializes_from_anthropic_json() {
+    fn redacted_thinking_deserializes_from_storage_json() {
         let json = r#"{"type":"redacted_thinking","data":"encrypted"}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn image_serializes_to_anthropic_format() {
+    fn image_serializes_to_storage_format() {
         let block = ContentBlock::Image {
             media_type: "image/jpeg".to_string(),
             data: "/9j/4AAQ".to_string(),
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn image_deserializes_from_anthropic_json() {
+    fn image_deserializes_from_storage_json() {
         let json = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {

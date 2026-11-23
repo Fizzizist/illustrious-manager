@@ -31,7 +31,6 @@ const REFUSAL_FINISH_REASONS: &[&str] = &[
 pub struct GeminiCompatConfig {
     pub endpoint: String,
     pub auth_token: Option<String>,
-    pub session_header_name: Option<String>,
 }
 
 /// Gemini `generateContent` protocol client (streaming SSE).
@@ -76,7 +75,7 @@ impl GeminiCompatBackend {
         Ok(body)
     }
 
-    fn build_request_headers(&self, session_id: &str) -> Result<reqwest::header::HeaderMap> {
+    fn build_request_headers(&self) -> Result<reqwest::header::HeaderMap> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
@@ -90,21 +89,6 @@ impl GeminiCompatBackend {
                 )
             })?;
             headers.insert(reqwest::header::AUTHORIZATION, value);
-        }
-
-        if let Some(name) = &self.config.session_header_name
-            && !session_id.is_empty()
-        {
-            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .with_context(|| {
-                    format!("session_header_name is not a valid HTTP header name: {name:?}")
-                })?;
-            let value = HeaderValue::from_str(session_id).with_context(|| {
-                format!(
-                    "session id contains characters invalid for an HTTP header value: {session_id:?}"
-                )
-            })?;
-            headers.insert(header_name, value);
         }
 
         Ok(headers)
@@ -234,7 +218,7 @@ impl LlmBackend for GeminiCompatBackend {
         config: &RequestConfig,
     ) -> Result<BoxStream<Result<StreamEvent>>> {
         let body = self.build_request_body(messages, config)?;
-        let headers = self.build_request_headers(&config.session_id)?;
+        let headers = self.build_request_headers()?;
 
         let response = self
             .client
@@ -387,7 +371,6 @@ mod tests {
             GeminiCompatConfig {
                 endpoint: endpoint.to_string(),
                 auth_token: None,
-                session_header_name: None,
             },
         )
     }
