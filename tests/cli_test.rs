@@ -1,14 +1,5 @@
 use std::process::Command;
 
-fn bin_path() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().expect("current_exe");
-    assert!(path.pop(), "exe parent");
-    if path.ends_with("deps") {
-        assert!(path.pop(), "deps parent");
-    }
-    path.join("illustrious-manager")
-}
-
 struct Sandbox {
     _dir: tempfile::TempDir,
     config_path: std::path::PathBuf,
@@ -33,7 +24,7 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new(bin_path())
+        Command::new(env!("CARGO_BIN_EXE_illustrious-manager"))
             .arg("--config")
             .arg(&self.config_path)
             .args(args)
