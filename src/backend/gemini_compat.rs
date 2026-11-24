@@ -95,6 +95,22 @@ impl GeminiCompatBackend {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnKind {
+    Model,
+    FunctionResponse,
+    User,
+}
+
+impl TurnKind {
+    fn role(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::FunctionResponse | Self::User => "user",
+        }
+    }
+}
+
 fn build_contents(messages: &[Message]) -> Vec<Value> {
     let tool_names: HashMap<&str, &str> = messages
         .iter()
@@ -105,29 +121,27 @@ fn build_contents(messages: &[Message]) -> Vec<Value> {
         })
         .collect();
 
-    let mut contents: Vec<(&'static str, Vec<Value>)> = Vec::new();
+    let mut contents: Vec<(TurnKind, Vec<Value>)> = Vec::new();
     for message in messages {
-        let role = match message.role {
-            Role::User => "user",
-            Role::Assistant => "model",
-        };
-        let parts = build_parts(&message.content, &tool_names);
-        if parts.is_empty() {
-            continue;
-        }
-        match contents.last_mut() {
-            Some((last_role, last_parts)) if *last_role == role => last_parts.extend(parts),
-            _ => contents.push((role, parts)),
+        for (kind, part) in build_parts(&message.role, &message.content, &tool_names) {
+            match contents.last_mut() {
+                Some((last_kind, last_parts)) if *last_kind == kind => last_parts.push(part),
+                _ => contents.push((kind, vec![part])),
+            }
         }
     }
 
     contents
         .into_iter()
-        .map(|(role, parts)| json!({ "role": role, "parts": parts }))
+        .map(|(kind, parts)| json!({ "role": kind.role(), "parts": parts }))
         .collect()
 }
 
-fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec<Value> {
+fn build_parts(
+    role: &Role,
+    blocks: &[ContentBlock],
+    tool_names: &HashMap<&str, &str>,
+) -> Vec<(TurnKind, Value)> {
     let step_has_signature = blocks.iter().any(|block| {
         matches!(
             block,
@@ -139,11 +153,18 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
     });
     let mut needs_skip_signature = !step_has_signature;
 
+    let default_kind = match role {
+        Role::User => TurnKind::User,
+        Role::Assistant => TurnKind::Model,
+    };
+
     let mut parts = Vec::new();
     for block in blocks {
         match block {
-            ContentBlock::Text(text) => parts.push(json!({ "text": text })),
-            ContentBlock::Image { media_type, data } => parts.push(inline_data(media_type, data)),
+            ContentBlock::Text(text) => parts.push((default_kind, json!({ "text": text }))),
+            ContentBlock::Image { media_type, data } => {
+                parts.push((default_kind, inline_data(media_type, data)));
+            }
             ContentBlock::ToolUse {
                 id,
                 name,
@@ -162,7 +183,7 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
                     part["thoughtSignature"] = json!(SKIP_THOUGHT_SIGNATURE);
                 }
                 needs_skip_signature = false;
-                parts.push(part);
+                parts.push((TurnKind::Model, part));
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -173,12 +194,48 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
                     .get(tool_use_id.as_str())
                     .copied()
                     .unwrap_or("unknown");
-                parts.push(function_response(name, tool_use_id, content, *is_error));
+                parts.push((
+                    TurnKind::FunctionResponse,
+                    function_response(name, tool_use_id, content, *is_error),
+                ));
             }
             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
         }
     }
     parts
+}
+
+fn part_kind(part: &Value) -> &'static str {
+    if part.get("functionCall").is_some() {
+        "functionCall"
+    } else if part.get("functionResponse").is_some() {
+        "functionResponse"
+    } else if part.get("inlineData").is_some() {
+        "inlineData"
+    } else if part.get("text").is_some() {
+        "text"
+    } else {
+        "other"
+    }
+}
+
+fn contents_structure_summary(contents: &[Value]) -> String {
+    contents
+        .iter()
+        .enumerate()
+        .map(|(idx, turn)| {
+            let role = turn["role"].as_str().unwrap_or("unknown");
+            let parts = turn["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(part_kind)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{idx}:{role}[{parts}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn inline_data(media_type: &str, data: &str) -> Value {
@@ -231,6 +288,17 @@ impl LlmBackend for GeminiCompatBackend {
 
         if !response.status().is_success() {
             let status = response.status();
+            if status.is_client_error() {
+                let summary = body["contents"]
+                    .as_array()
+                    .map(|c| contents_structure_summary(c))
+                    .unwrap_or_default();
+                crate::logging::log_warn(&format!(
+                    "Gemini HTTP {}: contents=[{}]",
+                    status.as_u16(),
+                    summary
+                ));
+            }
             let body = response
                 .text()
                 .await
