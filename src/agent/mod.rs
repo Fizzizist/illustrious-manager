@@ -29,6 +29,7 @@ struct PendingToolCall {
     id: String,
     name: String,
     input_json: String,
+    signature: Option<String>,
 }
 
 pub struct Agent {
@@ -287,6 +288,7 @@ impl Agent {
                 id: tool_use_id.clone(),
                 name: "bash".to_string(),
                 input,
+                signature: None,
             }],
             created_at: now_timestamp(),
         };
@@ -542,8 +544,15 @@ impl Agent {
                                 id,
                                 name,
                                 input_json: String::new(),
+                                signature: None,
                             });
                         }
+                        Some(Ok(StreamEvent::ToolUseSignature(sig))) => match current_tool {
+                            Some(ref mut t) => t.signature = Some(sig),
+                            None => crate::logging::log_warn(
+                                "Ignoring tool use signature with no open tool call",
+                            ),
+                        },
                         Some(Ok(StreamEvent::ToolUseDelta(chunk))) => {
                             if let Some(ref mut t) = current_tool {
                                 t.input_json.push_str(&chunk);
@@ -1018,6 +1027,7 @@ async fn execute_tool_calls(
             id: call.id.clone(),
             name: call.name.clone(),
             input: input.clone(),
+            signature: call.signature.clone(),
         });
         let _ = event_tx.unbounded_send(AgentEvent::ToolUseReceived {
             id: call.id.clone(),
@@ -7965,6 +7975,206 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t.is_empty())),
             "should emit ResponseComplete(\"\") immediately with zero retries; got {events:?}"
+        );
+    }
+
+    fn signed_tool_call(id: &str, name: &str, signature: Option<&str>) -> Vec<StreamEvent> {
+        let mut events = vec![StreamEvent::ToolUseStart {
+            id: id.to_string(),
+            name: name.to_string(),
+        }];
+        if let Some(sig) = signature {
+            events.push(StreamEvent::ToolUseSignature(sig.to_string()));
+        }
+        events.push(StreamEvent::ToolUseDelta("{}".to_string()));
+        events.push(StreamEvent::ToolUseDone);
+        events
+    }
+
+    fn tool_use_signatures(messages: &[Message]) -> Vec<(String, Option<String>)> {
+        messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, signature, .. } => {
+                    Some((id.clone(), signature.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn signed_turn(
+        calls: Vec<Vec<StreamEvent>>,
+        leading: Vec<StreamEvent>,
+    ) -> Vec<Result<StreamEvent>> {
+        leading
+            .into_iter()
+            .chain(calls.into_iter().flatten())
+            .chain(std::iter::once(StreamEvent::Done))
+            .map(Ok)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn tool_use_signature_is_stored_in_history_and_persisted() {
+        let backend = SequencedBackend::new(vec![
+            signed_turn(vec![signed_tool_call("t1", "echo", Some("sig-1"))], vec![]),
+            text_response("done"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("go".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+
+        let expected = vec![("t1".to_string(), Some("sig-1".to_string()))];
+        assert_eq!(tool_use_signatures(&agent.history()), expected);
+        assert_eq!(
+            tool_use_signatures(&agent.session_history().await.expect("session history")),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_keep_per_call_signatures_in_order() {
+        let backend = SequencedBackend::new(vec![
+            signed_turn(
+                vec![
+                    signed_tool_call("t1", "echo", Some("sig-first")),
+                    signed_tool_call("t2", "echo", None),
+                ],
+                vec![],
+            ),
+            text_response("done"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("go".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+
+        let expected = vec![
+            ("t1".to_string(), Some("sig-first".to_string())),
+            ("t2".to_string(), None),
+        ];
+        assert_eq!(
+            tool_use_signatures(&agent.session_history().await.expect("session history")),
+            expected
+        );
+        assert_eq!(tool_use_signatures(&agent.history()), expected);
+    }
+
+    #[tokio::test]
+    async fn tool_use_signature_survives_session_reload_into_next_request() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir_path = dir.keep();
+        let session = Session::new(None, dir_path.clone()).await.expect("session");
+        let session_id = session.id.clone();
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Box::new(EchoTool::new("echo", "ok")))
+            .expect("register tool");
+        let tool_config = ToolsConfig {
+            confirmation: ConfirmationMode::Never,
+            ..Default::default()
+        };
+        let first = Agent::new(
+            Box::new(SequencedBackend::new(vec![
+                signed_turn(vec![signed_tool_call("t1", "echo", Some("sig-1"))], vec![]),
+                text_response("done"),
+            ])),
+            config.clone(),
+            Arc::new(TokioMutex::new(session)),
+        )
+        .await
+        .with_tools(registry)
+        .with_tool_config(&tool_config);
+        let stream = first
+            .send("go".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+
+        let captured = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let second = Agent::new(
+            Box::new(CapturingBackend {
+                captured: Arc::clone(&captured),
+                events: ok_events(text_response("again")),
+            }),
+            config,
+            test_session_arc().await,
+        )
+        .await;
+        let reloaded = Session::new(Some(session_id), dir_path)
+            .await
+            .expect("reopen session");
+        second.load_session(reloaded).await;
+
+        let stream = second
+            .send("next".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+
+        let messages = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            tool_use_signatures(&messages),
+            vec![("t1".to_string(), Some("sig-1".to_string()))],
+            "reloaded ToolUse must carry its signature into the next backend request"
+        );
+    }
+
+    #[tokio::test]
+    async fn stray_tool_use_signature_is_ignored_and_not_inherited() {
+        let backend = SequencedBackend::new(vec![
+            signed_turn(
+                vec![signed_tool_call("t1", "echo", None)],
+                vec![StreamEvent::ToolUseSignature("stray".to_string())],
+            ),
+            text_response("done"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await;
+
+        let stream = agent
+            .send("go".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "turn should complete; got {events:?}"
+        );
+        assert_eq!(
+            tool_use_signatures(&agent.session_history().await.expect("session history")),
+            vec![("t1".to_string(), None)]
         );
     }
 }

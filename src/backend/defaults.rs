@@ -8,6 +8,10 @@
 /// Vertex AI — used when `[vertex].max_tokens` is absent.
 pub const VERTEX: u32 = 8_192;
 
+/// Vertex AI Gemini — `maxOutputTokens` includes thought tokens, so it needs
+/// far more headroom than Claude.
+pub const VERTEX_GEMINI: u32 = 65_536;
+
 /// z.ai — no config override field; always 8192.
 pub const ZAI: u32 = 8_192;
 

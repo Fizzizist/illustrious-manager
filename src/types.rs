@@ -78,6 +78,8 @@ pub enum ContentBlock {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Opaque provider signature (Gemini `thoughtSignature`) that must be echoed back.
+        signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -100,7 +102,7 @@ impl ContentBlock {
     }
 }
 
-/// Helper for serializing `ContentBlock::Image` in the Anthropic wire format:
+/// Helper for serializing `ContentBlock::Image` in the session storage format:
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ImageSource {
     #[serde(rename = "type")]
@@ -136,13 +138,22 @@ impl Serialize for ContentBlock {
                 )?;
                 map.end()
             }
-            ContentBlock::ToolUse { id, name, input } => {
+            ContentBlock::ToolUse {
+                id,
+                name,
+                input,
+                signature,
+            } => {
                 use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(4))?;
+                let mut map =
+                    serializer.serialize_map(Some(4 + usize::from(signature.is_some())))?;
                 map.serialize_entry("type", "tool_use")?;
                 map.serialize_entry("id", id)?;
                 map.serialize_entry("name", name)?;
                 map.serialize_entry("input", input)?;
+                if let Some(signature) = signature {
+                    map.serialize_entry("signature", signature)?;
+                }
                 map.end()
             }
             ContentBlock::ToolResult {
@@ -237,7 +248,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                 let mut content: Option<ToolResultContent> = None;
                 let mut is_error = None;
                 let mut text = None;
-                let mut signature = None;
+                let mut signature: Option<String> = None;
                 let mut data = None;
                 let mut image_source: Option<ImageSource> = None;
 
@@ -301,6 +312,7 @@ impl<'de> Deserialize<'de> for ContentBlock {
                         id: id.ok_or_else(|| de::Error::missing_field("id"))?,
                         name: name.ok_or_else(|| de::Error::missing_field("name"))?,
                         input: input.ok_or_else(|| de::Error::missing_field("input"))?,
+                        signature,
                     }),
                     Some("tool_result") => Ok(ContentBlock::ToolResult {
                         tool_use_id: tool_use_id
@@ -389,6 +401,8 @@ pub enum StreamEvent {
         id: String,
         name: String,
     },
+    /// Signature for the most recent tool use, emitted right after `ToolUseStart`.
+    ToolUseSignature(String),
     ToolUseDelta(String),
     ToolUseDone,
     /// Token usage and stop reason reported by the backend at the end of a response.
@@ -581,12 +595,14 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: input.clone(),
+            signature: None,
         };
         assert!(matches!(block, ContentBlock::ToolUse { .. }));
         if let ContentBlock::ToolUse {
             id,
             name,
             input: block_input,
+            ..
         } = block
         {
             assert_eq!(id, "tool-123");
@@ -652,6 +668,7 @@ mod tests {
             id: "tool-123".to_string(),
             name: "bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
+            signature: None,
         };
         let json = serde_json::to_string(&block).expect("ContentBlock should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should parse JSON");
@@ -729,6 +746,7 @@ mod tests {
                     id: "tool-1".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
+                    signature: None,
                 },
             ],
             created_at: 0.0,
@@ -844,6 +862,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tool_use_signature_roundtrips_through_serde() {
+        let original = ContentBlock::ToolUse {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls"}),
+            signature: Some("CiQB+/sig==".to_string()),
+        };
+        let value = serde_json::to_value(&original).expect("serialize");
+        assert_eq!(value["signature"], "CiQB+/sig==");
+        let deserialized: ContentBlock = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn tool_use_without_signature_keeps_legacy_json_shape() {
+        let unsigned = ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({}),
+            signature: None,
+        };
+        let value = serde_json::to_value(&unsigned).expect("serialize");
+        assert!(
+            value.get("signature").is_none(),
+            "unsigned tool_use must not carry a signature key; got {value}"
+        );
+
+        let legacy = r#"{"type":"tool_use","id":"t1","name":"bash","input":{}}"#;
+        let signed = r#"{"type":"tool_use","id":"t2","name":"bash","input":{},"signature":"s"}"#;
+        let legacy_block: ContentBlock = serde_json::from_str(legacy).expect("legacy");
+        let signed_block: ContentBlock = serde_json::from_str(signed).expect("signed");
+        assert!(matches!(
+            legacy_block,
+            ContentBlock::ToolUse {
+                signature: None,
+                ..
+            }
+        ));
+        assert!(
+            matches!(signed_block, ContentBlock::ToolUse { signature: Some(ref s), .. } if s == "s")
+        );
+    }
+
     // ── Thinking types ────────────────────────────────────────────────────
 
     #[test]
@@ -868,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_serializes_to_anthropic_format() {
+    fn thinking_serializes_to_storage_format() {
         let block = ContentBlock::Thinking {
             text: "reasoning text".to_string(),
             signature: "sig123".to_string(),
@@ -881,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_serializes_to_anthropic_format() {
+    fn redacted_thinking_serializes_to_storage_format() {
         let block = ContentBlock::RedactedThinking {
             data: "encrypted".to_string(),
         };
@@ -892,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_deserializes_from_anthropic_json() {
+    fn thinking_deserializes_from_storage_json() {
         let json = r#"{"type":"thinking","thinking":"reasoning text","signature":"sig123"}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {
@@ -905,7 +967,7 @@ mod tests {
     }
 
     #[test]
-    fn redacted_thinking_deserializes_from_anthropic_json() {
+    fn redacted_thinking_deserializes_from_storage_json() {
         let json = r#"{"type":"redacted_thinking","data":"encrypted"}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {
@@ -1028,7 +1090,7 @@ mod tests {
     }
 
     #[test]
-    fn image_serializes_to_anthropic_format() {
+    fn image_serializes_to_storage_format() {
         let block = ContentBlock::Image {
             media_type: "image/jpeg".to_string(),
             data: "/9j/4AAQ".to_string(),
@@ -1042,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn image_deserializes_from_anthropic_json() {
+    fn image_deserializes_from_storage_json() {
         let json = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}"#;
         let block: ContentBlock = serde_json::from_str(json).expect("deserialize");
         match block {

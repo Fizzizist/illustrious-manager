@@ -10,6 +10,7 @@ pub mod anthropic;
 pub mod anthropic_compat;
 pub mod defaults;
 pub mod error;
+pub mod gemini_compat;
 pub mod ndjson;
 pub mod ollama;
 pub mod openai_compat;
@@ -187,13 +188,18 @@ impl BackendFactory {
                     .get_or_init(project.clone(), region.clone())
                     .await?;
                 let backend = vertex::VertexBackend::with_auth(project, region, auth)?;
+                let default_max_tokens = if vertex::is_gemini_model(&resolved.model) {
+                    defaults::VERTEX_GEMINI
+                } else {
+                    defaults::VERTEX
+                };
                 Ok(BackendSelection {
                     backend: Box::new(RetryingBackend::new(
                         Box::new(backend),
                         self.config.retry.clone(),
                     )),
                     model: resolved.model,
-                    max_tokens: self.config.vertex.max_tokens.unwrap_or(defaults::VERTEX),
+                    max_tokens: self.config.vertex.max_tokens.unwrap_or(default_max_tokens),
                 })
             }
             "zai" => {
@@ -1285,6 +1291,62 @@ mod tests {
             selection.max_tokens, 32768,
             "config override should take precedence over the vertex default"
         );
+    }
+
+    #[tokio::test]
+    async fn for_role_resolves_gemini_vertex_max_tokens_unless_overridden() {
+        use crate::config::{AppConfig, ModelRole, RetryConfig, ToolsConfig, VertexConfig};
+        use std::collections::BTreeMap;
+
+        let config_with = |max_tokens: Option<u32>| {
+            let mut models = BTreeMap::new();
+            models.insert(
+                "gemini".to_string(),
+                ModelRole {
+                    backend: "vertex".to_string(),
+                    model: "gemini-3-flash-preview".to_string(),
+                },
+            );
+            AppConfig {
+                backend: "vertex".to_string(),
+                vertex: VertexConfig {
+                    max_tokens,
+                    project: "proj".to_string(),
+                    region: "global".to_string(),
+                    model: "claude-sonnet-4-20250514".to_string(),
+                },
+                zai: None,
+                ollama: None,
+                openai_compat: None,
+                opencode_go: None,
+                anthropic: None,
+                tools: ToolsConfig::default(),
+                sessions_dir: std::env::temp_dir(),
+                models,
+                thinking: None,
+                compaction: CompactionConfig::default(),
+                retry: RetryConfig::default(),
+            }
+        };
+
+        for (override_tokens, expected) in
+            [(None, super::defaults::VERTEX_GEMINI), (Some(4096), 4096)]
+        {
+            let factory = super::BackendFactory::new(config_with(override_tokens));
+            let fake_provider: Arc<dyn gcp_auth::TokenProvider> = Arc::new(FakeTokenProvider);
+            factory
+                .vertex_auth_cache
+                .seed("proj", "global", fake_provider);
+            let selection = factory
+                .for_role("gemini")
+                .await
+                .expect("for_role should succeed");
+            assert_eq!(
+                selection.max_tokens, expected,
+                "override={override_tokens:?}"
+            );
+        }
+        assert_eq!(super::defaults::VERTEX_GEMINI, 65_536);
     }
 
     #[tokio::test]

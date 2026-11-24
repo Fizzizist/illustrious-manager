@@ -403,7 +403,9 @@ impl OpenAiCompatBackend {
                         for block in &m.content {
                             match block {
                                 ContentBlock::Text(text) => text_parts.push(text.clone()),
-                                ContentBlock::ToolUse { id, name, input } => {
+                                ContentBlock::ToolUse {
+                                    id, name, input, ..
+                                } => {
                                     let arguments = serde_json::to_string(input)
                                         .unwrap_or_else(|_| "{}".to_string());
                                     tool_calls.push(serde_json::json!({
@@ -663,6 +665,7 @@ mod tests {
                 id: "tool_0".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                signature: None,
             }],
             created_at: 0.0,
         }];
@@ -693,6 +696,7 @@ mod tests {
                         id: id_a.to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "ls"}),
+                        signature: None,
                     }],
                     created_at: 0.0,
                 },
@@ -702,6 +706,7 @@ mod tests {
                         id: id_b.to_string(),
                         name: "bash".to_string(),
                         input: serde_json::json!({"command": "cat"}),
+                        signature: None,
                     }],
                     created_at: 0.0,
                 },

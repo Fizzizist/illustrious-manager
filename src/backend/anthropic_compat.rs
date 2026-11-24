@@ -225,7 +225,11 @@ impl AnthropicCompatBackend {
             .iter()
             .filter_map(|m| {
                 let mut warnings = Vec::new();
-                let content = filter_content_blocks(&m.content, &mut warnings);
+                let content: Vec<serde_json::Value> =
+                    filter_content_blocks(&m.content, &mut warnings)
+                        .into_iter()
+                        .map(wire_block)
+                        .collect();
                 for w in warnings {
                     crate::logging::log_warn(&w);
                 }
@@ -441,6 +445,45 @@ fn filter_content_blocks<'a>(
             true
         })
         .collect()
+}
+
+/// Anthropic wire representation of a block. Independent of the storage serde
+/// format so provider-specific storage fields never leak onto the wire.
+fn wire_block(block: &crate::types::ContentBlock) -> serde_json::Value {
+    use crate::types::ContentBlock;
+    match block {
+        ContentBlock::Text(text) => serde_json::json!({"type": "text", "text": text}),
+        ContentBlock::Image { media_type, data } => serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        }),
+        ContentBlock::ToolUse {
+            id, name, input, ..
+        } => serde_json::json!({
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": input,
+        }),
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content.iter().map(wire_block).collect::<Vec<_>>(),
+            "is_error": is_error,
+        }),
+        ContentBlock::Thinking { text, signature } => serde_json::json!({
+            "type": "thinking",
+            "thinking": text,
+            "signature": signature,
+        }),
+        ContentBlock::RedactedThinking { data } => {
+            serde_json::json!({"type": "redacted_thinking", "data": data})
+        }
+    }
 }
 
 /// Convenience wrapper for single-event parsing without state.
@@ -985,6 +1028,92 @@ mod tests {
             "empty-signature thinking block must be dropped"
         );
         assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn build_request_body_emits_exact_anthropic_wire_format_for_every_block() {
+        use crate::types::{ContentBlock, Role};
+
+        let backend = test_backend();
+        let messages = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "reasoning".to_string(),
+                        signature: "thinking-sig".to_string(),
+                    },
+                    ContentBlock::RedactedThinking {
+                        data: "opaque".to_string(),
+                    },
+                    ContentBlock::Text("running".to_string()),
+                    ContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "image_viewer".to_string(),
+                        input: serde_json::json!({"path": "x.png"}),
+                        signature: Some("tool-use-sig".to_string()),
+                    },
+                ],
+                created_at: 0.0,
+            },
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: vec![
+                            ContentBlock::Image {
+                                media_type: "image/png".to_string(),
+                                data: "QUJD".to_string(),
+                            },
+                            ContentBlock::Text("x.png".to_string()),
+                        ],
+                        is_error: true,
+                    },
+                    ContentBlock::Text("next".to_string()),
+                ],
+                created_at: 0.0,
+            },
+        ];
+        let config = RequestConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 8192,
+            ..Default::default()
+        };
+        let body = backend
+            .build_request_body(&messages, &config)
+            .expect("build");
+        assert_eq!(
+            body["messages"],
+            serde_json::json!([
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "reasoning", "signature": "thinking-sig"},
+                        {"type": "redacted_thinking", "data": "opaque"},
+                        {"type": "text", "text": "running"},
+                        {"type": "tool_use", "id": "call_1", "name": "image_viewer", "input": {"path": "x.png"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_1",
+                            "content": [
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+                                {"type": "text", "text": "x.png"},
+                            ],
+                            "is_error": true,
+                        },
+                        {"type": "text", "text": "next"},
+                    ],
+                },
+            ]),
+            "the wire body is owned by anthropic_compat and must not follow the storage format; \
+             a ToolUse signature is not part of the Anthropic protocol"
+        );
     }
 
     #[test]

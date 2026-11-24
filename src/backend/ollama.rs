@@ -247,7 +247,9 @@ impl OllamaBackend {
                         for block in &m.content {
                             match block {
                                 ContentBlock::Text(text) => text_parts.push(text.clone()),
-                                ContentBlock::ToolUse { id, name, input } => {
+                                ContentBlock::ToolUse {
+                                    id, name, input, ..
+                                } => {
                                     tool_calls.push(serde_json::json!({
                                         "id": id,
                                         "type": "function",
@@ -669,6 +671,7 @@ mod tests {
                 id: "tool_0".to_string(),
                 name: "bash".to_string(),
                 input: serde_json::json!({"command": "ls"}),
+                signature: None,
             }],
             created_at: 0.0,
         }];
@@ -748,6 +751,7 @@ mod tests {
                     id: "tool_0".to_string(),
                     name: "bash".to_string(),
                     input: serde_json::json!({"command": "ls"}),
+                    signature: None,
                 }],
                 created_at: 0.0,
             },
