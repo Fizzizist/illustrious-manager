@@ -8177,4 +8177,84 @@ mod tests {
             vec![("t1".to_string(), None)]
         );
     }
+
+    #[tokio::test]
+    async fn send_persists_user_message_with_current_timestamp() {
+        let backend = SequencedBackend::new(vec![text_response("hello back")]);
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let before = now_timestamp();
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+        let after = now_timestamp();
+
+        let persisted = agent.session_history().await.expect("session history");
+        let user_msg = persisted
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::Text(t) if t == "hello"))
+            })
+            .expect("persisted user message should exist");
+        assert!(
+            user_msg.created_at > 0.0,
+            "expected positive created_at for persisted user message, got {}",
+            user_msg.created_at
+        );
+        assert!(
+            before <= user_msg.created_at && user_msg.created_at <= after,
+            "expected persisted user created_at {} within [{}, {}]",
+            user_msg.created_at,
+            before,
+            after
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_error_persists_error_message_with_current_timestamp() {
+        let backend = FailingBackend {
+            error_message: "backend exploded".to_string(),
+        };
+        let agent = agent_with_mode(backend, None, ConfirmationMode::Never).await;
+
+        let before = now_timestamp();
+        let stream = agent
+            .send("hello".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        collect_events(stream).await;
+        let after = now_timestamp();
+
+        let persisted = agent.session_history().await.expect("session history");
+        let error_msg = persisted
+            .iter()
+            .find(|m| {
+                m.role == Role::User
+                    && m.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            ContentBlock::Text(t)
+                                if t.starts_with("[ERROR]") && t.contains("backend exploded")
+                        )
+                    })
+            })
+            .expect("persisted [ERROR] message should exist");
+        assert!(
+            error_msg.created_at > 0.0,
+            "expected positive created_at for persisted [ERROR] message, got {}",
+            error_msg.created_at
+        );
+        assert!(
+            before <= error_msg.created_at && error_msg.created_at <= after,
+            "expected persisted [ERROR] created_at {} within [{}, {}]",
+            error_msg.created_at,
+            before,
+            after
+        );
+    }
 }
