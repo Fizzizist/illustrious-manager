@@ -368,7 +368,7 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text(content)],
-            created_at: default_created_at(),
+            created_at: crate::timestamp::now_timestamp(),
         }
     }
 
