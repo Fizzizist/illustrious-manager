@@ -730,4 +730,91 @@ mod tests {
             "conflict error should mention --model: {err}"
         );
     }
+
+    #[test]
+    fn continue_flag_parses_and_defaults_to_false() {
+        let cli = Cli::try_parse_from(["illustrious-manager"]).expect("parse default args");
+        assert!(!cli.r#continue);
+
+        let cli =
+            Cli::try_parse_from(["illustrious-manager", "--continue"]).expect("parse --continue");
+        assert!(cli.r#continue);
+    }
+
+    #[test]
+    fn continue_flag_conflicts_with_session_id() {
+        let err = Cli::try_parse_from([
+            "illustrious-manager",
+            "--continue",
+            "--session-id",
+            "01923456-7890-7abc-def0-123456789abc",
+        ])
+        .err()
+        .expect("--continue and --session-id must conflict");
+        let err = err.to_string();
+        assert!(
+            err.contains("--continue"),
+            "conflict error should mention --continue: {err}"
+        );
+        assert!(
+            err.contains("--session-id"),
+            "conflict error should mention --session-id: {err}"
+        );
+    }
+
+    #[test]
+    fn continue_flag_allowed_with_single_shot() {
+        let cli = Cli::try_parse_from(["illustrious-manager", "--continue", "--single-shot", "hi"])
+            .expect("parse --continue --single-shot");
+        assert!(cli.r#continue);
+        match determine_mode(&cli).expect("determine_mode") {
+            Mode::SingleShot { prompt, .. } => assert_eq!(prompt, "hi"),
+            Mode::Repl { .. } => panic!("Expected SingleShot mode"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_last_session_skips_write_when_deleted_and_preserves_prior() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let sid = session::last::current_terminal_session_id().expect("unix sid");
+        let prior = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("prior session");
+        session::last::write_last_session(dir.path(), sid, &prior.id).expect("write prior");
+
+        let dead_path = dir.path().join(".last").join(u32::MAX.to_string());
+        std::fs::write(&dead_path, "dead-session").expect("seed dead file");
+
+        let deleted_id = uuid::Uuid::now_v7().to_string();
+        finalize_last_session(dir.path(), &deleted_id, true);
+
+        assert_eq!(
+            session::last::resolve_last_session(dir.path(), sid).expect("resolve prior"),
+            prior.id
+        );
+        assert!(!dead_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finalize_last_session_writes_pointer_when_kept_and_prunes_dead() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let sid = session::last::current_terminal_session_id().expect("unix sid");
+        let last_dir = dir.path().join(".last");
+        std::fs::create_dir_all(&last_dir).expect("create .last dir");
+        let dead_path = last_dir.join(u32::MAX.to_string());
+        std::fs::write(&dead_path, "dead-session").expect("seed dead file");
+
+        let session = Session::new(None, dir.path().to_path_buf())
+            .await
+            .expect("session");
+        finalize_last_session(dir.path(), &session.id, false);
+
+        assert_eq!(
+            session::last::resolve_last_session(dir.path(), sid).expect("resolve active"),
+            session.id
+        );
+        assert!(!dead_path.exists());
+    }
 }

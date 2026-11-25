@@ -1,4 +1,5 @@
 pub mod conversation;
+pub mod last;
 pub mod task;
 
 use anyhow::{Context, Result};

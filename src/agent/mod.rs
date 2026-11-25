@@ -2629,7 +2629,11 @@ mod tests {
         )
         .await;
 
-        agent.cleanup_empty_session().await.expect("cleanup");
+        let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(
+            deleted,
+            "cleanup_empty_session should return true when empty DB is deleted"
+        );
         assert!(!db_path.exists());
     }
 
@@ -2658,7 +2662,11 @@ mod tests {
         )
         .await;
 
-        agent.cleanup_empty_session().await.expect("cleanup");
+        let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(
+            !deleted,
+            "cleanup_empty_session should return false when non-empty DB is preserved"
+        );
         assert!(db_path.exists());
     }
 
