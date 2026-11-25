@@ -647,20 +647,4 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].created_at, 1704348000.0);
     }
-
-    #[tokio::test]
-    async fn created_at_defaults_to_zero_when_absent() {
-        let (_dir, session) = create_test_session().await;
-
-        let msg = Message::text(Role::User, "default timestamp".to_string());
-        assert_eq!(msg.created_at, 0.0);
-        session
-            .conversation()
-            .insert_message(&msg)
-            .await
-            .expect("insert");
-
-        let history = session.conversation().load_history().await.expect("load");
-        assert_eq!(history[0].created_at, 0.0);
-    }
 }

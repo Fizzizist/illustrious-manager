@@ -368,7 +368,7 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text(content)],
-            created_at: default_created_at(),
+            created_at: crate::timestamp::now_timestamp(),
         }
     }
 
@@ -706,9 +706,22 @@ mod tests {
     }
 
     #[test]
-    fn message_text_defaults_created_at_to_zero() {
+    fn message_text_stamps_current_timestamp() {
+        let before = crate::timestamp::now_timestamp();
         let msg = Message::text(Role::User, "Hello".to_string());
-        assert_eq!(msg.created_at, 0.0);
+        let after = crate::timestamp::now_timestamp();
+        assert!(
+            msg.created_at > 0.0,
+            "expected positive created_at, got {}",
+            msg.created_at
+        );
+        assert!(
+            before <= msg.created_at && msg.created_at <= after,
+            "expected created_at {} within [{}, {}]",
+            msg.created_at,
+            before,
+            after
+        );
     }
 
     #[test]
