@@ -95,6 +95,22 @@ impl GeminiCompatBackend {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnKind {
+    Model,
+    FunctionResponse,
+    User,
+}
+
+impl TurnKind {
+    fn role(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::FunctionResponse | Self::User => "user",
+        }
+    }
+}
+
 fn build_contents(messages: &[Message]) -> Vec<Value> {
     let tool_names: HashMap<&str, &str> = messages
         .iter()
@@ -105,29 +121,27 @@ fn build_contents(messages: &[Message]) -> Vec<Value> {
         })
         .collect();
 
-    let mut contents: Vec<(&'static str, Vec<Value>)> = Vec::new();
+    let mut contents: Vec<(TurnKind, Vec<Value>)> = Vec::new();
     for message in messages {
-        let role = match message.role {
-            Role::User => "user",
-            Role::Assistant => "model",
-        };
-        let parts = build_parts(&message.content, &tool_names);
-        if parts.is_empty() {
-            continue;
-        }
-        match contents.last_mut() {
-            Some((last_role, last_parts)) if *last_role == role => last_parts.extend(parts),
-            _ => contents.push((role, parts)),
+        for (kind, part) in build_parts(&message.role, &message.content, &tool_names) {
+            match contents.last_mut() {
+                Some((last_kind, last_parts)) if *last_kind == kind => last_parts.push(part),
+                _ => contents.push((kind, vec![part])),
+            }
         }
     }
 
     contents
         .into_iter()
-        .map(|(role, parts)| json!({ "role": role, "parts": parts }))
+        .map(|(kind, parts)| json!({ "role": kind.role(), "parts": parts }))
         .collect()
 }
 
-fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec<Value> {
+fn build_parts(
+    role: &Role,
+    blocks: &[ContentBlock],
+    tool_names: &HashMap<&str, &str>,
+) -> Vec<(TurnKind, Value)> {
     let step_has_signature = blocks.iter().any(|block| {
         matches!(
             block,
@@ -139,11 +153,18 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
     });
     let mut needs_skip_signature = !step_has_signature;
 
+    let default_kind = match role {
+        Role::User => TurnKind::User,
+        Role::Assistant => TurnKind::Model,
+    };
+
     let mut parts = Vec::new();
     for block in blocks {
         match block {
-            ContentBlock::Text(text) => parts.push(json!({ "text": text })),
-            ContentBlock::Image { media_type, data } => parts.push(inline_data(media_type, data)),
+            ContentBlock::Text(text) => parts.push((default_kind, json!({ "text": text }))),
+            ContentBlock::Image { media_type, data } => {
+                parts.push((default_kind, inline_data(media_type, data)));
+            }
             ContentBlock::ToolUse {
                 id,
                 name,
@@ -162,7 +183,7 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
                     part["thoughtSignature"] = json!(SKIP_THOUGHT_SIGNATURE);
                 }
                 needs_skip_signature = false;
-                parts.push(part);
+                parts.push((TurnKind::Model, part));
             }
             ContentBlock::ToolResult {
                 tool_use_id,
@@ -173,12 +194,48 @@ fn build_parts(blocks: &[ContentBlock], tool_names: &HashMap<&str, &str>) -> Vec
                     .get(tool_use_id.as_str())
                     .copied()
                     .unwrap_or("unknown");
-                parts.push(function_response(name, tool_use_id, content, *is_error));
+                parts.push((
+                    TurnKind::FunctionResponse,
+                    function_response(name, tool_use_id, content, *is_error),
+                ));
             }
             ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
         }
     }
     parts
+}
+
+fn part_kind(part: &Value) -> &'static str {
+    if part.get("functionCall").is_some() {
+        "functionCall"
+    } else if part.get("functionResponse").is_some() {
+        "functionResponse"
+    } else if part.get("inlineData").is_some() {
+        "inlineData"
+    } else if part.get("text").is_some() {
+        "text"
+    } else {
+        "other"
+    }
+}
+
+fn contents_structure_summary(contents: &[Value]) -> String {
+    contents
+        .iter()
+        .enumerate()
+        .map(|(idx, turn)| {
+            let role = turn["role"].as_str().unwrap_or("unknown");
+            let parts = turn["parts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(part_kind)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{idx}:{role}[{parts}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn inline_data(media_type: &str, data: &str) -> Value {
@@ -231,6 +288,17 @@ impl LlmBackend for GeminiCompatBackend {
 
         if !response.status().is_success() {
             let status = response.status();
+            if status.is_client_error() {
+                let summary = body["contents"]
+                    .as_array()
+                    .map(|c| contents_structure_summary(c))
+                    .unwrap_or_default();
+                crate::logging::log_warn(&format!(
+                    "Gemini HTTP {}: contents=[{}]",
+                    status.as_u16(),
+                    summary
+                ));
+            }
             let body = response
                 .text()
                 .await
@@ -712,6 +780,348 @@ mod tests {
                 "parts": [{"inlineData": {"mimeType": "image/png", "data": "QUJD"}}],
             })
         );
+    }
+
+    #[test]
+    fn tool_result_followed_by_user_text_stays_separate_turns() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![tool_use("a", "bash", json!({"command": "ls"}), Some("SIG"))],
+                ),
+                msg(
+                    Role::User,
+                    vec![tool_result(
+                        "a",
+                        vec![text("Tool cancelled by user.")],
+                        true,
+                    )],
+                ),
+                msg(Role::User, vec![text("oh wait")]),
+                msg(Role::User, vec![text("also check this")]),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "bash", "args": {"command": "ls"}, "id": "a"},
+                        "thoughtSignature": "SIG",
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": "bash",
+                            "id": "a",
+                            "response": {"error": "Tool cancelled by user."},
+                        },
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": "oh wait"}, {"text": "also check this"}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_result_followed_by_thinking_only_model_and_user_text_stays_separate() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![tool_use("a", "bash", json!({}), Some("SIG"))],
+                ),
+                msg(Role::User, vec![tool_result("a", vec![text("ok")], false)]),
+                msg(
+                    Role::Assistant,
+                    vec![ContentBlock::Thinking {
+                        text: "thinking before cancel".to_string(),
+                        signature: "thought-sig".to_string(),
+                    }],
+                ),
+                msg(Role::User, vec![text("never mind")]),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "bash", "args": {}, "id": "a"},
+                        "thoughtSignature": "SIG",
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {"name": "bash", "id": "a", "response": {"output": "ok"}},
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": "never mind"}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_result_followed_by_user_image_stays_separate_turns() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![tool_use("a", "bash", json!({}), Some("SIG"))],
+                ),
+                msg(Role::User, vec![tool_result("a", vec![text("ok")], false)]),
+                msg(
+                    Role::User,
+                    vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "QUJD".to_string(),
+                    }],
+                ),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "bash", "args": {}, "id": "a"},
+                        "thoughtSignature": "SIG",
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {"name": "bash", "id": "a", "response": {"output": "ok"}},
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{"inlineData": {"mimeType": "image/png", "data": "QUJD"}}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn parallel_tool_results_across_adjacent_messages_merge_before_user_text() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![
+                        tool_use("a", "bash", json!({"command": "ls"}), Some("SIG_A")),
+                        tool_use("b", "search", json!({"query": "x"}), None),
+                    ],
+                ),
+                msg(
+                    Role::User,
+                    vec![tool_result("a", vec![text("out_a")], false)],
+                ),
+                msg(
+                    Role::User,
+                    vec![tool_result("b", vec![text("out_b")], false)],
+                ),
+                msg(Role::User, vec![text("follow up")]),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {"name": "bash", "args": {"command": "ls"}, "id": "a"},
+                            "thoughtSignature": "SIG_A",
+                        },
+                        {"functionCall": {"name": "search", "args": {"query": "x"}, "id": "b"}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"functionResponse": {"name": "bash", "id": "a", "response": {"output": "out_a"}}},
+                        {"functionResponse": {"name": "search", "id": "b", "response": {"output": "out_b"}}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": "follow up"}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn mixed_tool_result_and_text_in_single_user_message_split_into_separate_turns() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![tool_use("a", "bash", json!({}), Some("SIG"))],
+                ),
+                msg(
+                    Role::User,
+                    vec![
+                        tool_result("a", vec![text("cancelled")], true),
+                        text("wait a second"),
+                    ],
+                ),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "bash", "args": {}, "id": "a"},
+                        "thoughtSignature": "SIG",
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {"name": "bash", "id": "a", "response": {"error": "cancelled"}},
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{"text": "wait a second"}],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn poisoned_session_history_with_trailing_errors_recovers_clean_turns() {
+        let body = build(
+            &[
+                msg(
+                    Role::Assistant,
+                    vec![tool_use("a", "bash", json!({}), Some("SIG"))],
+                ),
+                msg(
+                    Role::User,
+                    vec![tool_result(
+                        "a",
+                        vec![text("Tool cancelled by user.")],
+                        true,
+                    )],
+                ),
+                msg(Role::User, vec![text("oh wait")]),
+                msg(Role::User, vec![text("[ERROR] HTTP 400: bad request")]),
+                msg(Role::User, vec![text("huh?")]),
+            ],
+            &request_config(),
+        );
+        assert_eq!(
+            body["contents"],
+            json!([
+                {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {"name": "bash", "args": {}, "id": "a"},
+                        "thoughtSignature": "SIG",
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "name": "bash",
+                            "id": "a",
+                            "response": {"error": "Tool cancelled by user."},
+                        },
+                    }],
+                },
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": "oh wait"},
+                        {"text": "[ERROR] HTTP 400: bad request"},
+                        {"text": "huh?"},
+                    ],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn contents_structure_summary_omits_user_payload_and_lists_roles_and_part_kinds() {
+        let contents = vec![
+            json!({
+                "role": "user",
+                "parts": [
+                    {"text": "SECRET_PROMPT_TEXT"},
+                    {"inlineData": {"mimeType": "image/png", "data": "SECRET_IMAGE_B64"}},
+                ],
+            }),
+            json!({
+                "role": "model",
+                "parts": [{
+                    "functionCall": {
+                        "name": "bash",
+                        "args": {"command": "SECRET_CMD"},
+                        "id": "call_1",
+                    },
+                    "thoughtSignature": "SECRET_SIG",
+                }],
+            }),
+            json!({
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {
+                        "name": "bash",
+                        "id": "call_1",
+                        "response": {"error": "SECRET_TOOL_OUTPUT"},
+                    },
+                }],
+            }),
+            json!({
+                "role": "user",
+                "parts": [{"text": "SECRET_FOLLOWUP"}],
+            }),
+        ];
+
+        let summary = contents_structure_summary(&contents);
+
+        assert_eq!(
+            summary,
+            "0:user[text,inlineData], 1:model[functionCall], 2:user[functionResponse], 3:user[text]"
+        );
+        for secret in [
+            "SECRET_PROMPT_TEXT",
+            "SECRET_IMAGE_B64",
+            "SECRET_CMD",
+            "SECRET_SIG",
+            "SECRET_TOOL_OUTPUT",
+            "SECRET_FOLLOWUP",
+            "bash",
+        ] {
+            assert!(
+                !summary.contains(secret),
+                "summary must not leak {secret:?}: {summary}"
+            );
+        }
     }
 
     #[test]
