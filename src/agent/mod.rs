@@ -442,8 +442,7 @@ impl Agent {
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
-            let mut max_token_retries_used = 0u32;
-            let mut bad_request_retries_used = 0u32;
+            let mut retries = ConsecutiveRetries::default();
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
@@ -473,8 +472,7 @@ impl Agent {
                             &e,
                             &error_msg,
                             "",
-                            &mut bad_request_retries_used,
-                            &mut max_token_retries_used,
+                            &mut retries,
                             max_token_retries,
                             &history_arc,
                             &session,
@@ -599,8 +597,7 @@ impl Agent {
                                 &e,
                                 &error_msg,
                                 &text_accumulated,
-                                &mut bad_request_retries_used,
-                                &mut max_token_retries_used,
+                                &mut retries,
                                 max_token_retries,
                                 &history_arc,
                                 &session,
@@ -619,9 +616,9 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     if text_accumulated.is_empty()
-                        && max_token_retries_used < max_token_retries
                         && ((config.max_tokens > 0 && last_output_tokens >= config.max_tokens)
                             || last_output_tokens == 0)
+                        && retries.try_record(RetryKind::MaxTokens, max_token_retries)
                     {
                         let error_msg =
                             if config.max_tokens > 0 && last_output_tokens >= config.max_tokens {
@@ -639,7 +636,6 @@ impl Agent {
                                     .to_string()
                             };
                         record_retry(&error_msg, &history_arc, &session, &event_tx).await;
-                        max_token_retries_used += 1;
                         iterations -= 1;
                         continue 'outer;
                     }
@@ -719,6 +715,8 @@ impl Agent {
                     &last_auto_compacted,
                     &event_tx,
                 );
+
+                retries.reset();
             }
         });
 
@@ -801,6 +799,41 @@ async fn record_error(
     inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Error).await;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetryKind {
+    MaxTokens,
+    BadRequest,
+}
+
+#[derive(Default)]
+struct ConsecutiveRetries {
+    kind: Option<RetryKind>,
+    count: u32,
+}
+
+impl ConsecutiveRetries {
+    fn try_record(&mut self, kind: RetryKind, limit: u32) -> bool {
+        if limit == 0 {
+            return false;
+        }
+        if self.kind == Some(kind) {
+            if self.count >= limit {
+                return false;
+            }
+            self.count += 1;
+        } else {
+            self.kind = Some(kind);
+            self.count = 1;
+        }
+        true
+    }
+
+    fn reset(&mut self) {
+        self.kind = None;
+        self.count = 0;
+    }
+}
+
 enum BackendErrorDisposition {
     RetryStrippingImages,
     Retry,
@@ -825,8 +858,7 @@ fn history_has_images(history: &[Message]) -> bool {
 fn backend_error_disposition(
     e: &anyhow::Error,
     history: &Arc<Mutex<Vec<Message>>>,
-    bad_request_retries_used: &mut u32,
-    max_token_retries_used: &mut u32,
+    retries: &mut ConsecutiveRetries,
     max_token_retries: u32,
 ) -> BackendErrorDisposition {
     let Some(be) = e.downcast_ref::<crate::backend::error::BackendError>() else {
@@ -836,14 +868,12 @@ fn backend_error_disposition(
         return BackendErrorDisposition::Cancelled;
     }
     if be.is_bad_request()
-        && *bad_request_retries_used < max_token_retries
         && history_has_images(&lock(history))
+        && retries.try_record(RetryKind::BadRequest, max_token_retries)
     {
-        *bad_request_retries_used += 1;
         return BackendErrorDisposition::RetryStrippingImages;
     }
-    if *max_token_retries_used < max_token_retries && be.is_max_tokens() {
-        *max_token_retries_used += 1;
+    if be.is_max_tokens() && retries.try_record(RetryKind::MaxTokens, max_token_retries) {
         return BackendErrorDisposition::Retry;
     }
     if be.is_refusal() {
@@ -858,21 +888,14 @@ async fn record_backend_error(
     e: &anyhow::Error,
     error_msg: &str,
     partial_text: &str,
-    bad_request_retries_used: &mut u32,
-    max_token_retries_used: &mut u32,
+    retries: &mut ConsecutiveRetries,
     max_token_retries: u32,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
     context_prefix_len: &Arc<Mutex<usize>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> bool {
-    match backend_error_disposition(
-        e,
-        history,
-        bad_request_retries_used,
-        max_token_retries_used,
-        max_token_retries,
-    ) {
+    match backend_error_disposition(e, history, retries, max_token_retries) {
         BackendErrorDisposition::RetryStrippingImages => {
             record_retry_stripping_images(
                 error_msg,
