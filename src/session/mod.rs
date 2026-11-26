@@ -1,8 +1,9 @@
 pub mod conversation;
+pub mod last;
 pub mod task;
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use turso::{Builder, Connection};
 
@@ -153,7 +154,7 @@ impl Session {
             None => generate_uuidv7(),
         };
 
-        let db_path = session_dir.join(format!("{}.db", sess_id));
+        let db_path = session_db_path(&session_dir, &sess_id);
         let db = Builder::new_local(db_path.to_string_lossy().as_ref())
             .build()
             .await
@@ -257,11 +258,15 @@ async fn migrate_created_at_column(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn session_db_path(session_dir: &Path, session_id: &str) -> PathBuf {
+    session_dir.join(format!("{session_id}.db"))
+}
+
 fn generate_uuidv7() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-fn validate_uuidv7(id: &str) -> Result<()> {
+pub fn validate_uuidv7(id: &str) -> Result<()> {
     let parsed = uuid::Uuid::parse_str(id).with_context(|| format!("Invalid UUID: '{id}'"))?;
     let version = parsed.get_version();
     match version {

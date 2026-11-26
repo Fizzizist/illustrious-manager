@@ -1,6 +1,6 @@
 [package]
 name = "illustrious-manager"
-version = "0.16.2"
+version = "0.17.0"
 edition = "2024"
 
 [[bin]]
@@ -53,4 +53,7 @@ uuid = { version = "1.23.0", features = ["v7"] }
 [dev-dependencies]
 insta = { version = "1.47.0", features = ["filters"] }
 tempfile = "3.27.0"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
 

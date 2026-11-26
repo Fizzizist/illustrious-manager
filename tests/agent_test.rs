@@ -183,7 +183,11 @@ async fn cleanup_empty_session_integration_deletes_db_on_exit_with_no_messages()
     )
     .await;
 
-    agent.cleanup_empty_session().await.expect("cleanup");
+    let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+    assert!(
+        deleted,
+        "cleanup_empty_session should return true when empty DB is deleted"
+    );
     assert!(!db_path.exists());
 }
 
@@ -213,7 +217,11 @@ async fn cleanup_empty_session_integration_retains_db_when_messages_exist() {
     )
     .await;
 
-    agent.cleanup_empty_session().await.expect("cleanup");
+    let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+    assert!(
+        !deleted,
+        "cleanup_empty_session should return false when non-empty DB is preserved"
+    );
     assert!(db_path.exists());
 }
 

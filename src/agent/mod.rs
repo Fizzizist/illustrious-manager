@@ -335,12 +335,14 @@ impl Agent {
     }
 
     /// If the current session has no messages, delete its DB file from disk.
-    pub async fn cleanup_empty_session(&self) -> Result<()> {
+    /// Returns `true` when the DB was deleted, `false` when preserved.
+    pub async fn cleanup_empty_session(&self) -> Result<bool> {
         let session = self.session.lock().await;
         if session.conversation().is_empty().await? {
             session.delete_db()?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Replace the current session with a new one and reload the conversation history.
@@ -2629,7 +2631,11 @@ mod tests {
         )
         .await;
 
-        agent.cleanup_empty_session().await.expect("cleanup");
+        let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(
+            deleted,
+            "cleanup_empty_session should return true when empty DB is deleted"
+        );
         assert!(!db_path.exists());
     }
 
@@ -2658,7 +2664,11 @@ mod tests {
         )
         .await;
 
-        agent.cleanup_empty_session().await.expect("cleanup");
+        let deleted = agent.cleanup_empty_session().await.expect("cleanup");
+        assert!(
+            !deleted,
+            "cleanup_empty_session should return false when non-empty DB is preserved"
+        );
         assert!(db_path.exists());
     }
 
