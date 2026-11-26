@@ -133,13 +133,18 @@ where
             continue;
         }
 
-        std::fs::remove_file(entry.path()).with_context(|| {
-            format!(
-                "Failed to remove stale last-session pointer {}",
-                entry.path().display()
-            )
-        })?;
-        removed += 1;
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Failed to remove stale last-session pointer {}",
+                        entry.path().display()
+                    )
+                });
+            }
+        }
     }
 
     Ok(removed)
