@@ -335,12 +335,14 @@ impl Agent {
     }
 
     /// If the current session has no messages, delete its DB file from disk.
-    pub async fn cleanup_empty_session(&self) -> Result<()> {
+    /// Returns `true` when the DB was deleted, `false` when preserved.
+    pub async fn cleanup_empty_session(&self) -> Result<bool> {
         let session = self.session.lock().await;
         if session.conversation().is_empty().await? {
             session.delete_db()?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Replace the current session with a new one and reload the conversation history.

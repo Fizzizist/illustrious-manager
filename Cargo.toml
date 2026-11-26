@@ -54,3 +54,6 @@ uuid = { version = "1.23.0", features = ["v7"] }
 insta = { version = "1.47.0", features = ["filters"] }
 tempfile = "3.27.0"
 
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+
