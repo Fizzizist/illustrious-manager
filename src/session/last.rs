@@ -283,6 +283,42 @@ mod tests {
         assert!(last_dir.join("3003").is_dir());
     }
 
+    #[test]
+    fn prune_ignores_not_found_from_concurrent_removal_and_continues() {
+        let dir = TempDir::new().expect("temp dir");
+        let last_dir = dir.path().join(".last");
+        std::fs::create_dir_all(&last_dir).expect("create .last dir");
+
+        std::fs::write(last_dir.join("1001"), "dead-1").expect("write 1001");
+        std::fs::write(last_dir.join("1002"), "dead-2").expect("write 1002");
+        std::fs::write(last_dir.join("1003"), "dead-3").expect("write 1003");
+        std::fs::write(last_dir.join("2001"), "alive").expect("write 2001");
+
+        let mut raced_first_dead = false;
+        let removed = prune_last_sessions_with(dir.path(), |sid| {
+            if sid == 2001 {
+                return true;
+            }
+            if !raced_first_dead {
+                raced_first_dead = true;
+                std::fs::remove_file(last_dir.join(sid.to_string()))
+                    .expect("simulate concurrent removal");
+            }
+            false
+        })
+        .expect("pruning should ignore NotFound when a stale entry disappears concurrently");
+
+        assert!(raced_first_dead, "expected at least one dead entry to race");
+        assert_eq!(
+            removed, 2,
+            "should count only entries removed by this prune call, not the concurrently removed one"
+        );
+        assert!(!last_dir.join("1001").exists());
+        assert!(!last_dir.join("1002").exists());
+        assert!(!last_dir.join("1003").exists());
+        assert!(last_dir.join("2001").exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_current_sid_is_positive_and_alive() {

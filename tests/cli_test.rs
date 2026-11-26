@@ -194,21 +194,22 @@ fn sse_reply_response(reply: &str) -> String {
 }
 
 #[cfg(unix)]
-fn read_http_request(stream: &mut std::net::TcpStream) {
+fn read_http_request(stream: &mut std::net::TcpStream) -> String {
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(10)))
         .expect("set read timeout");
     let mut received = Vec::new();
     let mut buf = [0u8; 4096];
+    let mut body_bounds = None;
     loop {
         let n = stream.read(&mut buf).expect("read request");
         if n == 0 {
             break;
         }
         received.extend_from_slice(&buf[..n]);
-        let text = String::from_utf8_lossy(&received);
-        if let Some(head_end) = text.find("\r\n\r\n") {
-            let content_length = text[..head_end]
+        if let Some(head_end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&received[..head_end]);
+            let content_length = headers
                 .lines()
                 .find_map(|line| {
                     line.to_ascii_lowercase()
@@ -216,10 +217,31 @@ fn read_http_request(stream: &mut std::net::TcpStream) {
                         .and_then(|v| v.trim().parse::<usize>().ok())
                 })
                 .unwrap_or(0);
-            if received.len() >= head_end + 4 + content_length {
+            let body_start = head_end + 4;
+            let body_end = body_start + content_length;
+            if received.len() >= body_end {
+                body_bounds = Some((body_start, body_end));
                 break;
             }
         }
+    }
+    let (body_start, body_end) = body_bounds.expect("complete HTTP request with header delimiter");
+    String::from_utf8(received[body_start..body_end].to_vec()).expect("UTF-8 HTTP request body")
+}
+
+#[cfg(unix)]
+fn json_message_contains(message: &serde_json::Value, expected_role: &str, needle: &str) -> bool {
+    if message.get("role").and_then(|v| v.as_str()) != Some(expected_role) {
+        return false;
+    }
+    match message.get("content") {
+        Some(serde_json::Value::String(text)) => text.contains(needle),
+        Some(serde_json::Value::Array(parts)) => parts.iter().any(|part| {
+            part.get("text")
+                .and_then(|v| v.as_str())
+                .is_some_and(|text| text.contains(needle))
+        }),
+        _ => false,
     }
 }
 
@@ -248,9 +270,11 @@ async fn single_shot_writes_last_and_continue_resumes_same_session() {
     let port = listener.local_addr().expect("local addr").port();
 
     let server_handle = std::thread::spawn(move || {
+        let mut request_bodies = Vec::new();
         for reply in ["First reply", "Second reply"] {
             let (mut stream, _) = listener.accept().expect("accept connection");
-            read_http_request(&mut stream);
+            let body = read_http_request(&mut stream);
+            request_bodies.push(body);
             let response = sse_reply_response(reply);
             stream
                 .write_all(response.as_bytes())
@@ -258,6 +282,7 @@ async fn single_shot_writes_last_and_continue_resumes_same_session() {
             stream.flush().expect("flush response");
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
+        request_bodies
     });
 
     let sandbox = Sandbox::with_openai_compat(port);
@@ -289,7 +314,35 @@ async fn single_shot_writes_last_and_continue_resumes_same_session() {
         session_id_1
     );
 
-    server_handle.join().expect("mock server thread");
+    let request_bodies = server_handle.join().expect("mock server thread");
+    assert_eq!(
+        request_bodies.len(),
+        2,
+        "expected 2 LLM requests, got {}",
+        request_bodies.len()
+    );
+    let second_request: serde_json::Value =
+        serde_json::from_str(&request_bodies[1]).expect("parse second request JSON");
+    let second_messages = second_request["messages"]
+        .as_array()
+        .expect("second request messages array");
+    assert!(
+        second_messages.len() >= 3,
+        "resumed request should include prior conversation turns and new prompt, got: {second_messages:?}"
+    );
+    let tail = &second_messages[second_messages.len() - 3..];
+    assert!(
+        json_message_contains(&tail[0], "user", "hello one"),
+        "resumed request should include prior user turn, got: {tail:?}"
+    );
+    assert!(
+        json_message_contains(&tail[1], "assistant", "First reply"),
+        "resumed request should include prior assistant reply, got: {tail:?}"
+    );
+    assert!(
+        json_message_contains(&tail[2], "user", "hello two"),
+        "resumed request should include new user prompt, got: {tail:?}"
+    );
 
     let session = illustrious_manager::session::Session::new(
         Some(session_id_1),
