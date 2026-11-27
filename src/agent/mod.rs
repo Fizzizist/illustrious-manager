@@ -61,6 +61,7 @@ pub struct Agent {
     /// version is still sent to the TUI via `AgentEvent::ToolResult`.
     max_tool_result_bytes: u64,
     chat_mode: ChatMode,
+    skill_names: Vec<String>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -99,6 +100,7 @@ impl Agent {
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
             max_tool_result_bytes: 65_536,
             chat_mode: ChatMode::default(),
+            skill_names: Vec::new(),
         }
     }
 
@@ -139,7 +141,7 @@ impl Agent {
     }
 
     pub fn with_skills(
-        self,
+        mut self,
         skills: &std::collections::HashMap<String, std::path::PathBuf>,
     ) -> Self {
         if skills.is_empty() {
@@ -148,6 +150,7 @@ impl Agent {
 
         let mut names: Vec<&str> = skills.keys().map(String::as_str).collect();
         names.sort();
+        self.skill_names = names.iter().map(|s| (*s).to_string()).collect();
 
         let mut content =
             String::from("The following skills are available via the `skill` tool:\n\n");
@@ -180,6 +183,10 @@ impl Agent {
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
+    }
+
+    pub fn skill_names(&self) -> &[String] {
+        &self.skill_names
     }
 
     pub fn model(&self) -> String {

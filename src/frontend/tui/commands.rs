@@ -74,6 +74,10 @@ impl CommandRegistry {
         self.commands.push(cmd);
     }
 
+    pub fn command_names(&self) -> Vec<&str> {
+        self.commands.iter().map(|c| c.name()).collect()
+    }
+
     /// Dispatch a user input string. Returns `Passthrough` for non-slash input
     /// and for unrecognised slash commands, so the caller can forward to the LLM.
     pub async fn dispatch(

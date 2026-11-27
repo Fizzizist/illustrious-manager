@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_buffer::{
     Viewport, Wrap,
     wrap::{segment_for_col, wrap_segments},
@@ -7,7 +7,7 @@ use hjkl_editor_tui::crossterm_key_event_to_input;
 use hjkl_engine::{Host, decode_planned_input};
 use hjkl_form::{TextFieldEditor, VimMode};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -40,6 +40,7 @@ pub struct InputArea {
     editor: TextFieldEditor,
     mode: AppMode,
     elapsed: Option<std::time::Duration>,
+    suggestion: Option<String>,
 }
 
 impl InputArea {
@@ -49,9 +50,30 @@ impl InputArea {
             editor,
             mode: AppMode::Editing,
             elapsed: None,
+            suggestion: None,
         };
         input.editor.enter_insert_at_end();
         input
+    }
+
+    pub fn set_suggestion(&mut self, suggestion: Option<String>) {
+        self.suggestion = suggestion.filter(|s| !s.is_empty());
+    }
+
+    pub fn suggestion(&self) -> Option<&str> {
+        self.suggestion.as_deref()
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        self.editor.cursor()
+    }
+
+    pub fn accept_suggestion(&mut self) -> bool {
+        let Some(suffix) = self.suggestion.take() else {
+            return false;
+        };
+        self.editor.editor.insert_str(&suffix);
+        true
     }
 
     pub fn input(&mut self, event: KeyEvent) -> bool {
@@ -60,9 +82,32 @@ impl InputArea {
             _ => return false,
         }
 
+        if event.code == KeyCode::Right
+            && event.modifiers == KeyModifiers::NONE
+            && self.editor.vim_mode() == VimMode::Insert
+            && self.suggestion.is_some()
+        {
+            return self.accept_suggestion();
+        }
+
+        let was_insert = self.editor.vim_mode() == VimMode::Insert;
         let planned = crossterm_key_event_to_input(event);
         if let Some(input) = decode_planned_input(planned) {
             self.editor.handle_input(input);
+            let is_insert = self.editor.vim_mode() == VimMode::Insert;
+            if !was_insert || !is_insert {
+                self.suggestion = None;
+            } else if let KeyCode::Char(c) = event.code
+                && (event.modifiers == KeyModifiers::NONE || event.modifiers == KeyModifiers::SHIFT)
+            {
+                self.suggestion = self
+                    .suggestion
+                    .take()
+                    .and_then(|s| s.strip_prefix(c).map(str::to_string))
+                    .filter(|s| !s.is_empty());
+            } else {
+                self.suggestion = None;
+            }
             return true;
         }
         false
@@ -77,24 +122,31 @@ impl InputArea {
     }
 
     pub fn set_text(&mut self, text: &str) {
+        self.suggestion = None;
         self.editor.set_text(text);
     }
 
     pub fn clear(&mut self) {
+        self.suggestion = None;
         self.editor.set_text("");
     }
 
     pub fn insert_paste(&mut self, text: &str) {
+        self.suggestion = None;
         // TextFieldEditor exposes no paste method; insert_str is the
         // engine's public insertion API and calls mark_content_dirty().
         self.editor.editor.insert_str(text);
     }
 
     pub fn set_mode(&mut self, mode: AppMode) {
+        if mode != AppMode::Editing {
+            self.suggestion = None;
+        }
         self.mode = mode;
     }
 
     pub fn reset_to_insert(&mut self) {
+        self.suggestion = None;
         self.editor.enter_insert_at_end();
     }
 
@@ -134,6 +186,13 @@ impl InputArea {
         }
     }
 
+    fn active_ghost(&self, disabled: bool) -> Option<&str> {
+        if disabled || self.mode != AppMode::Editing || self.editor.vim_mode() != VimMode::Insert {
+            return None;
+        }
+        self.suggestion.as_deref()
+    }
+
     fn text_height_for_width(&self, width: u16, max_height: u16) -> u16 {
         if width == 0 {
             return MIN_HEIGHT;
@@ -152,7 +211,25 @@ impl InputArea {
         if row_count == 0 {
             return MIN_HEIGHT;
         }
-        let screen_rows = buffer.screen_rows_between(&viewport, 0, row_count.saturating_sub(1));
+        let screen_rows = match self.active_ghost(false) {
+            Some(ghost) => {
+                let (cursor_row, cursor_col) = self.editor.cursor();
+                let text = self.editor.text();
+                let line_texts: Vec<&str> = text.split('\n').collect();
+                (0..row_count)
+                    .map(|row| {
+                        let line_text = line_texts.get(row).copied().unwrap_or("");
+                        if row == cursor_row {
+                            let spliced = splice_ghost(line_text, cursor_col, ghost);
+                            wrap_segments(&spliced, text_width, Wrap::Word).len()
+                        } else {
+                            wrap_segments(line_text, text_width, Wrap::Word).len()
+                        }
+                    })
+                    .sum()
+            }
+            None => buffer.screen_rows_between(&viewport, 0, row_count.saturating_sub(1)),
+        };
         let content_lines = screen_rows
             .min(u16::MAX as usize)
             .min(max_height.saturating_sub(2) as usize) as u16;
@@ -196,6 +273,8 @@ impl InputArea {
         let buffer = self.editor.buffer();
         let text = self.editor.text();
         let row_count = buffer.row_count();
+        let (cursor_row, cursor_col) = self.editor.cursor();
+        let ghost = self.active_ghost(disabled).map(str::to_string);
 
         let lines: Vec<Line> = if row_count == 0 {
             vec![Line::from("")]
@@ -206,6 +285,11 @@ impl InputArea {
             (0..row_count)
                 .flat_map(|row| {
                     let line_text = line_texts.get(row).copied().unwrap_or("");
+                    if row == cursor_row
+                        && let Some(ref ghost_text) = ghost
+                    {
+                        return make_ghost_lines(line_text, cursor_col, ghost_text, text_width);
+                    }
                     let segments = wrap_segments(line_text, text_width, Wrap::Word);
                     match &selection {
                         Some(sel) => {
@@ -233,16 +317,29 @@ impl InputArea {
                 .collect()
         };
 
-        let scroll_y = if viewport.top_row == 0 {
+        let mut scroll_y = if viewport.top_row == 0 {
             0
         } else {
             buffer.screen_rows_between(&viewport, 0, viewport.top_row.saturating_sub(1)) as u16
         };
+        let cursor_pos = cursor_pos_in_doc(&self.editor, text_width, ghost.as_deref());
+        if let Some((_, dy)) = cursor_pos
+            && ghost.is_some()
+            && dy >= scroll_y.saturating_add(inner.height)
+        {
+            scroll_y = dy.saturating_sub(inner.height.saturating_sub(1));
+        }
         let paragraph = Paragraph::new(lines).block(block).scroll((scroll_y, 0));
         frame.render_widget(paragraph, area);
 
-        if let Some((x, y)) = cursor_xy(&self.editor, inner, text_width, scroll_y) {
-            frame.set_cursor_position(ratatui::layout::Position { x, y });
+        if let Some((dx, dy)) = cursor_pos {
+            let terminal_dy = dy.saturating_sub(scroll_y);
+            if terminal_dy < inner.height {
+                frame.set_cursor_position(ratatui::layout::Position {
+                    x: inner.x.saturating_add(dx),
+                    y: inner.y.saturating_add(terminal_dy),
+                });
+            }
         }
     }
 
@@ -376,11 +473,69 @@ fn lines_from_segments(line_text: &str, segments: &[(usize, usize)]) -> Vec<Line
     }
 }
 
-fn cursor_xy(
-    editor: &TextFieldEditor,
-    rect: Rect,
+fn splice_ghost(line_text: &str, cursor_col: usize, ghost: &str) -> String {
+    let mut chars = line_text.chars();
+    let mut out = String::with_capacity(line_text.len() + ghost.len());
+    for _ in 0..cursor_col {
+        if let Some(c) = chars.next() {
+            out.push(c);
+        } else {
+            break;
+        }
+    }
+    out.push_str(ghost);
+    out.extend(chars);
+    out
+}
+
+fn make_ghost_lines(
+    line_text: &str,
+    cursor_col: usize,
+    ghost: &str,
     text_width: u16,
-    scroll_y: u16,
+) -> Vec<Line<'static>> {
+    let col = cursor_col.min(line_text.chars().count());
+    let ghost_start = col;
+    let ghost_end = col + ghost.chars().count();
+    let spliced = splice_ghost(line_text, col, ghost);
+    let segments = wrap_segments(&spliced, text_width, Wrap::Word);
+    let ghost_style = Style::default().fg(Color::DarkGray);
+
+    segments
+        .iter()
+        .map(|&(seg_start, seg_end)| {
+            let mut spans = Vec::new();
+            let b_start = seg_start.min(ghost_start);
+            let b_end = seg_end.min(ghost_start);
+            if b_start < b_end {
+                spans.push(Span::raw(char_slice(&spliced, b_start, b_end)));
+            }
+            let g_start = seg_start.max(ghost_start).min(ghost_end);
+            let g_end = seg_end.max(ghost_start).min(ghost_end);
+            if g_start < g_end {
+                spans.push(Span::styled(
+                    char_slice(&spliced, g_start, g_end),
+                    ghost_style,
+                ));
+            }
+            let a_start = seg_start.max(ghost_end);
+            let a_end = seg_end.max(ghost_end);
+            if a_start < a_end {
+                spans.push(Span::raw(char_slice(&spliced, a_start, a_end)));
+            }
+            if spans.is_empty() {
+                Line::from("")
+            } else {
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
+fn cursor_pos_in_doc(
+    editor: &TextFieldEditor,
+    text_width: u16,
+    ghost: Option<&str>,
 ) -> Option<(u16, u16)> {
     let viewport = editor.editor.host().viewport();
     let buffer = editor.buffer();
@@ -388,11 +543,15 @@ fn cursor_xy(
 
     let text = editor.text();
     let line_text = text.split('\n').nth(row)?;
-    let segments = wrap_segments(line_text, text_width, Wrap::Word);
+    let display_line = match ghost {
+        Some(g) => splice_ghost(line_text, col, g),
+        None => line_text.to_string(),
+    };
+    let segments = wrap_segments(&display_line, text_width, Wrap::Word);
     let seg_idx = segment_for_col(&segments, col);
     let &(seg_start, _seg_end) = segments.get(seg_idx)?;
 
-    let prefix: String = line_text
+    let prefix: String = display_line
         .chars()
         .skip(seg_start)
         .take(col.saturating_sub(seg_start))
@@ -406,16 +565,7 @@ fn cursor_xy(
         (rows_before.min(u16::MAX as usize) as u16).saturating_add(seg_idx as u16)
     };
 
-    // take scroll offset into account
-    let terminal_dy = dy.saturating_sub(scroll_y);
-    if terminal_dy >= rect.height {
-        return None;
-    }
-
-    Some((
-        rect.x.saturating_add(dx),
-        rect.y.saturating_add(terminal_dy),
-    ))
+    Some((dx, dy))
 }
 
 #[cfg(test)]

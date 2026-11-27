@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::commands::{CommandContext, DispatchResult, default_registry};
+use super::completion::{Completer, CompletionResult, CompletionWorker};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{AppMode, InputArea};
@@ -90,6 +91,8 @@ pub struct App {
     pub activity_start: Option<std::time::Instant>,
     tools: std::sync::Arc<ToolRegistry>,
     focus: AppFocus,
+    completion_generation: u64,
+    completion_worker: Option<CompletionWorker>,
 }
 
 impl App {
@@ -112,6 +115,9 @@ impl App {
             AppState::Compacting => self.input.set_mode(AppMode::Compacting),
             AppState::RunningBash => self.input.set_mode(AppMode::RunningBash),
         }
+        if self.state != AppState::Input {
+            self.clear_completion();
+        }
         self.pending_g = false;
         self.pending_w = false;
         self.interrupt_requested = false;
@@ -121,6 +127,57 @@ impl App {
             }
             _ => None,
         };
+    }
+
+    pub fn completion_generation(&self) -> u64 {
+        self.completion_generation
+    }
+
+    pub fn set_completion_worker(&mut self, worker: CompletionWorker) {
+        self.completion_worker = Some(worker);
+    }
+
+    pub fn clear_completion(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.input.set_suggestion(None);
+    }
+
+    pub fn refresh_completion(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        if self.state != AppState::Input
+            || self.focus != AppFocus::Input
+            || self.input.vim_mode() != hjkl_form::VimMode::Insert
+        {
+            self.input.set_suggestion(None);
+            return;
+        }
+        let dispatched = self.completion_worker.as_ref().is_some_and(|worker| {
+            worker.request(
+                self.completion_generation,
+                self.input.text(),
+                self.input.cursor(),
+            )
+        });
+        if !dispatched {
+            self.input.set_suggestion(None);
+        }
+    }
+
+    pub fn apply_completion_result(&mut self, result: CompletionResult) {
+        if result.generation != self.completion_generation
+            || self.state != AppState::Input
+            || self.focus != AppFocus::Input
+            || self.input.vim_mode() != hjkl_form::VimMode::Insert
+        {
+            return;
+        }
+        self.input.set_suggestion(result.suggestion);
+    }
+
+    pub fn handle_input_key(&mut self, key: KeyEvent) {
+        if self.input.input(key) {
+            self.refresh_completion();
+        }
     }
 
     pub fn new(tools: std::sync::Arc<ToolRegistry>) -> Self {
@@ -153,6 +210,8 @@ impl App {
             activity_start: None,
             tools,
             focus: AppFocus::Input,
+            completion_generation: 0,
+            completion_worker: None,
         }
     }
 
@@ -414,6 +473,7 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Conversation;
+                    self.clear_completion();
                     KeyDisposition::Consumed
                 }
                 KeyEvent {
@@ -422,6 +482,7 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Input;
+                    self.refresh_completion();
                     KeyDisposition::Consumed
                 }
                 _ => KeyDisposition::Consumed,
@@ -846,6 +907,19 @@ async fn run_app(
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
     let cmd_registry = default_registry();
+    let commands: Vec<String> = cmd_registry
+        .command_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let completer = Completer::with_defaults(
+        app.working_dir.clone(),
+        dirs::home_dir(),
+        commands,
+        agent.skill_names().to_vec(),
+    );
+    let (completion_worker, mut completion_rx) = CompletionWorker::spawn(completer);
+    app.set_completion_worker(completion_worker);
 
     if let Some(prompt) = initial_prompt {
         if let Some(ref mut log) = logger {
@@ -932,10 +1006,14 @@ async fn run_app(
                     app.input.set_elapsed_title(elapsed);
                 }
             }
+            Some(result) = completion_rx.recv() => {
+                app.apply_completion_result(result);
+            }
             Some(Ok(terminal_event)) = terminal_events.next() => {
                 if let Event::Paste(text) = &terminal_event {
                     if matches!(app.state, AppState::Input) {
                         app.input.insert_paste(text);
+                        app.refresh_completion();
                     }
                 } else if let Event::Key(key) = terminal_event {
                     match app.application_command(&key) {
@@ -975,7 +1053,7 @@ async fn run_app(
                                     }
                                 }
                                 _ => {
-                                    app.input.input(key);
+                                    app.handle_input_key(key);
                                 }
                             }
                         },

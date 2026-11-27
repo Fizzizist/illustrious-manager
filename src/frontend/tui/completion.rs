@@ -1,3 +1,308 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{mpsc, watch};
+
+const MAX_DIR_ENTRIES: usize = 10_000;
+const COMPLETION_CHANNEL_CAP: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionContext {
+    pub token: String,
+    pub is_input_start: bool,
+}
+
+pub fn extract_completion_context(text: &str, cursor: (usize, usize)) -> Option<CompletionContext> {
+    let (row, col) = cursor;
+    let line = text.split('\n').nth(row)?;
+    let chars: Vec<char> = line.chars().collect();
+    if col == 0 || col > chars.len() {
+        return None;
+    }
+    if let Some(&after) = chars.get(col)
+        && !after.is_whitespace()
+    {
+        return None;
+    }
+    if chars[col - 1].is_whitespace() {
+        return None;
+    }
+    let mut start = col;
+    while start > 0 && !chars[start - 1].is_whitespace() {
+        start -= 1;
+    }
+    let token: String = chars[start..col].iter().collect();
+    if token.is_empty() {
+        return None;
+    }
+    let is_input_start = row == 0 && chars[..start].iter().all(|c| c.is_whitespace());
+    Some(CompletionContext {
+        token,
+        is_input_start,
+    })
+}
+
+pub trait CompletionProvider: Send + Sync {
+    fn matches_trigger(&self, ctx: &CompletionContext) -> bool;
+    fn candidates(&self, ctx: &CompletionContext) -> Vec<String>;
+}
+
+pub struct SlashCommandProvider {
+    commands: Vec<String>,
+}
+
+impl SlashCommandProvider {
+    pub fn new(commands: Vec<String>) -> Self {
+        Self { commands }
+    }
+}
+
+impl CompletionProvider for SlashCommandProvider {
+    fn matches_trigger(&self, ctx: &CompletionContext) -> bool {
+        ctx.is_input_start && ctx.token.starts_with('/') && !ctx.token[1..].contains('/')
+    }
+
+    fn candidates(&self, ctx: &CompletionContext) -> Vec<String> {
+        self.commands
+            .iter()
+            .map(|c| format!("/{}", c.trim_start_matches('/')))
+            .filter(|c| c.starts_with(&ctx.token))
+            .collect()
+    }
+}
+
+pub struct SkillProvider {
+    skills: Vec<String>,
+}
+
+impl SkillProvider {
+    pub fn new(skills: Vec<String>) -> Self {
+        Self { skills }
+    }
+}
+
+impl CompletionProvider for SkillProvider {
+    fn matches_trigger(&self, ctx: &CompletionContext) -> bool {
+        ctx.token.starts_with('/') && !ctx.token[1..].contains('/')
+    }
+
+    fn candidates(&self, ctx: &CompletionContext) -> Vec<String> {
+        self.skills
+            .iter()
+            .map(|s| format!("/{}", s.trim_start_matches('/')))
+            .filter(|s| s.starts_with(&ctx.token))
+            .collect()
+    }
+}
+
+pub struct PathProvider {
+    working_dir: PathBuf,
+    home_dir: Option<PathBuf>,
+}
+
+impl PathProvider {
+    pub fn new(working_dir: PathBuf, home_dir: Option<PathBuf>) -> Self {
+        Self {
+            working_dir,
+            home_dir,
+        }
+    }
+
+    fn resolve_dir(&self, dir_prefix: &str) -> Option<PathBuf> {
+        if let Some(rest) = dir_prefix.strip_prefix("~/") {
+            let home = self.home_dir.as_ref()?;
+            if rest.is_empty() {
+                Some(home.clone())
+            } else {
+                Some(home.join(rest))
+            }
+        } else if dir_prefix.starts_with('/') {
+            Some(PathBuf::from(dir_prefix))
+        } else {
+            Some(self.working_dir.join(dir_prefix))
+        }
+    }
+}
+
+impl CompletionProvider for PathProvider {
+    fn matches_trigger(&self, ctx: &CompletionContext) -> bool {
+        !ctx.token.is_empty()
+            && !ctx.token.contains("://")
+            && (ctx.token.starts_with("./")
+                || ctx.token.starts_with("../")
+                || ctx.token.starts_with('/')
+                || ctx.token.starts_with("~/")
+                || ctx.token.contains('/'))
+    }
+
+    fn candidates(&self, ctx: &CompletionContext) -> Vec<String> {
+        let Some(last_slash) = ctx.token.rfind('/') else {
+            return Vec::new();
+        };
+        let dir_prefix = &ctx.token[..=last_slash];
+        let file_prefix = &ctx.token[last_slash + 1..];
+        let Some(dir_path) = self.resolve_dir(dir_prefix) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(&dir_path) else {
+            return Vec::new();
+        };
+
+        let mut results = Vec::new();
+        for entry in entries.take(MAX_DIR_ENTRIES) {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with(file_prefix) {
+                continue;
+            }
+            let is_dir = match entry.file_type() {
+                Ok(ft) if ft.is_dir() => true,
+                Ok(ft) if ft.is_symlink() => {
+                    std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir())
+                }
+                _ => false,
+            };
+            let mut candidate = String::with_capacity(dir_prefix.len() + name.len() + 1);
+            candidate.push_str(dir_prefix);
+            candidate.push_str(&name);
+            if is_dir {
+                candidate.push('/');
+            }
+            results.push(candidate);
+        }
+        results
+    }
+}
+
+#[derive(Default)]
+pub struct Completer {
+    tiers: Vec<Vec<Box<dyn CompletionProvider>>>,
+}
+
+impl Completer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_defaults(
+        working_dir: PathBuf,
+        home_dir: Option<PathBuf>,
+        commands: Vec<String>,
+        skills: Vec<String>,
+    ) -> Self {
+        let mut completer = Self::new();
+        completer.add_tier(vec![
+            Box::new(SlashCommandProvider::new(commands)),
+            Box::new(SkillProvider::new(skills)),
+        ]);
+        completer.add_tier(vec![Box::new(PathProvider::new(working_dir, home_dir))]);
+        completer
+    }
+
+    pub fn add_tier(&mut self, providers: Vec<Box<dyn CompletionProvider>>) {
+        self.tiers.push(providers);
+    }
+
+    pub fn register_provider(&mut self, tier: usize, provider: Box<dyn CompletionProvider>) {
+        if tier >= self.tiers.len() {
+            self.tiers.resize_with(tier + 1, Vec::new);
+        }
+        self.tiers[tier].push(provider);
+    }
+
+    pub fn needs_completion(&self, text: &str, cursor: (usize, usize)) -> bool {
+        let Some(ctx) = extract_completion_context(text, cursor) else {
+            return false;
+        };
+        self.tiers.iter().flatten().any(|p| p.matches_trigger(&ctx))
+    }
+
+    pub fn complete(&self, text: &str, cursor: (usize, usize)) -> Option<String> {
+        let ctx = extract_completion_context(text, cursor)?;
+        for tier in &self.tiers {
+            let best = tier
+                .iter()
+                .filter(|p| p.matches_trigger(&ctx))
+                .flat_map(|p| p.candidates(&ctx))
+                .filter(|c| c.starts_with(&ctx.token) && c.len() > ctx.token.len())
+                .min();
+            if let Some(best) = best {
+                return Some(best[ctx.token.len()..].to_string());
+            }
+        }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionResult {
+    pub generation: u64,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Clone)]
+struct CompletionRequest {
+    generation: u64,
+    text: String,
+    cursor: (usize, usize),
+}
+
+pub struct CompletionWorker {
+    completer: Arc<Completer>,
+    tx: watch::Sender<Option<CompletionRequest>>,
+}
+
+impl CompletionWorker {
+    pub fn spawn(completer: Completer) -> (Self, mpsc::Receiver<CompletionResult>) {
+        let completer = Arc::new(completer);
+        let (tx, mut rx) = watch::channel::<Option<CompletionRequest>>(None);
+        let (result_tx, result_rx) = mpsc::channel(COMPLETION_CHANNEL_CAP);
+
+        let worker_completer = Arc::clone(&completer);
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                let req = rx.borrow_and_update().clone();
+                let Some(req) = req else {
+                    continue;
+                };
+                let c = Arc::clone(&worker_completer);
+                let generation = req.generation;
+                let suggestion =
+                    tokio::task::spawn_blocking(move || c.complete(&req.text, req.cursor))
+                        .await
+                        .unwrap_or(None);
+                if result_tx
+                    .send(CompletionResult {
+                        generation,
+                        suggestion,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        (Self { completer, tx }, result_rx)
+    }
+
+    pub fn request(&self, generation: u64, text: String, cursor: (usize, usize)) -> bool {
+        if !self.completer.needs_completion(&text, cursor) {
+            return false;
+        }
+        let _ = self.tx.send(Some(CompletionRequest {
+            generation,
+            text,
+            cursor,
+        }));
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
