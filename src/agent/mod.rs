@@ -442,8 +442,7 @@ impl Agent {
 
         tokio::spawn(async move {
             let mut iterations = 0u32;
-            let mut max_token_retries_used = 0u32;
-            let mut bad_request_retries_used = 0u32;
+            let mut retries = ConsecutiveRetries::default();
             let mut confirmation_rx = confirmation_rx;
 
             'outer: loop {
@@ -473,8 +472,7 @@ impl Agent {
                             &e,
                             &error_msg,
                             "",
-                            &mut bad_request_retries_used,
-                            &mut max_token_retries_used,
+                            &mut retries,
                             max_token_retries,
                             &history_arc,
                             &session,
@@ -599,8 +597,7 @@ impl Agent {
                                 &e,
                                 &error_msg,
                                 &text_accumulated,
-                                &mut bad_request_retries_used,
-                                &mut max_token_retries_used,
+                                &mut retries,
                                 max_token_retries,
                                 &history_arc,
                                 &session,
@@ -619,9 +616,9 @@ impl Agent {
 
                 if tool_calls.is_empty() {
                     if text_accumulated.is_empty()
-                        && max_token_retries_used < max_token_retries
                         && ((config.max_tokens > 0 && last_output_tokens >= config.max_tokens)
                             || last_output_tokens == 0)
+                        && retries.try_record(RetryKind::MaxTokens, max_token_retries)
                     {
                         let error_msg =
                             if config.max_tokens > 0 && last_output_tokens >= config.max_tokens {
@@ -639,7 +636,6 @@ impl Agent {
                                     .to_string()
                             };
                         record_retry(&error_msg, &history_arc, &session, &event_tx).await;
-                        max_token_retries_used += 1;
                         iterations -= 1;
                         continue 'outer;
                     }
@@ -719,6 +715,8 @@ impl Agent {
                     &last_auto_compacted,
                     &event_tx,
                 );
+
+                retries.reset();
             }
         });
 
@@ -801,6 +799,41 @@ async fn record_error(
     inject_error_and_emit(error_msg, history, session, event_tx, AgentEvent::Error).await;
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetryKind {
+    MaxTokens,
+    BadRequest,
+}
+
+#[derive(Default)]
+struct ConsecutiveRetries {
+    kind: Option<RetryKind>,
+    count: u32,
+}
+
+impl ConsecutiveRetries {
+    fn try_record(&mut self, kind: RetryKind, limit: u32) -> bool {
+        if limit == 0 {
+            return false;
+        }
+        if self.kind == Some(kind) {
+            if self.count >= limit {
+                return false;
+            }
+            self.count += 1;
+        } else {
+            self.kind = Some(kind);
+            self.count = 1;
+        }
+        true
+    }
+
+    fn reset(&mut self) {
+        self.kind = None;
+        self.count = 0;
+    }
+}
+
 enum BackendErrorDisposition {
     RetryStrippingImages,
     Retry,
@@ -825,8 +858,7 @@ fn history_has_images(history: &[Message]) -> bool {
 fn backend_error_disposition(
     e: &anyhow::Error,
     history: &Arc<Mutex<Vec<Message>>>,
-    bad_request_retries_used: &mut u32,
-    max_token_retries_used: &mut u32,
+    retries: &mut ConsecutiveRetries,
     max_token_retries: u32,
 ) -> BackendErrorDisposition {
     let Some(be) = e.downcast_ref::<crate::backend::error::BackendError>() else {
@@ -836,14 +868,12 @@ fn backend_error_disposition(
         return BackendErrorDisposition::Cancelled;
     }
     if be.is_bad_request()
-        && *bad_request_retries_used < max_token_retries
         && history_has_images(&lock(history))
+        && retries.try_record(RetryKind::BadRequest, max_token_retries)
     {
-        *bad_request_retries_used += 1;
         return BackendErrorDisposition::RetryStrippingImages;
     }
-    if *max_token_retries_used < max_token_retries && be.is_max_tokens() {
-        *max_token_retries_used += 1;
+    if be.is_max_tokens() && retries.try_record(RetryKind::MaxTokens, max_token_retries) {
         return BackendErrorDisposition::Retry;
     }
     if be.is_refusal() {
@@ -858,21 +888,14 @@ async fn record_backend_error(
     e: &anyhow::Error,
     error_msg: &str,
     partial_text: &str,
-    bad_request_retries_used: &mut u32,
-    max_token_retries_used: &mut u32,
+    retries: &mut ConsecutiveRetries,
     max_token_retries: u32,
     history: &Arc<Mutex<Vec<Message>>>,
     session: &Arc<TokioMutex<Session>>,
     context_prefix_len: &Arc<Mutex<usize>>,
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> bool {
-    match backend_error_disposition(
-        e,
-        history,
-        bad_request_retries_used,
-        max_token_retries_used,
-        max_token_retries,
-    ) {
+    match backend_error_disposition(e, history, retries, max_token_retries) {
         BackendErrorDisposition::RetryStrippingImages => {
             record_retry_stripping_images(
                 error_msg,
@@ -8265,6 +8288,389 @@ mod tests {
             error_msg.created_at,
             before,
             after
+        );
+    }
+
+    struct ScriptedBackend {
+        steps: TokioMutex<Vec<Result<Vec<Result<StreamEvent>>, BackendError>>>,
+    }
+
+    impl ScriptedBackend {
+        fn new(steps: Vec<Result<Vec<Result<StreamEvent>>, BackendError>>) -> Self {
+            Self {
+                steps: TokioMutex::new(steps),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmBackend for ScriptedBackend {
+        async fn send_message(
+            &self,
+            _: &[Message],
+            _: &RequestConfig,
+        ) -> Result<BoxStream<Result<StreamEvent>>> {
+            let mut steps = self.steps.lock().await;
+            if steps.is_empty() {
+                return Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::Done)])));
+            }
+            match steps.remove(0) {
+                Ok(events) => Ok(Box::pin(stream::iter(events))),
+                Err(err) => Err(err.into()),
+            }
+        }
+    }
+
+    struct MockImageTool {
+        schema: serde_json::Value,
+    }
+
+    impl MockImageTool {
+        fn new() -> Self {
+            Self {
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for MockImageTool {
+        fn name(&self) -> &str {
+            "image_viewer"
+        }
+        fn description(&self) -> &str {
+            "view images"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        async fn execute(&self, _: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+            Ok(ToolExecResult {
+                content: vec![
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: "iVBOR".to_string(),
+                    },
+                    ContentBlock::Text("an image".to_string()),
+                ],
+                is_error: false,
+                agent_events: vec![],
+            })
+        }
+    }
+
+    struct FailingTool {
+        name: String,
+        schema: serde_json::Value,
+    }
+
+    impl FailingTool {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for FailingTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        async fn execute(&self, _: serde_json::Value) -> Result<ToolExecResult, ToolError> {
+            Err(ToolError::Execution {
+                tool_name: self.name.clone(),
+                message: "boom".to_string(),
+            })
+        }
+    }
+
+    fn count_retrying_and_errors(events: &[AgentEvent]) -> (usize, usize) {
+        let retrying = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Retrying(_)))
+            .count();
+        let errors = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Error(_)))
+            .count();
+        (retrying, errors)
+    }
+
+    #[tokio::test]
+    async fn max_tokens_retry_counter_resets_after_successful_tool_turn() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("p1"),
+            max_tokens_error_stream("p2"),
+            tool_call_response("tu1", "echo", "{}"),
+            max_tokens_error_stream("p3"),
+            max_tokens_error_stream("p4"),
+            text_response("done"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 2,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 4,
+            "expected 4 Retrying events; got {events:?}"
+        );
+        assert_eq!(error_count, 0, "expected 0 Error events; got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "done")),
+            "expected ResponseComplete(\"done\"); got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_consecutive_failures_still_exhaust_after_reset() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("p1"),
+            tool_call_response("tu1", "echo", "{}"),
+            max_tokens_error_stream("p2"),
+            max_tokens_error_stream("p3"),
+            max_tokens_error_stream("p4"),
+            text_response("unreachable"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 2,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 3,
+            "expected 3 Retrying events (1 before reset + 2 after); got {events:?}"
+        );
+        assert_eq!(error_count, 1, "expected 1 Error event; got {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(_))),
+            "expected no ResponseComplete when retries exhausted; got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stealth_max_tokens_and_empty_stream_reset_after_successful_tool_turn() {
+        let stealth_max_tokens: Vec<Result<StreamEvent>> = vec![
+            Ok(StreamEvent::Usage {
+                input_tokens: 50,
+                output_tokens: 100,
+                stop_reason: "stop".to_string(),
+            }),
+            Ok(StreamEvent::Done),
+        ];
+        let empty_stream: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::Done)];
+
+        let backend = SequencedBackend::new(vec![
+            stealth_max_tokens,
+            tool_call_response("tu1", "echo", "{}"),
+            empty_stream,
+            text_response("recovered"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(EchoTool::new("echo", "ok"))),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 1,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 2,
+            "expected 2 Retrying events; got {events:?}"
+        );
+        assert_eq!(error_count, 0, "expected 0 Error events; got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "expected ResponseComplete(\"recovered\"); got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_request_400_retry_counter_resets_after_successful_tool_turn() {
+        let http_400 = || BackendError::HttpStatus {
+            code: 400,
+            body: "image content not supported".to_string(),
+        };
+        let backend = ScriptedBackend::new(vec![
+            Ok(tool_call_response(
+                "tu1",
+                "image_viewer",
+                r#"{"path":"a.png"}"#,
+            )),
+            Err(http_400()),
+            Ok(tool_call_response(
+                "tu2",
+                "image_viewer",
+                r#"{"path":"b.png"}"#,
+            )),
+            Err(http_400()),
+            Ok(text_response("no images")),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(MockImageTool::new())),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 1,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("view images".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 2,
+            "expected 2 Retrying events; got {events:?}"
+        );
+        assert_eq!(error_count, 0, "expected 0 Error events; got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "no images")),
+            "expected ResponseComplete(\"no images\"); got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_retryable_error_resets_previous_error_counter() {
+        let backend = ScriptedBackend::new(vec![
+            Ok(tool_call_response(
+                "tu1",
+                "image_viewer",
+                r#"{"path":"a.png"}"#,
+            )),
+            Ok(max_tokens_error_stream("p1")),
+            Ok(max_tokens_error_stream("p2")),
+            Err(BackendError::HttpStatus {
+                code: 400,
+                body: "image content not supported".to_string(),
+            }),
+            Ok(max_tokens_error_stream("p3")),
+            Ok(text_response("done")),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(MockImageTool::new())),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 2,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("view image".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 4,
+            "expected 4 Retrying events; got {events:?}"
+        );
+        assert_eq!(error_count, 0, "expected 0 Error events; got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "done")),
+            "expected ResponseComplete(\"done\"); got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_execution_error_still_resets_backend_retry_counter() {
+        let backend = SequencedBackend::new(vec![
+            max_tokens_error_stream("p1"),
+            tool_call_response("tu1", "failing_tool", "{}"),
+            max_tokens_error_stream("p2"),
+            text_response("recovered"),
+        ]);
+        let agent = agent_with_mode(
+            backend,
+            Some(Box::new(FailingTool::new("failing_tool"))),
+            ConfirmationMode::Never,
+        )
+        .await
+        .with_retry_config(&RetryConfig {
+            max_token_retries: 1,
+            ..Default::default()
+        });
+
+        let stream = agent
+            .send("hi".to_string(), None, None)
+            .await
+            .expect("send should succeed");
+        let events = collect_events(stream).await;
+
+        let (retrying_count, error_count) = count_retrying_and_errors(&events);
+        assert_eq!(
+            retrying_count, 2,
+            "expected 2 Retrying events; got {events:?}"
+        );
+        assert_eq!(error_count, 0, "expected 0 Error events; got {events:?}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
+            "expected ResponseComplete(\"recovered\"); got {events:?}"
         );
     }
 }
