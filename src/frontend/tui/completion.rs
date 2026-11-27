@@ -110,6 +110,7 @@ impl PathProvider {
     fn resolve_dir(&self, dir_prefix: &str) -> Option<PathBuf> {
         if let Some(rest) = dir_prefix.strip_prefix("~/") {
             let home = self.home_dir.as_ref()?;
+            let rest = rest.trim_start_matches('/');
             if rest.is_empty() {
                 Some(home.clone())
             } else {
