@@ -1658,4 +1658,95 @@ mod tests {
 
         insta::assert_snapshot!("ghost_text_with_unicode_prefix", terminal.backend());
     }
+
+    #[test]
+    fn snapshot_ghost_text_multiline_with_wrapped_earlier_line() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "first line wraps here");
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_str(&mut input, "edit src/front");
+
+        let height_without_ghost = input.height_for_width(20, 24);
+        assert_eq!(height_without_ghost, 5);
+
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+        let height_with_ghost = input.height_for_width(20, 24);
+        assert!(
+            height_with_ghost > height_without_ghost,
+            "multiline ghost wrapping should grow height from {height_without_ghost}, got {height_with_ghost}"
+        );
+        assert_eq!(height_with_ghost, 7);
+
+        let backend = ratatui::backend::TestBackend::new(20, height_with_ghost);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, height_with_ghost);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert_eq!(cursor, ratatui::layout::Position { x: 10, y: 4 });
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        let before_cursor = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x - 1, cursor.y))
+            .expect("before cursor cell");
+        assert_eq!(before_cursor.symbol(), "t");
+        assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+
+        insta::assert_snapshot!(
+            "ghost_text_multiline_with_wrapped_earlier_line",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn snapshot_ghost_text_scroll_overflow_keeps_cursor_visible() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "first line");
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_str(&mut input, "edit src/front");
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+
+        let constrained_height = 4;
+        let backend = ratatui::backend::TestBackend::new(20, constrained_height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, constrained_height);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert_eq!(cursor, ratatui::layout::Position { x: 10, y: 2 });
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        let before_cursor = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x - 1, cursor.y))
+            .expect("before cursor cell");
+        assert_eq!(before_cursor.symbol(), "t");
+        assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+
+        insta::assert_snapshot!(
+            "ghost_text_scroll_overflow_keeps_cursor_visible",
+            terminal.backend()
+        );
+    }
 }

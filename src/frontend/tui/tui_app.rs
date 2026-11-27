@@ -3824,6 +3824,37 @@ mod tests {
         assert_eq!(app.input.suggestion(), None);
     }
 
+    #[test]
+    fn set_state_clears_active_suggestion_and_invalidates_pre_transition_generation() {
+        use crate::frontend::tui::completion::CompletionResult;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let gen_before = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: gen_before,
+            suggestion: Some("rontend/".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("rontend/"));
+
+        app.set_state(AppState::Streaming);
+        assert_eq!(app.input.suggestion(), None);
+        assert_ne!(app.completion_generation(), gen_before);
+
+        app.set_state(AppState::Input);
+        app.apply_completion_result(CompletionResult {
+            generation: gen_before,
+            suggestion: Some("stale".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+
+        let gen_after = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: gen_after,
+            suggestion: Some("fresh".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("fresh"));
+    }
+
     #[tokio::test]
     async fn focus_switch_clears_and_refreshes_completion() {
         use crate::frontend::tui::completion::{Completer, CompletionResult, CompletionWorker};
