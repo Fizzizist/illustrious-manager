@@ -61,6 +61,7 @@ pub struct Agent {
     /// version is still sent to the TUI via `AgentEvent::ToolResult`.
     max_tool_result_bytes: u64,
     chat_mode: ChatMode,
+    skill_names: Vec<String>,
 }
 
 // Recover from a poisoned mutex: a thread panicked while holding the lock, leaving
@@ -99,6 +100,7 @@ impl Agent {
             last_auto_compacted: Arc::new(AtomicBool::new(false)),
             max_tool_result_bytes: 65_536,
             chat_mode: ChatMode::default(),
+            skill_names: Vec::new(),
         }
     }
 
@@ -139,7 +141,7 @@ impl Agent {
     }
 
     pub fn with_skills(
-        self,
+        mut self,
         skills: &std::collections::HashMap<String, std::path::PathBuf>,
     ) -> Self {
         if skills.is_empty() {
@@ -148,6 +150,7 @@ impl Agent {
 
         let mut names: Vec<&str> = skills.keys().map(String::as_str).collect();
         names.sort();
+        self.skill_names = names.iter().map(|s| (*s).to_string()).collect();
 
         let mut content =
             String::from("The following skills are available via the `skill` tool:\n\n");
@@ -180,6 +183,10 @@ impl Agent {
 
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools)
+    }
+
+    pub fn skill_names(&self) -> &[String] {
+        &self.skill_names
     }
 
     pub fn model(&self) -> String {
@@ -8671,6 +8678,68 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, AgentEvent::ResponseComplete(t) if t == "recovered")),
             "expected ResponseComplete(\"recovered\"); got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_skill_names_empty_by_default() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+
+        assert!(
+            agent.skill_names().is_empty(),
+            "newly constructed agent should have no skill names"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_skill_names_sorted_after_with_skills() {
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "zebra".to_string(),
+            std::path::PathBuf::from("/fake/skills/zebra/SKILL.md"),
+        );
+        skills.insert(
+            "alpha".to_string(),
+            std::path::PathBuf::from("/fake/skills/alpha/SKILL.md"),
+        );
+        skills.insert(
+            "dg-plan".to_string(),
+            std::path::PathBuf::from("/fake/skills/dg-plan/SKILL.md"),
+        );
+
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config.clone(),
+            test_session_arc().await,
+        )
+        .await
+        .with_skills(&skills);
+
+        assert_eq!(agent.skill_names(), &["alpha", "dg-plan", "zebra"]);
+
+        let empty_agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            test_session_arc().await,
+        )
+        .await
+        .with_skills(&std::collections::HashMap::new());
+
+        assert!(
+            empty_agent.skill_names().is_empty(),
+            "with_skills with an empty map should keep skill_names empty"
         );
     }
 }

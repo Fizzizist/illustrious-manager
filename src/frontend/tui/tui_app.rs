@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::commands::{CommandContext, DispatchResult, default_registry};
+use super::completion::{Completer, CompletionResult, CompletionWorker};
 use super::conversation_area::{ConversationArea, ConversationEntry, ConversationRole};
 use super::diff::{render_edit_file_diff, render_write_file};
 use super::input_area::{AppMode, InputArea};
@@ -90,6 +91,8 @@ pub struct App {
     pub activity_start: Option<std::time::Instant>,
     tools: std::sync::Arc<ToolRegistry>,
     focus: AppFocus,
+    completion_generation: u64,
+    completion_worker: Option<CompletionWorker>,
 }
 
 impl App {
@@ -112,6 +115,9 @@ impl App {
             AppState::Compacting => self.input.set_mode(AppMode::Compacting),
             AppState::RunningBash => self.input.set_mode(AppMode::RunningBash),
         }
+        if self.state != AppState::Input {
+            self.clear_completion();
+        }
         self.pending_g = false;
         self.pending_w = false;
         self.interrupt_requested = false;
@@ -121,6 +127,57 @@ impl App {
             }
             _ => None,
         };
+    }
+
+    pub fn completion_generation(&self) -> u64 {
+        self.completion_generation
+    }
+
+    pub fn set_completion_worker(&mut self, worker: CompletionWorker) {
+        self.completion_worker = Some(worker);
+    }
+
+    pub fn clear_completion(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.input.set_suggestion(None);
+    }
+
+    pub fn refresh_completion(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        if self.state != AppState::Input
+            || self.focus != AppFocus::Input
+            || self.input.vim_mode() != hjkl_form::VimMode::Insert
+        {
+            self.input.set_suggestion(None);
+            return;
+        }
+        let dispatched = self.completion_worker.as_ref().is_some_and(|worker| {
+            worker.request(
+                self.completion_generation,
+                self.input.text(),
+                self.input.cursor(),
+            )
+        });
+        if !dispatched {
+            self.input.set_suggestion(None);
+        }
+    }
+
+    pub fn apply_completion_result(&mut self, result: CompletionResult) {
+        if result.generation != self.completion_generation
+            || self.state != AppState::Input
+            || self.focus != AppFocus::Input
+            || self.input.vim_mode() != hjkl_form::VimMode::Insert
+        {
+            return;
+        }
+        self.input.set_suggestion(result.suggestion);
+    }
+
+    pub fn handle_input_key(&mut self, key: KeyEvent) {
+        if self.input.input(key) {
+            self.refresh_completion();
+        }
     }
 
     pub fn new(tools: std::sync::Arc<ToolRegistry>) -> Self {
@@ -153,6 +210,8 @@ impl App {
             activity_start: None,
             tools,
             focus: AppFocus::Input,
+            completion_generation: 0,
+            completion_worker: None,
         }
     }
 
@@ -414,6 +473,7 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Conversation;
+                    self.clear_completion();
                     KeyDisposition::Consumed
                 }
                 KeyEvent {
@@ -422,6 +482,7 @@ impl App {
                     ..
                 } => {
                     self.focus = AppFocus::Input;
+                    self.refresh_completion();
                     KeyDisposition::Consumed
                 }
                 _ => KeyDisposition::Consumed,
@@ -846,6 +907,19 @@ async fn run_app(
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(100);
     let mut stream_task: Option<JoinHandle<()>> = None;
     let cmd_registry = default_registry();
+    let commands: Vec<String> = cmd_registry
+        .command_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let completer = Completer::with_defaults(
+        app.working_dir.clone(),
+        dirs::home_dir(),
+        commands,
+        agent.skill_names().to_vec(),
+    );
+    let (completion_worker, mut completion_rx) = CompletionWorker::spawn(completer);
+    app.set_completion_worker(completion_worker);
 
     if let Some(prompt) = initial_prompt {
         if let Some(ref mut log) = logger {
@@ -932,10 +1006,14 @@ async fn run_app(
                     app.input.set_elapsed_title(elapsed);
                 }
             }
+            Some(result) = completion_rx.recv() => {
+                app.apply_completion_result(result);
+            }
             Some(Ok(terminal_event)) = terminal_events.next() => {
                 if let Event::Paste(text) = &terminal_event {
                     if matches!(app.state, AppState::Input) {
                         app.input.insert_paste(text);
+                        app.refresh_completion();
                     }
                 } else if let Event::Key(key) = terminal_event {
                     match app.application_command(&key) {
@@ -975,7 +1053,7 @@ async fn run_app(
                                     }
                                 }
                                 _ => {
-                                    app.input.input(key);
+                                    app.handle_input_key(key);
                                 }
                             }
                         },
@@ -3634,5 +3712,225 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("tui_retry_state_renders", terminal.backend());
+    }
+
+    struct StubProvider {
+        mappings: Vec<(&'static str, Vec<&'static str>)>,
+    }
+
+    impl crate::frontend::tui::completion::CompletionProvider for StubProvider {
+        fn matches_trigger(
+            &self,
+            ctx: &crate::frontend::tui::completion::CompletionContext,
+        ) -> bool {
+            self.mappings.iter().any(|(prefix, _)| ctx.token == *prefix)
+        }
+
+        fn candidates(
+            &self,
+            ctx: &crate::frontend::tui::completion::CompletionContext,
+        ) -> Vec<String> {
+            self.mappings
+                .iter()
+                .find(|(prefix, _)| ctx.token == *prefix)
+                .map_or_else(Vec::new, |(_, cands)| {
+                    cands.iter().map(|s| (*s).to_string()).collect()
+                })
+        }
+    }
+
+    async fn recv_matching_generation(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::frontend::tui::completion::CompletionResult>,
+        expected_gen: u64,
+    ) -> crate::frontend::tui::completion::CompletionResult {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let res = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timed out waiting for CompletionResult")
+                .expect("completion channel closed unexpectedly");
+            if res.generation == expected_gen {
+                return res;
+            }
+        }
+    }
+
+    #[test]
+    fn apply_completion_result_ignores_stale_generation() {
+        use crate::frontend::tui::completion::CompletionResult;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let current_gen = app.completion_generation();
+
+        app.apply_completion_result(CompletionResult {
+            generation: current_gen.wrapping_add(1),
+            suggestion: Some("stale".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+
+        app.apply_completion_result(CompletionResult {
+            generation: current_gen,
+            suggestion: Some("fresh".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("fresh"));
+    }
+
+    #[test]
+    fn apply_completion_result_gated_by_app_state_and_focus() {
+        use crate::frontend::tui::completion::CompletionResult;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+
+        app.set_state(AppState::Streaming);
+        let current_gen = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: current_gen,
+            suggestion: Some("sug".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+
+        app.set_state(AppState::Input);
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            KeyDisposition::Consumed
+        );
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            KeyDisposition::Consumed
+        );
+        let current_gen = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: current_gen,
+            suggestion: Some("sug".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            KeyDisposition::Consumed
+        );
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            KeyDisposition::Consumed
+        );
+        app.handle_input_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.input.is_normal());
+        let current_gen = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: current_gen,
+            suggestion: Some("sug".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+    }
+
+    #[test]
+    fn set_state_clears_active_suggestion_and_invalidates_pre_transition_generation() {
+        use crate::frontend::tui::completion::CompletionResult;
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let gen_before = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: gen_before,
+            suggestion: Some("rontend/".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("rontend/"));
+
+        app.set_state(AppState::Streaming);
+        assert_eq!(app.input.suggestion(), None);
+        assert_ne!(app.completion_generation(), gen_before);
+
+        app.set_state(AppState::Input);
+        app.apply_completion_result(CompletionResult {
+            generation: gen_before,
+            suggestion: Some("stale".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), None);
+
+        let gen_after = app.completion_generation();
+        app.apply_completion_result(CompletionResult {
+            generation: gen_after,
+            suggestion: Some("fresh".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("fresh"));
+    }
+
+    #[tokio::test]
+    async fn focus_switch_clears_and_refreshes_completion() {
+        use crate::frontend::tui::completion::{Completer, CompletionResult, CompletionWorker};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let mut completer = Completer::new();
+        completer.add_tier(vec![Box::new(StubProvider {
+            mappings: vec![("./f", vec!["./frontend/"])],
+        })]);
+        let (worker, mut rx) = CompletionWorker::spawn(completer);
+        app.set_completion_worker(worker);
+
+        app.input.set_text("./f");
+        app.input.reset_to_insert();
+        app.apply_completion_result(CompletionResult {
+            generation: app.completion_generation(),
+            suggestion: Some("rontend/".to_string()),
+        });
+        assert_eq!(app.input.suggestion(), Some("rontend/"));
+
+        let gen_before = app.completion_generation();
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            KeyDisposition::Consumed
+        );
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            KeyDisposition::Consumed
+        );
+        assert_eq!(app.input.suggestion(), None);
+        assert!(app.completion_generation() > gen_before);
+
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)),
+            KeyDisposition::Consumed
+        );
+        assert_eq!(
+            app.focus_command(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            KeyDisposition::Consumed
+        );
+
+        let refreshed = recv_matching_generation(&mut rx, app.completion_generation()).await;
+        assert_eq!(refreshed.generation, app.completion_generation());
+        assert_eq!(refreshed.suggestion, Some("rontend/".to_string()));
+    }
+
+    #[tokio::test]
+    async fn input_handling_triggers_follow_up_completion_request() {
+        use crate::frontend::tui::completion::{Completer, CompletionWorker};
+
+        let mut app = App::new(std::sync::Arc::new(crate::tools::ToolRegistry::new()));
+        let mut completer = Completer::new();
+        completer.add_tier(vec![Box::new(StubProvider {
+            mappings: vec![
+                ("src/f", vec!["src/frontend/"]),
+                ("src/frontend/", vec!["src/frontend/tui/"]),
+            ],
+        })]);
+        let (worker, mut rx) = CompletionWorker::spawn(completer);
+        app.set_completion_worker(worker);
+
+        for ch in "src/f".chars() {
+            app.handle_input_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        let initial = recv_matching_generation(&mut rx, app.completion_generation()).await;
+        app.apply_completion_result(initial);
+        assert_eq!(app.input.suggestion(), Some("rontend/"));
+
+        let gen_before = app.completion_generation();
+        app.handle_input_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.input.text(), "src/frontend/");
+        assert!(app.completion_generation() > gen_before);
+
+        let follow_up = recv_matching_generation(&mut rx, app.completion_generation()).await;
+        assert_eq!(follow_up.generation, app.completion_generation());
+        assert_eq!(follow_up.suggestion, Some("tui/".to_string()));
     }
 }

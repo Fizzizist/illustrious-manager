@@ -1,4 +1,4 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use hjkl_buffer::{
     Viewport, Wrap,
     wrap::{segment_for_col, wrap_segments},
@@ -7,7 +7,7 @@ use hjkl_editor_tui::crossterm_key_event_to_input;
 use hjkl_engine::{Host, decode_planned_input};
 use hjkl_form::{TextFieldEditor, VimMode};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use unicode_width::UnicodeWidthStr;
@@ -40,6 +40,7 @@ pub struct InputArea {
     editor: TextFieldEditor,
     mode: AppMode,
     elapsed: Option<std::time::Duration>,
+    suggestion: Option<String>,
 }
 
 impl InputArea {
@@ -49,9 +50,30 @@ impl InputArea {
             editor,
             mode: AppMode::Editing,
             elapsed: None,
+            suggestion: None,
         };
         input.editor.enter_insert_at_end();
         input
+    }
+
+    pub fn set_suggestion(&mut self, suggestion: Option<String>) {
+        self.suggestion = suggestion.filter(|s| !s.is_empty());
+    }
+
+    pub fn suggestion(&self) -> Option<&str> {
+        self.suggestion.as_deref()
+    }
+
+    pub fn cursor(&self) -> (usize, usize) {
+        self.editor.cursor()
+    }
+
+    pub fn accept_suggestion(&mut self) -> bool {
+        let Some(suffix) = self.suggestion.take() else {
+            return false;
+        };
+        self.editor.editor.insert_str(&suffix);
+        true
     }
 
     pub fn input(&mut self, event: KeyEvent) -> bool {
@@ -60,9 +82,32 @@ impl InputArea {
             _ => return false,
         }
 
+        if event.code == KeyCode::Right
+            && event.modifiers == KeyModifiers::NONE
+            && self.editor.vim_mode() == VimMode::Insert
+            && self.suggestion.is_some()
+        {
+            return self.accept_suggestion();
+        }
+
+        let was_insert = self.editor.vim_mode() == VimMode::Insert;
         let planned = crossterm_key_event_to_input(event);
         if let Some(input) = decode_planned_input(planned) {
             self.editor.handle_input(input);
+            let is_insert = self.editor.vim_mode() == VimMode::Insert;
+            if !was_insert || !is_insert {
+                self.suggestion = None;
+            } else if let KeyCode::Char(c) = event.code
+                && (event.modifiers == KeyModifiers::NONE || event.modifiers == KeyModifiers::SHIFT)
+            {
+                self.suggestion = self
+                    .suggestion
+                    .take()
+                    .and_then(|s| s.strip_prefix(c).map(str::to_string))
+                    .filter(|s| !s.is_empty());
+            } else {
+                self.suggestion = None;
+            }
             return true;
         }
         false
@@ -77,24 +122,31 @@ impl InputArea {
     }
 
     pub fn set_text(&mut self, text: &str) {
+        self.suggestion = None;
         self.editor.set_text(text);
     }
 
     pub fn clear(&mut self) {
+        self.suggestion = None;
         self.editor.set_text("");
     }
 
     pub fn insert_paste(&mut self, text: &str) {
+        self.suggestion = None;
         // TextFieldEditor exposes no paste method; insert_str is the
         // engine's public insertion API and calls mark_content_dirty().
         self.editor.editor.insert_str(text);
     }
 
     pub fn set_mode(&mut self, mode: AppMode) {
+        if mode != AppMode::Editing {
+            self.suggestion = None;
+        }
         self.mode = mode;
     }
 
     pub fn reset_to_insert(&mut self) {
+        self.suggestion = None;
         self.editor.enter_insert_at_end();
     }
 
@@ -134,6 +186,13 @@ impl InputArea {
         }
     }
 
+    fn active_ghost(&self, disabled: bool) -> Option<&str> {
+        if disabled || self.mode != AppMode::Editing || self.editor.vim_mode() != VimMode::Insert {
+            return None;
+        }
+        self.suggestion.as_deref()
+    }
+
     fn text_height_for_width(&self, width: u16, max_height: u16) -> u16 {
         if width == 0 {
             return MIN_HEIGHT;
@@ -152,7 +211,25 @@ impl InputArea {
         if row_count == 0 {
             return MIN_HEIGHT;
         }
-        let screen_rows = buffer.screen_rows_between(&viewport, 0, row_count.saturating_sub(1));
+        let screen_rows = match self.active_ghost(false) {
+            Some(ghost) => {
+                let (cursor_row, cursor_col) = self.editor.cursor();
+                let text = self.editor.text();
+                let line_texts: Vec<&str> = text.split('\n').collect();
+                (0..row_count)
+                    .map(|row| {
+                        let line_text = line_texts.get(row).copied().unwrap_or("");
+                        if row == cursor_row {
+                            let spliced = splice_ghost(line_text, cursor_col, ghost);
+                            wrap_segments(&spliced, text_width, Wrap::Word).len()
+                        } else {
+                            wrap_segments(line_text, text_width, Wrap::Word).len()
+                        }
+                    })
+                    .sum()
+            }
+            None => buffer.screen_rows_between(&viewport, 0, row_count.saturating_sub(1)),
+        };
         let content_lines = screen_rows
             .min(u16::MAX as usize)
             .min(max_height.saturating_sub(2) as usize) as u16;
@@ -196,6 +273,8 @@ impl InputArea {
         let buffer = self.editor.buffer();
         let text = self.editor.text();
         let row_count = buffer.row_count();
+        let (cursor_row, cursor_col) = self.editor.cursor();
+        let ghost = self.active_ghost(disabled).map(str::to_string);
 
         let lines: Vec<Line> = if row_count == 0 {
             vec![Line::from("")]
@@ -206,6 +285,11 @@ impl InputArea {
             (0..row_count)
                 .flat_map(|row| {
                     let line_text = line_texts.get(row).copied().unwrap_or("");
+                    if row == cursor_row
+                        && let Some(ref ghost_text) = ghost
+                    {
+                        return make_ghost_lines(line_text, cursor_col, ghost_text, text_width);
+                    }
                     let segments = wrap_segments(line_text, text_width, Wrap::Word);
                     match &selection {
                         Some(sel) => {
@@ -233,16 +317,29 @@ impl InputArea {
                 .collect()
         };
 
-        let scroll_y = if viewport.top_row == 0 {
+        let mut scroll_y = if viewport.top_row == 0 {
             0
         } else {
             buffer.screen_rows_between(&viewport, 0, viewport.top_row.saturating_sub(1)) as u16
         };
+        let cursor_pos = cursor_pos_in_doc(&self.editor, text_width, ghost.as_deref());
+        if let Some((_, dy)) = cursor_pos
+            && ghost.is_some()
+            && dy >= scroll_y.saturating_add(inner.height)
+        {
+            scroll_y = dy.saturating_sub(inner.height.saturating_sub(1));
+        }
         let paragraph = Paragraph::new(lines).block(block).scroll((scroll_y, 0));
         frame.render_widget(paragraph, area);
 
-        if let Some((x, y)) = cursor_xy(&self.editor, inner, text_width, scroll_y) {
-            frame.set_cursor_position(ratatui::layout::Position { x, y });
+        if let Some((dx, dy)) = cursor_pos {
+            let terminal_dy = dy.saturating_sub(scroll_y);
+            if terminal_dy < inner.height {
+                frame.set_cursor_position(ratatui::layout::Position {
+                    x: inner.x.saturating_add(dx),
+                    y: inner.y.saturating_add(terminal_dy),
+                });
+            }
         }
     }
 
@@ -376,11 +473,69 @@ fn lines_from_segments(line_text: &str, segments: &[(usize, usize)]) -> Vec<Line
     }
 }
 
-fn cursor_xy(
-    editor: &TextFieldEditor,
-    rect: Rect,
+fn splice_ghost(line_text: &str, cursor_col: usize, ghost: &str) -> String {
+    let mut chars = line_text.chars();
+    let mut out = String::with_capacity(line_text.len() + ghost.len());
+    for _ in 0..cursor_col {
+        if let Some(c) = chars.next() {
+            out.push(c);
+        } else {
+            break;
+        }
+    }
+    out.push_str(ghost);
+    out.extend(chars);
+    out
+}
+
+fn make_ghost_lines(
+    line_text: &str,
+    cursor_col: usize,
+    ghost: &str,
     text_width: u16,
-    scroll_y: u16,
+) -> Vec<Line<'static>> {
+    let col = cursor_col.min(line_text.chars().count());
+    let ghost_start = col;
+    let ghost_end = col + ghost.chars().count();
+    let spliced = splice_ghost(line_text, col, ghost);
+    let segments = wrap_segments(&spliced, text_width, Wrap::Word);
+    let ghost_style = Style::default().fg(Color::DarkGray);
+
+    segments
+        .iter()
+        .map(|&(seg_start, seg_end)| {
+            let mut spans = Vec::new();
+            let b_start = seg_start.min(ghost_start);
+            let b_end = seg_end.min(ghost_start);
+            if b_start < b_end {
+                spans.push(Span::raw(char_slice(&spliced, b_start, b_end)));
+            }
+            let g_start = seg_start.max(ghost_start).min(ghost_end);
+            let g_end = seg_end.max(ghost_start).min(ghost_end);
+            if g_start < g_end {
+                spans.push(Span::styled(
+                    char_slice(&spliced, g_start, g_end),
+                    ghost_style,
+                ));
+            }
+            let a_start = seg_start.max(ghost_end);
+            let a_end = seg_end.max(ghost_end);
+            if a_start < a_end {
+                spans.push(Span::raw(char_slice(&spliced, a_start, a_end)));
+            }
+            if spans.is_empty() {
+                Line::from("")
+            } else {
+                Line::from(spans)
+            }
+        })
+        .collect()
+}
+
+fn cursor_pos_in_doc(
+    editor: &TextFieldEditor,
+    text_width: u16,
+    ghost: Option<&str>,
 ) -> Option<(u16, u16)> {
     let viewport = editor.editor.host().viewport();
     let buffer = editor.buffer();
@@ -388,11 +543,15 @@ fn cursor_xy(
 
     let text = editor.text();
     let line_text = text.split('\n').nth(row)?;
-    let segments = wrap_segments(line_text, text_width, Wrap::Word);
+    let display_line = match ghost {
+        Some(g) => splice_ghost(line_text, col, g),
+        None => line_text.to_string(),
+    };
+    let segments = wrap_segments(&display_line, text_width, Wrap::Word);
     let seg_idx = segment_for_col(&segments, col);
     let &(seg_start, _seg_end) = segments.get(seg_idx)?;
 
-    let prefix: String = line_text
+    let prefix: String = display_line
         .chars()
         .skip(seg_start)
         .take(col.saturating_sub(seg_start))
@@ -406,16 +565,7 @@ fn cursor_xy(
         (rows_before.min(u16::MAX as usize) as u16).saturating_add(seg_idx as u16)
     };
 
-    // take scroll offset into account
-    let terminal_dy = dy.saturating_sub(scroll_y);
-    if terminal_dy >= rect.height {
-        return None;
-    }
-
-    Some((
-        rect.x.saturating_add(dx),
-        rect.y.saturating_add(terminal_dy),
-    ))
+    Some((dx, dy))
 }
 
 #[cfg(test)]
@@ -1177,5 +1327,426 @@ mod tests {
             .expect("draw");
 
         insta::assert_snapshot!("render_tasks_picker", terminal.backend());
+    }
+
+    fn type_str(input: &mut InputArea, s: &str) {
+        for c in s.chars() {
+            input.input(char_key(c));
+        }
+    }
+
+    fn row_text(
+        backend: &ratatui::backend::TestBackend,
+        y: u16,
+        x_start: u16,
+        x_end: u16,
+    ) -> String {
+        let buf = backend.buffer();
+        let mut out = String::new();
+        for x in x_start..x_end {
+            if let Some(cell) = buf.cell((x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn right_arrow_accepts_suggestion_in_insert_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+        assert_eq!(input.suggestion(), Some("rontend/"));
+
+        let consumed = input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(input.text(), "src/frontend/");
+        assert_eq!(input.cursor(), (0, 13));
+        assert_eq!(input.suggestion(), None);
+        assert!(!input.accept_suggestion());
+
+        input.set_suggestion(Some(String::new()));
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn right_arrow_moves_cursor_normally_when_no_suggestion_or_in_normal_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "abcd");
+        assert_eq!(input.cursor(), (0, 4));
+
+        input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(input.cursor(), (0, 2));
+
+        let consumed = input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(input.cursor(), (0, 3));
+        assert_eq!(input.text(), "abcd");
+
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.vim_mode(), VimMode::Normal);
+        input.input(char_key('h'));
+        let normal_col = input.cursor().1;
+
+        input.set_suggestion(Some("xyz".to_string()));
+        input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(input.text(), "abcd");
+        assert_eq!(input.cursor(), (0, normal_col + 1));
+    }
+
+    #[test]
+    fn typing_matching_char_trims_suggestion_and_mismatch_clears_it() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        input.input(char_key('r'));
+        assert_eq!(input.text(), "src/fr");
+        assert_eq!(input.suggestion(), Some("ontend/"));
+
+        input.input(char_key('x'));
+        assert_eq!(input.text(), "src/frx");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("z".to_string()));
+        input.input(char_key('z'));
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("abc".to_string()));
+        input.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn suggestion_clears_on_escape_clear_set_text_paste_and_mode_change() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/");
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.suggestion(), None);
+
+        input.reset_to_insert();
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.clear();
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.set_text("other");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.insert_paste(" pasted");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.set_mode(AppMode::Streaming);
+        assert_eq!(input.suggestion(), None);
+
+        input.set_mode(AppMode::Editing);
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.reset_to_insert();
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn ghost_text_hidden_when_disabled_or_not_insert_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, true, false);
+            })
+            .expect("draw");
+
+        let rendered = row_text(terminal.backend(), 1, 1, 39);
+        assert_eq!(rendered.trim_end(), "src/f");
+        for x in 1..39 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("interior cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.set_suggestion(Some("rontend/".to_string()));
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let rendered_normal = row_text(terminal.backend(), 1, 1, 39);
+        assert_eq!(rendered_normal.trim_end(), "src/f");
+        for x in 1..39 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("interior cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+    }
+
+    #[test]
+    fn snapshot_ghost_text_inline_at_eol() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        for x in 1..6 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("typed cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(row_text(terminal.backend(), 1, 6, 14), "rontend/");
+        for x in 6..14 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 5, y: 1 }
+        );
+
+        insta::assert_snapshot!("ghost_text_inline_at_eol", terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_ghost_text_mid_line_before_whitespace() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "edit src/f please");
+        for _ in 0..7 {
+            input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        assert_eq!(row_text(terminal.backend(), 1, 1, 11), "edit src/f");
+        assert_eq!(row_text(terminal.backend(), 1, 11, 19), "rontend/");
+        assert_eq!(row_text(terminal.backend(), 1, 19, 26), " please");
+        for x in 11..19 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        for x in 19..26 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("trailing cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 10, y: 1 }
+        );
+
+        insta::assert_snapshot!("ghost_text_mid_line_before_whitespace", terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_ghost_text_wrapping_updates_height_and_cursor() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "edit src/front");
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+
+        let height = input.height_for_width(20, 24);
+        assert!(
+            height > MIN_HEIGHT,
+            "wrapped ghost text should grow height > {MIN_HEIGHT}, got {height}"
+        );
+
+        let backend = ratatui::backend::TestBackend::new(20, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, height);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert!(cursor.y >= 1 && cursor.y < height - 1);
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        if cursor.x > 1 {
+            let before_cursor = terminal
+                .backend()
+                .buffer()
+                .cell((cursor.x - 1, cursor.y))
+                .expect("before cursor cell");
+            assert_eq!(before_cursor.symbol(), "t");
+            assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+        }
+
+        insta::assert_snapshot!(
+            "ghost_text_wrapping_updates_height_and_cursor",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn snapshot_ghost_text_with_unicode_prefix() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "日本語 src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 12, y: 1 }
+        );
+        assert_eq!(row_text(terminal.backend(), 1, 13, 21), "rontend/");
+        for x in 13..21 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+
+        insta::assert_snapshot!("ghost_text_with_unicode_prefix", terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_ghost_text_multiline_with_wrapped_earlier_line() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "first line wraps here");
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_str(&mut input, "edit src/front");
+
+        let height_without_ghost = input.height_for_width(20, 24);
+        assert_eq!(height_without_ghost, 5);
+
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+        let height_with_ghost = input.height_for_width(20, 24);
+        assert!(
+            height_with_ghost > height_without_ghost,
+            "multiline ghost wrapping should grow height from {height_without_ghost}, got {height_with_ghost}"
+        );
+        assert_eq!(height_with_ghost, 7);
+
+        let backend = ratatui::backend::TestBackend::new(20, height_with_ghost);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, height_with_ghost);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert_eq!(cursor, ratatui::layout::Position { x: 10, y: 4 });
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        let before_cursor = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x - 1, cursor.y))
+            .expect("before cursor cell");
+        assert_eq!(before_cursor.symbol(), "t");
+        assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+
+        insta::assert_snapshot!(
+            "ghost_text_multiline_with_wrapped_earlier_line",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn snapshot_ghost_text_scroll_overflow_keeps_cursor_visible() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "first line");
+        input.input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_str(&mut input, "edit src/front");
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+
+        let constrained_height = 4;
+        let backend = ratatui::backend::TestBackend::new(20, constrained_height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, constrained_height);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert_eq!(cursor, ratatui::layout::Position { x: 10, y: 2 });
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        let before_cursor = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x - 1, cursor.y))
+            .expect("before cursor cell");
+        assert_eq!(before_cursor.symbol(), "t");
+        assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+
+        insta::assert_snapshot!(
+            "ghost_text_scroll_overflow_keeps_cursor_visible",
+            terminal.backend()
+        );
     }
 }

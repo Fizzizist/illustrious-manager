@@ -1,0 +1,7 @@
+---
+source: src/frontend/tui/input_area.rs
+expression: terminal.backend()
+---
+"┌ -- INSERT -- ────────────────────────┐"
+"│日本語 src/frontend/                  │" Hidden by multi-width symbols: [(2, " "), (4, " "), (6, " ")]
+"└──────────────────────────────────────┘"

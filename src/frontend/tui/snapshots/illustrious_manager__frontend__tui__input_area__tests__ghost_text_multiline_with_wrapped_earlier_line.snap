@@ -1,0 +1,11 @@
+---
+source: src/frontend/tui/input_area.rs
+expression: terminal.backend()
+---
+"┌ -- INSERT -- ────┐"
+"│first line wraps  │"
+"│here              │"
+"│edit              │"
+"│src/frontend/tui/c│"
+"│ompletion.rs      │"
+"└──────────────────┘"

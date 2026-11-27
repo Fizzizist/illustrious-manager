@@ -74,6 +74,10 @@ impl CommandRegistry {
         self.commands.push(cmd);
     }
 
+    pub fn command_names(&self) -> Vec<&str> {
+        self.commands.iter().map(|c| c.name()).collect()
+    }
+
     /// Dispatch a user input string. Returns `Passthrough` for non-slash input
     /// and for unrecognised slash commands, so the caller can forward to the LLM.
     pub async fn dispatch(
@@ -1626,5 +1630,22 @@ mod tests {
                 .any(|e| e.role == ConversationRole::Info && e.content.contains("Chat mode OFF")),
             "should show OFF message"
         );
+    }
+
+    #[test]
+    fn command_registry_exposes_registered_names() {
+        let empty = CommandRegistry::new();
+        assert!(empty.command_names().is_empty());
+
+        let registry = default_registry();
+        let names = registry.command_names();
+        for expected in [
+            "sessions", "model", "tasks", "compact", "new", "role", "chat", "bash", "config",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected command `{expected}` in registered names: {names:?}"
+            );
+        }
     }
 }
