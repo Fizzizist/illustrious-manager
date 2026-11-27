@@ -8673,4 +8673,66 @@ mod tests {
             "expected ResponseComplete(\"recovered\"); got {events:?}"
         );
     }
+
+    #[tokio::test]
+    async fn agent_skill_names_empty_by_default() {
+        let backend = SequencedBackend::new(vec![]);
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+        let agent = Agent::new(Box::new(backend), config, test_session_arc().await).await;
+
+        assert!(
+            agent.skill_names().is_empty(),
+            "newly constructed agent should have no skill names"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_skill_names_sorted_after_with_skills() {
+        let config = RequestConfig {
+            model: "test".to_string(),
+            max_tokens: 100,
+            ..Default::default()
+        };
+
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "zebra".to_string(),
+            std::path::PathBuf::from("/fake/skills/zebra/SKILL.md"),
+        );
+        skills.insert(
+            "alpha".to_string(),
+            std::path::PathBuf::from("/fake/skills/alpha/SKILL.md"),
+        );
+        skills.insert(
+            "dg-plan".to_string(),
+            std::path::PathBuf::from("/fake/skills/dg-plan/SKILL.md"),
+        );
+
+        let agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config.clone(),
+            test_session_arc().await,
+        )
+        .await
+        .with_skills(&skills);
+
+        assert_eq!(agent.skill_names(), &["alpha", "dg-plan", "zebra"]);
+
+        let empty_agent = Agent::new(
+            Box::new(SequencedBackend::new(vec![])),
+            config,
+            test_session_arc().await,
+        )
+        .await
+        .with_skills(&std::collections::HashMap::new());
+
+        assert!(
+            empty_agent.skill_names().is_empty(),
+            "with_skills with an empty map should keep skill_names empty"
+        );
+    }
 }

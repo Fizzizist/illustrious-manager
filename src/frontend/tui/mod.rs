@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod completion;
 pub mod conversation_area;
 pub mod diff;
 pub mod input_area;

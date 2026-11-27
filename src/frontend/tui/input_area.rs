@@ -1178,4 +1178,334 @@ mod tests {
 
         insta::assert_snapshot!("render_tasks_picker", terminal.backend());
     }
+
+    fn type_str(input: &mut InputArea, s: &str) {
+        for c in s.chars() {
+            input.input(char_key(c));
+        }
+    }
+
+    fn row_text(
+        backend: &ratatui::backend::TestBackend,
+        y: u16,
+        x_start: u16,
+        x_end: u16,
+    ) -> String {
+        let buf = backend.buffer();
+        let mut out = String::new();
+        for x in x_start..x_end {
+            if let Some(cell) = buf.cell((x, y)) {
+                out.push_str(cell.symbol());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn right_arrow_accepts_suggestion_in_insert_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+        assert_eq!(input.suggestion(), Some("rontend/"));
+
+        let consumed = input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(input.text(), "src/frontend/");
+        assert_eq!(input.cursor(), (0, 13));
+        assert_eq!(input.suggestion(), None);
+        assert!(!input.accept_suggestion());
+
+        input.set_suggestion(Some(String::new()));
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn right_arrow_moves_cursor_normally_when_no_suggestion_or_in_normal_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "abcd");
+        assert_eq!(input.cursor(), (0, 4));
+
+        input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(input.cursor(), (0, 2));
+
+        let consumed = input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(consumed);
+        assert_eq!(input.cursor(), (0, 3));
+        assert_eq!(input.text(), "abcd");
+
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.vim_mode(), VimMode::Normal);
+        input.input(char_key('h'));
+        let normal_col = input.cursor().1;
+
+        input.set_suggestion(Some("xyz".to_string()));
+        input.input(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(input.text(), "abcd");
+        assert_eq!(input.cursor(), (0, normal_col + 1));
+    }
+
+    #[test]
+    fn typing_matching_char_trims_suggestion_and_mismatch_clears_it() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        input.input(char_key('r'));
+        assert_eq!(input.text(), "src/fr");
+        assert_eq!(input.suggestion(), Some("ontend/"));
+
+        input.input(char_key('x'));
+        assert_eq!(input.text(), "src/frx");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("z".to_string()));
+        input.input(char_key('z'));
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("abc".to_string()));
+        input.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn suggestion_clears_on_escape_clear_set_text_paste_and_mode_change() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/");
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(input.suggestion(), None);
+
+        input.reset_to_insert();
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.clear();
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.set_text("other");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.insert_paste(" pasted");
+        assert_eq!(input.suggestion(), None);
+
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.set_mode(AppMode::Streaming);
+        assert_eq!(input.suggestion(), None);
+
+        input.set_mode(AppMode::Editing);
+        input.set_suggestion(Some("main.rs".to_string()));
+        input.reset_to_insert();
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn ghost_text_hidden_when_disabled_or_not_insert_mode() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, true, false);
+            })
+            .expect("draw");
+
+        let rendered = row_text(terminal.backend(), 1, 1, 39);
+        assert_eq!(rendered.trim_end(), "src/f");
+        for x in 1..39 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("interior cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+
+        input.input(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        input.set_suggestion(Some("rontend/".to_string()));
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let rendered_normal = row_text(terminal.backend(), 1, 1, 39);
+        assert_eq!(rendered_normal.trim_end(), "src/f");
+        for x in 1..39 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("interior cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+    }
+
+    #[test]
+    fn snapshot_ghost_text_inline_at_eol() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        for x in 1..6 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("typed cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(row_text(terminal.backend(), 1, 6, 14), "rontend/");
+        for x in 6..14 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 5, y: 1 }
+        );
+
+        insta::assert_snapshot!("ghost_text_inline_at_eol", terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_ghost_text_mid_line_before_whitespace() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "edit src/f please");
+        for _ in 0..7 {
+            input.input(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        }
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        assert_eq!(row_text(terminal.backend(), 1, 1, 11), "edit src/f");
+        assert_eq!(row_text(terminal.backend(), 1, 11, 19), "rontend/");
+        assert_eq!(row_text(terminal.backend(), 1, 19, 26), " please");
+        for x in 11..19 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        for x in 19..26 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("trailing cell");
+            assert_ne!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 10, y: 1 }
+        );
+
+        insta::assert_snapshot!("ghost_text_mid_line_before_whitespace", terminal.backend());
+    }
+
+    #[test]
+    fn snapshot_ghost_text_wrapping_updates_height_and_cursor() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "edit src/front");
+        input.set_suggestion(Some("end/tui/completion.rs".to_string()));
+
+        let height = input.height_for_width(20, 24);
+        assert!(
+            height > MIN_HEIGHT,
+            "wrapped ghost text should grow height > {MIN_HEIGHT}, got {height}"
+        );
+
+        let backend = ratatui::backend::TestBackend::new(20, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 20, height);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        let cursor = terminal.get_cursor_position().expect("cursor position");
+        assert!(cursor.y >= 1 && cursor.y < height - 1);
+        let first_ghost = terminal
+            .backend()
+            .buffer()
+            .cell((cursor.x, cursor.y))
+            .expect("cursor cell");
+        assert_eq!(first_ghost.symbol(), "e");
+        assert_eq!(first_ghost.fg, ratatui::style::Color::DarkGray);
+        if cursor.x > 1 {
+            let before_cursor = terminal
+                .backend()
+                .buffer()
+                .cell((cursor.x - 1, cursor.y))
+                .expect("before cursor cell");
+            assert_eq!(before_cursor.symbol(), "t");
+            assert_ne!(before_cursor.fg, ratatui::style::Color::DarkGray);
+        }
+
+        insta::assert_snapshot!(
+            "ghost_text_wrapping_updates_height_and_cursor",
+            terminal.backend()
+        );
+    }
+
+    #[test]
+    fn snapshot_ghost_text_with_unicode_prefix() {
+        let mut input = InputArea::new();
+        type_str(&mut input, "日本語 src/f");
+        input.set_suggestion(Some("rontend/".to_string()));
+
+        let backend = ratatui::backend::TestBackend::new(40, MIN_HEIGHT);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal creation");
+        terminal
+            .draw(|frame| {
+                let area = ratatui::layout::Rect::new(0, 0, 40, MIN_HEIGHT);
+                input.render(frame, area, false, false);
+            })
+            .expect("draw");
+
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor position"),
+            ratatui::layout::Position { x: 1 + 12, y: 1 }
+        );
+        assert_eq!(row_text(terminal.backend(), 1, 13, 21), "rontend/");
+        for x in 13..21 {
+            let cell = terminal
+                .backend()
+                .buffer()
+                .cell((x, 1))
+                .expect("ghost cell");
+            assert_eq!(cell.fg, ratatui::style::Color::DarkGray);
+        }
+
+        insta::assert_snapshot!("ghost_text_with_unicode_prefix", terminal.backend());
+    }
 }

@@ -1627,4 +1627,21 @@ mod tests {
             "should show OFF message"
         );
     }
+
+    #[test]
+    fn command_registry_exposes_registered_names() {
+        let empty = CommandRegistry::new();
+        assert!(empty.command_names().is_empty());
+
+        let registry = default_registry();
+        let names = registry.command_names();
+        for expected in [
+            "sessions", "model", "tasks", "compact", "new", "role", "chat", "bash", "config",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "expected command `{expected}` in registered names: {names:?}"
+            );
+        }
+    }
 }
